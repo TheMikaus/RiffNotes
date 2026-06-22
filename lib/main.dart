@@ -35,7 +35,9 @@ class _LibraryScreenState extends State<LibraryScreen> {
 
   Future<void> _chooseBandFolder() async {
     final selection = await FilePicker.platform.getDirectoryPath(dialogTitle: 'Choose your Band Folder');
-    if (selection == null) return;
+    if (selection == null) {
+      return;
+    }
     setState(() => _bandFolder = selection);
     final practices = await _activity.run('Scanning practice folders', (update) async {
       update(null, 'Looking for practice folders…');
@@ -43,10 +45,12 @@ class _LibraryScreenState extends State<LibraryScreen> {
       update(1, '${found.length} practices ready');
       return found;
     });
-    if (mounted) setState(() {
-      _practices = practices;
-      _selected = practices.isEmpty ? null : practices.first;
-    });
+    if (mounted) {
+      setState(() {
+        _practices = practices;
+        _selected = practices.isEmpty ? null : practices.first;
+      });
+    }
   }
 
   @override
@@ -143,4 +147,3 @@ class _ActivityStrip extends StatelessWidget {
     );
   }
 }
-
