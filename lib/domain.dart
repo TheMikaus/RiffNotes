@@ -80,6 +80,8 @@ class PracticeRepository {
     }
   }
 
-  String _stableId(File file) => '${file.statSync().modified.millisecondsSinceEpoch}-${file.lengthSync()}-${path.basename(file.path)}';
+  // A fallback identity must not contain the filename: rename operations are
+  // allowed to change it without detaching portable notes. The full metadata
+  // writer introduced with safe rename persists this value as a UUID.
+  String _stableId(File file) => '${file.statSync().modified.millisecondsSinceEpoch}-${file.lengthSync()}';
 }
-
