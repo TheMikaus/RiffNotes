@@ -158,7 +158,11 @@ class _RecordingList extends StatelessWidget {
                   selected: selected?.id == recording.id,
                   leading: Icon(recording.isBestTake ? Icons.star : Icons.audiotrack, color: recording.isBestTake ? Colors.amber : null),
                   title: Text(recording.title ?? recording.filename),
-                  subtitle: Text(recording.title == null ? recording.filename : recording.filename),
+                  subtitle: Text(
+                    recording.title == null
+                        ? _fileDetails(recording)
+                        : '${recording.filename} • ${_fileDetails(recording)}',
+                  ),
                   trailing: Text(recording.extension.replaceFirst('.', '').toUpperCase()),
                   onTap: () => onSelect(recording),
                 )),
@@ -168,6 +172,18 @@ class _RecordingList extends StatelessWidget {
         _PlayerPanel(controller: audio),
       ],
     );
+  }
+
+  String _fileDetails(Recording recording) {
+    try {
+      final bytes = recording.file.lengthSync();
+      if (bytes < 1024 * 1024) {
+        return '${(bytes / 1024).toStringAsFixed(0)} KB';
+      }
+      return '${(bytes / (1024 * 1024)).toStringAsFixed(1)} MB';
+    } on FileSystemException {
+      return 'File unavailable';
+    }
   }
 }
 
@@ -199,29 +215,39 @@ class _PlayerPanel extends StatelessWidget {
                     padding: const EdgeInsets.only(top: 8),
                     child: Text(controller.error!, style: TextStyle(color: Theme.of(context).colorScheme.error)),
                   ),
-                  Row(children: [
-                    IconButton(
-                      tooltip: controller.isPlaying ? 'Pause' : 'Play',
-                      iconSize: 32,
-                      onPressed: canPlay ? controller.togglePlayback : null,
-                      icon: Icon(controller.isPlaying ? Icons.pause_circle : Icons.play_circle),
+                  SliderTheme(
+                    data: SliderTheme.of(context).copyWith(
+                      activeTrackColor: Theme.of(context).colorScheme.primary,
+                      inactiveTrackColor: Theme.of(context).colorScheme.outline,
+                      disabledActiveTrackColor: Theme.of(context).colorScheme.primary.withValues(alpha: 0.45),
+                      disabledInactiveTrackColor: Theme.of(context).colorScheme.outline.withValues(alpha: 0.7),
+                      thumbColor: Theme.of(context).colorScheme.primary,
+                      trackHeight: 5,
                     ),
-                    IconButton(
-                      tooltip: 'Stop',
-                      onPressed: canPlay ? controller.stop : null,
-                      icon: const Icon(Icons.stop_circle_outlined),
-                    ),
-                    Text(_format(position)),
-                    Expanded(
-                      child: Slider(
-                        value: duration == Duration.zero ? 0 : position.inMilliseconds / duration.inMilliseconds,
-                        onChanged: canPlay && duration > Duration.zero
-                            ? (value) => controller.seek(Duration(milliseconds: (value * duration.inMilliseconds).round()))
-                            : null,
+                    child: Row(children: [
+                      IconButton(
+                        tooltip: controller.isPlaying ? 'Pause' : 'Play',
+                        iconSize: 32,
+                        onPressed: canPlay ? controller.togglePlayback : null,
+                        icon: Icon(controller.isPlaying ? Icons.pause_circle : Icons.play_circle),
                       ),
-                    ),
-                    Text(_format(duration)),
-                  ]),
+                      IconButton(
+                        tooltip: 'Stop',
+                        onPressed: canPlay ? controller.stop : null,
+                        icon: const Icon(Icons.stop_circle_outlined),
+                      ),
+                      Text(_format(position)),
+                      Expanded(
+                        child: Slider(
+                          value: duration == Duration.zero ? 0 : position.inMilliseconds / duration.inMilliseconds,
+                          onChanged: canPlay && duration > Duration.zero
+                              ? (value) => controller.seek(Duration(milliseconds: (value * duration.inMilliseconds).round()))
+                              : null,
+                        ),
+                      ),
+                      Text(_format(duration)),
+                    ]),
+                  ),
                 ],
               ),
             ),
