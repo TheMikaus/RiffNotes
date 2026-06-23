@@ -12,6 +12,7 @@ dependencies:
   file_picker: ^8.1.7
   path: ^1.9.0
   just_audio: ^0.10.5
+  just_audio_windows: ^0.2.3
 
 dev_dependencies:
   flutter_test:
