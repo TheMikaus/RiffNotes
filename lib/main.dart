@@ -128,6 +128,86 @@ class _LibraryScreenState extends State<LibraryScreen> {
     }
   }
 
+  Future<void> _previewAndApplyRename() async {
+    final practice = _selected;
+    if (practice == null) {
+      return;
+    }
+    final proposals = _repository.planRename(practice);
+    if (proposals.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Title one or more takes before batch renaming.')));
+      return;
+    }
+    final hasIssues = proposals.any((proposal) => proposal.issue != null);
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Preview batch rename'),
+        content: SizedBox(
+          width: 700,
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(hasIssues ? 'Resolve the listed conflicts before renaming.' : 'Files keep their audio type and metadata stays linked.'),
+              const SizedBox(height: 12),
+              Flexible(
+                child: ListView.builder(
+                  shrinkWrap: true,
+                  itemCount: proposals.length,
+                  itemBuilder: (context, index) {
+                    final proposal = proposals[index];
+                    return ListTile(
+                      dense: true,
+                      title: Text('${proposal.recording.filename} → ${proposal.targetFilename}'),
+                      subtitle: proposal.issue == null ? null : Text(proposal.issue!, style: TextStyle(color: Theme.of(context).colorScheme.error)),
+                    );
+                  },
+                ),
+              ),
+            ],
+          ),
+        ),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('Cancel')),
+          FilledButton(
+            onPressed: hasIssues ? null : () => Navigator.pop(context, true),
+            child: const Text('Rename files'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true) {
+      return;
+    }
+    try {
+      await _audio.stop();
+      final updatedPractice = await _activity.run('Renaming takes', (update) async {
+        update(null, 'Safely renaming ${proposals.where((proposal) => proposal.willRename).length} files…');
+        final result = await _repository.applyRename(practice, proposals);
+        update(1, 'Rename complete');
+        return result;
+      });
+      if (mounted) {
+        setState(() {
+          _selected = updatedPractice;
+          _selectedRecording = null;
+          _practices = _practices
+              .map((item) => item.directory.path == updatedPractice.directory.path ? updatedPractice : item)
+              .toList(growable: false);
+        });
+      }
+    } on StateError catch (error) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(error.message)));
+      }
+    } on FileSystemException catch (error) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Rename failed: ${error.message}')));
+      }
+    }
+  }
+
   @override
   Widget build(BuildContext context) => AnimatedBuilder(
         animation: _activity,
@@ -158,6 +238,7 @@ class _LibraryScreenState extends State<LibraryScreen> {
                     title: recording.title,
                     isBestTake: isBestTake,
                   ),
+                  onBatchRename: _previewAndApplyRename,
                   audio: _audio,
                 ),
               ),
@@ -200,6 +281,7 @@ class _RecordingList extends StatelessWidget {
     required this.onSelect,
     required this.onEditTitle,
     required this.onToggleBest,
+    required this.onBatchRename,
     required this.audio,
   });
   final PracticeFolder? practice;
@@ -208,6 +290,7 @@ class _RecordingList extends StatelessWidget {
   final ValueChanged<Recording> onSelect;
   final ValueChanged<Recording> onEditTitle;
   final Future<void> Function(Recording recording, bool isBestTake) onToggleBest;
+  final Future<void> Function() onBatchRename;
   final AudioController audio;
 
   @override
@@ -220,8 +303,14 @@ class _RecordingList extends StatelessWidget {
             padding: const EdgeInsets.all(24),
             children: [
               Text(practice!.name, style: Theme.of(context).textTheme.headlineMedium),
-              const SizedBox(height: 6),
-              const Text('Select a take to load it into the player.'),
+              Row(children: [
+                const Expanded(child: Text('Select a take to load it into the player.')),
+                FilledButton.icon(
+                  onPressed: onBatchRename,
+                  icon: const Icon(Icons.drive_file_rename_outline),
+                  label: const Text('Batch rename'),
+                ),
+              ]),
               const SizedBox(height: 18),
               for (final recording in practice!.recordings)
                 Card(child: ListTile(

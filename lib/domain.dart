@@ -55,6 +55,20 @@ class Recording {
       );
 }
 
+class RenameProposal {
+  const RenameProposal({
+    required this.recording,
+    required this.targetFilename,
+    this.issue,
+  });
+
+  final Recording recording;
+  final String targetFilename;
+  final String? issue;
+
+  bool get willRename => issue == null && recording.filename != targetFilename;
+}
+
 class PracticeRepository {
   static const _catalogueName = 'library.riffnotes.json';
 
@@ -128,6 +142,108 @@ class PracticeRepository {
     );
   }
 
+  List<RenameProposal> planRename(PracticeFolder practice) {
+    final proposals = <RenameProposal>[];
+    final takesPerTitle = <String, int>{};
+    var sequence = 0;
+
+    for (final recording in practice.recordings) {
+      final title = recording.title?.trim();
+      if (title == null || title.isEmpty) {
+        continue;
+      }
+      sequence += 1;
+      final normalizedTitle = _filenameSafeTitle(title);
+      final take = (takesPerTitle[normalizedTitle] ?? 0) + 1;
+      takesPerTitle[normalizedTitle] = take;
+      proposals.add(RenameProposal(
+        recording: recording,
+        targetFilename: '${sequence.toString().padLeft(2, '0')}_${normalizedTitle}_Take$take${recording.extension}',
+      ));
+    }
+
+    final sources = proposals.map((item) => item.recording.filename.toLowerCase()).toSet();
+    final targets = <String, int>{};
+    for (var index = 0; index < proposals.length; index += 1) {
+      final target = proposals[index].targetFilename.toLowerCase();
+      targets[target] = (targets[target] ?? 0) + 1;
+    }
+
+    return proposals.map((proposal) {
+      final target = proposal.targetFilename.toLowerCase();
+      final targetFile = File(path.join(practice.directory.path, proposal.targetFilename));
+      if ((targets[target] ?? 0) > 1) {
+        return RenameProposal(recording: proposal.recording, targetFilename: proposal.targetFilename, issue: 'Duplicate target name');
+      }
+      if (targetFile.existsSync() && !sources.contains(target)) {
+        return RenameProposal(recording: proposal.recording, targetFilename: proposal.targetFilename, issue: 'A different file already uses this name');
+      }
+      return proposal;
+    }).toList(growable: false);
+  }
+
+  Future<PracticeFolder> applyRename(PracticeFolder practice, List<RenameProposal> proposals) async {
+    final active = proposals.where((proposal) => proposal.willRename).toList(growable: false);
+    if (active.isEmpty) {
+      return practice;
+    }
+    final blocked = proposals.where((proposal) => proposal.issue != null).toList(growable: false);
+    if (blocked.isNotEmpty) {
+      throw StateError('Resolve rename conflicts before applying the rename.');
+    }
+
+    final catalogueFile = File(path.join(practice.directory.path, _catalogueName));
+    final originalCatalogue = await catalogueFile.exists() ? await catalogueFile.readAsString() : null;
+    final catalogue = await _loadCatalogue(practice.directory);
+    final temporaryFiles = <RenameProposal, File>{};
+    final completed = <RenameProposal>[];
+
+    try {
+      for (final proposal in active) {
+        final temporary = File(path.join(
+          practice.directory.path,
+          '.riffnotes-rename-${proposal.recording.id}-${DateTime.now().microsecondsSinceEpoch}${proposal.recording.extension}',
+        ));
+        temporaryFiles[proposal] = temporary;
+        await proposal.recording.file.rename(temporary.path);
+      }
+      for (final proposal in active) {
+        final target = File(path.join(practice.directory.path, proposal.targetFilename));
+        await temporaryFiles[proposal]!.rename(target.path);
+        completed.add(proposal);
+        final existing = catalogue.remove(proposal.recording.filename) as Map<String, dynamic>?;
+        catalogue[proposal.targetFilename] = existing ?? <String, dynamic>{
+          'id': proposal.recording.id,
+          'title': proposal.recording.title,
+          'isBestTake': proposal.recording.isBestTake,
+        };
+      }
+      await _writeCatalogue(practice.directory, catalogue);
+    } catch (_) {
+      for (final proposal in completed.reversed) {
+        final target = File(path.join(practice.directory.path, proposal.targetFilename));
+        if (await target.exists()) {
+          await target.rename(temporaryFiles[proposal]!.path);
+        }
+      }
+      for (final proposal in active.reversed) {
+        final temporary = temporaryFiles[proposal]!;
+        if (await temporary.exists()) {
+          await temporary.rename(proposal.recording.file.path);
+        }
+      }
+      if (originalCatalogue == null) {
+        if (await catalogueFile.exists()) {
+          await catalogueFile.delete();
+        }
+      } else {
+        await catalogueFile.writeAsString(originalCatalogue, flush: true);
+      }
+      rethrow;
+    }
+    return openPractice(practice.directory);
+  }
+
   Future<Map<String, dynamic>> _loadCatalogue(Directory folder) async {
     final file = File(path.join(folder.path, _catalogueName));
     if (!await file.exists()) return <String, dynamic>{};
@@ -162,4 +278,14 @@ class PracticeRepository {
   }
 
   String _hex(List<int> bytes) => bytes.map((value) => value.toRadixString(16).padLeft(2, '0')).join();
+
+  String _filenameSafeTitle(String title) {
+    final sanitized = title
+        .replaceAll(RegExp(r'[<>:"/\\|?*\x00-\x1F]'), '')
+        .trim()
+        .replaceAll(RegExp(r'\s+'), '_')
+        .replaceAll(RegExp(r'_+'), '_')
+        .replaceAll(RegExp(r'[. ]+$'), '');
+    return sanitized.isEmpty ? 'Untitled' : sanitized;
+  }
 }

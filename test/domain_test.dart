@@ -38,4 +38,24 @@ void main() {
     expect(reloaded.recordings.single.id, initial.recordings.single.id);
     expect(File('${folder.path}${Platform.pathSeparator}library.riffnotes.json').existsSync(), isTrue);
   });
+
+  test('renames titled takes and keeps metadata attached', () async {
+    final folder = await Directory.systemTemp.createTemp('riffnotes-rename-');
+    addTearDown(() => folder.delete(recursive: true));
+    await File('${folder.path}${Platform.pathSeparator}first.wav').writeAsBytes([1]);
+    await File('${folder.path}${Platform.pathSeparator}second.mp3').writeAsBytes([2]);
+    final repository = PracticeRepository();
+    var practice = await repository.openPractice(folder);
+    practice = await repository.updateRecording(practice, practice.recordings[0], title: 'My Song', isBestTake: true);
+    practice = await repository.updateRecording(practice, practice.recordings[1], title: 'My Song', isBestTake: false);
+
+    final plan = repository.planRename(practice);
+    expect(plan.map((proposal) => proposal.targetFilename), ['01_My_Song_Take1.wav', '02_My_Song_Take2.mp3']);
+    final renamed = await repository.applyRename(practice, plan);
+
+    expect(File('${folder.path}${Platform.pathSeparator}01_My_Song_Take1.wav').existsSync(), isTrue);
+    expect(File('${folder.path}${Platform.pathSeparator}02_My_Song_Take2.mp3').existsSync(), isTrue);
+    expect(renamed.recordings[0].isBestTake, isTrue);
+    expect(renamed.recordings[0].title, 'My Song');
+  });
 }
