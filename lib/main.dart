@@ -4,6 +4,7 @@ import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 
 import 'activity.dart';
+import 'app_preferences.dart';
 import 'audio_controller.dart';
 import 'domain.dart';
 
@@ -31,6 +32,7 @@ class _LibraryScreenState extends State<LibraryScreen> {
   final _repository = PracticeRepository();
   final _activity = ActivityQueue();
   late final AudioController _audio;
+  late final AppPreferences _preferences;
   List<PracticeFolder> _practices = const [];
   PracticeFolder? _selected;
   Recording? _selectedRecording;
@@ -40,6 +42,8 @@ class _LibraryScreenState extends State<LibraryScreen> {
   void initState() {
     super.initState();
     _audio = AudioController();
+    _preferences = AppPreferences();
+    _restorePreferences();
   }
 
   @override
@@ -53,6 +57,24 @@ class _LibraryScreenState extends State<LibraryScreen> {
     if (selection == null) {
       return;
     }
+    await _openBandFolder(selection, remember: true);
+  }
+
+  Future<void> _restorePreferences() async {
+    await _preferences.load();
+    final savedFolder = _preferences.bandFolder;
+    if (savedFolder != null && await Directory(savedFolder).exists()) {
+      await _openBandFolder(savedFolder);
+    }
+  }
+
+  Future<void> _openBandFolder(String selection, {bool remember = false}) async {
+    if (remember) {
+      await _preferences.setBandFolder(selection);
+    }
+    if (!mounted) {
+      return;
+    }
     setState(() => _bandFolder = selection);
     final practices = await _activity.run('Scanning practice folders', (update) async {
       update(null, 'Looking for practice folders…');
@@ -64,8 +86,67 @@ class _LibraryScreenState extends State<LibraryScreen> {
       setState(() {
         _practices = practices;
         _selected = practices.isEmpty ? null : practices.first;
+        _selectedRecording = null;
       });
+      if (_preferences.autoPlayOnPracticeSelection && practices.isNotEmpty && practices.first.recordings.isNotEmpty) {
+        await _selectRecording(practices.first.recordings.first, autoPlay: true);
+      }
     }
+  }
+
+  Future<void> _selectPractice(PracticeFolder practice) async {
+    setState(() {
+      _selected = practice;
+      _selectedRecording = null;
+    });
+    if (_preferences.autoPlayOnPracticeSelection && practice.recordings.isNotEmpty) {
+      await _selectRecording(practice.recordings.first, autoPlay: true);
+    }
+  }
+
+  Future<void> _selectRecording(Recording recording, {bool autoPlay = false}) async {
+    setState(() => _selectedRecording = recording);
+    await _audio.load(recording, autoPlay: autoPlay);
+  }
+
+  Future<void> _showPreferences() async {
+    await showDialog<void>(
+      context: context,
+      builder: (context) => StatefulBuilder(
+        builder: (context, setDialogState) => AlertDialog(
+          title: const Text('Preferences'),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              ListTile(
+                contentPadding: EdgeInsets.zero,
+                title: const Text('Remembered Band Folder'),
+                subtitle: Text(_preferences.bandFolder ?? 'None selected'),
+              ),
+              SwitchListTile(
+                contentPadding: EdgeInsets.zero,
+                title: const Text('Play when I select a take'),
+                value: _preferences.autoPlayOnTakeSelection,
+                onChanged: (value) async {
+                  await _preferences.setAutoPlayOnTakeSelection(value);
+                  setDialogState(() {});
+                },
+              ),
+              SwitchListTile(
+                contentPadding: EdgeInsets.zero,
+                title: const Text('Play first take when I open a practice'),
+                value: _preferences.autoPlayOnPracticeSelection,
+                onChanged: (value) async {
+                  await _preferences.setAutoPlayOnPracticeSelection(value);
+                  setDialogState(() {});
+                },
+              ),
+            ],
+          ),
+          actions: [TextButton(onPressed: () => Navigator.pop(context), child: const Text('Done'))],
+        ),
+      ),
+    );
   }
 
   Future<void> _updateRecording(
@@ -216,22 +297,23 @@ class _LibraryScreenState extends State<LibraryScreen> {
             title: const Text('RiffNotes'),
             actions: [
               TextButton.icon(onPressed: _chooseBandFolder, icon: const Icon(Icons.folder_open), label: const Text('Band Folder')),
+              IconButton(tooltip: 'Preferences', onPressed: _showPreferences, icon: const Icon(Icons.settings_outlined)),
             ],
           ),
           body: Column(children: [
             _ActivityStrip(activities: _activity.activities),
             Expanded(child: Row(children: [
-              SizedBox(width: 260, child: _PracticeList(practices: _practices, selected: _selected, onSelect: (practice) => setState(() => _selected = practice))),
+              SizedBox(width: 260, child: _PracticeList(practices: _practices, selected: _selected, onSelect: _selectPractice)),
               const VerticalDivider(width: 1),
               Expanded(
                 child: _RecordingList(
                   practice: _selected,
                   bandFolder: _bandFolder,
                   selected: _selectedRecording,
-                  onSelect: (recording) {
-                    setState(() => _selectedRecording = recording);
-                    _audio.load(recording);
-                  },
+                  onSelect: (recording) => _selectRecording(
+                    recording,
+                    autoPlay: _preferences.autoPlayOnTakeSelection,
+                  ),
                   onEditTitle: _editTitle,
                   onToggleBest: (recording, isBestTake) => _updateRecording(
                     recording,

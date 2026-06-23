@@ -35,6 +35,7 @@ class AudioController extends ChangeNotifier {
   bool _isPlaying = false;
   bool _isLoading = false;
   String? _error;
+  int _loadRequest = 0;
 
   Recording? get recording => _recording;
   Duration get position => _position;
@@ -43,7 +44,8 @@ class AudioController extends ChangeNotifier {
   bool get isLoading => _isLoading;
   String? get error => _error;
 
-  Future<void> load(Recording recording) async {
+  Future<void> load(Recording recording, {bool autoPlay = false}) async {
+    final request = ++_loadRequest;
     _recording = recording;
     _position = Duration.zero;
     _duration = null;
@@ -51,15 +53,28 @@ class AudioController extends ChangeNotifier {
     _isLoading = true;
     notifyListeners();
     try {
+      await _player.stop();
       final duration = await _player.setFilePath(recording.file.path);
-      _duration = duration;
+      if (request != _loadRequest) {
+        return;
+      }
+      _duration = duration ?? _player.duration;
+      if (autoPlay) {
+        await _player.play();
+      }
     } on PlayerException catch (error) {
-      _error = 'Unable to load ${recording.filename}: ${error.message}';
+      if (request == _loadRequest) {
+        _error = 'Unable to load ${recording.filename}: ${error.message}';
+      }
     } catch (_) {
-      _error = 'Unable to load ${recording.filename}. Check that the file is a valid WAV or MP3.';
+      if (request == _loadRequest) {
+        _error = 'Unable to load ${recording.filename}. Check that the file is a valid WAV or MP3.';
+      }
     } finally {
-      _isLoading = false;
-      notifyListeners();
+      if (request == _loadRequest) {
+        _isLoading = false;
+        notifyListeners();
+      }
     }
   }
 
