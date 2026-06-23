@@ -68,6 +68,66 @@ class _LibraryScreenState extends State<LibraryScreen> {
     }
   }
 
+  Future<void> _updateRecording(
+    Recording recording, {
+    required String? title,
+    required bool isBestTake,
+  }) async {
+    final practice = _selected;
+    if (practice == null) {
+      return;
+    }
+    final updatedPractice = await _activity.run('Saving take details', (update) async {
+      update(null, 'Saving ${recording.filename}…');
+      final result = await _repository.updateRecording(
+        practice,
+        recording,
+        title: title,
+        isBestTake: isBestTake,
+      );
+      update(1, 'Saved');
+      return result;
+    });
+    if (mounted) {
+      setState(() {
+        _selected = updatedPractice;
+        _practices = _practices
+            .map((item) => item.directory.path == updatedPractice.directory.path ? updatedPractice : item)
+            .toList(growable: false);
+        _selectedRecording = updatedPractice.recordings.where((item) => item.id == recording.id).firstOrNull;
+      });
+    }
+  }
+
+  Future<void> _editTitle(Recording recording) async {
+    final controller = TextEditingController(text: recording.title ?? '');
+    final title = await showDialog<String>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Title this take'),
+        content: TextField(
+          controller: controller,
+          autofocus: true,
+          decoration: const InputDecoration(labelText: 'Song or idea name'),
+          onSubmitted: (value) => Navigator.pop(context, value),
+        ),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(context), child: const Text('Cancel')),
+          FilledButton(onPressed: () => Navigator.pop(context, controller.text), child: const Text('Save')),
+        ],
+      ),
+    );
+    controller.dispose();
+    if (title != null) {
+      final cleaned = title.trim();
+      await _updateRecording(
+        recording,
+        title: cleaned.isEmpty ? null : cleaned,
+        isBestTake: recording.isBestTake,
+      );
+    }
+  }
+
   @override
   Widget build(BuildContext context) => AnimatedBuilder(
         animation: _activity,
@@ -92,6 +152,12 @@ class _LibraryScreenState extends State<LibraryScreen> {
                     setState(() => _selectedRecording = recording);
                     _audio.load(recording);
                   },
+                  onEditTitle: _editTitle,
+                  onToggleBest: (recording, isBestTake) => _updateRecording(
+                    recording,
+                    title: recording.title,
+                    isBestTake: isBestTake,
+                  ),
                   audio: _audio,
                 ),
               ),
@@ -132,12 +198,16 @@ class _RecordingList extends StatelessWidget {
     required this.bandFolder,
     required this.selected,
     required this.onSelect,
+    required this.onEditTitle,
+    required this.onToggleBest,
     required this.audio,
   });
   final PracticeFolder? practice;
   final String? bandFolder;
   final Recording? selected;
   final ValueChanged<Recording> onSelect;
+  final ValueChanged<Recording> onEditTitle;
+  final Future<void> Function(Recording recording, bool isBestTake) onToggleBest;
   final AudioController audio;
 
   @override
@@ -163,7 +233,23 @@ class _RecordingList extends StatelessWidget {
                         ? _fileDetails(recording)
                         : '${recording.filename} • ${_fileDetails(recording)}',
                   ),
-                  trailing: Text(recording.extension.replaceFirst('.', '').toUpperCase()),
+                  trailing: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      IconButton(
+                        tooltip: recording.isBestTake ? 'Remove Best Take' : 'Mark Best Take',
+                        icon: Icon(recording.isBestTake ? Icons.star : Icons.star_border),
+                        color: recording.isBestTake ? Colors.amber : null,
+                        onPressed: () => onToggleBest(recording, !recording.isBestTake),
+                      ),
+                      IconButton(
+                        tooltip: 'Title this take',
+                        icon: const Icon(Icons.edit_outlined),
+                        onPressed: () => onEditTitle(recording),
+                      ),
+                      Text(recording.extension.replaceFirst('.', '').toUpperCase()),
+                    ],
+                  ),
                   onTap: () => onSelect(recording),
                 )),
             ],
