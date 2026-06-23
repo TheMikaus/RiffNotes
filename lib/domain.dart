@@ -4,6 +4,17 @@ import 'dart:io';
 import 'package:path/path.dart' as path;
 
 const supportedAudioExtensions = {'.wav', '.wave', '.mp3'};
+const ignoredPracticeFolderNames = {
+  '.backup',
+  '.cache',
+  '.riffnotes-cache',
+  'cache',
+};
+
+bool isPracticeDirectory(Directory directory) {
+  final name = path.basename(directory.path).toLowerCase();
+  return !name.startsWith('.') && !ignoredPracticeFolderNames.contains(name);
+}
 
 class PracticeFolder {
   const PracticeFolder({required this.directory, required this.recordings});
@@ -44,7 +55,7 @@ class PracticeRepository {
   Future<List<PracticeFolder>> discoverBandFolder(Directory bandFolder) async {
     final practices = <PracticeFolder>[];
     await for (final entity in bandFolder.list()) {
-      if (entity is Directory) {
+      if (entity is Directory && isPracticeDirectory(entity)) {
         practices.add(await openPractice(entity));
       }
     }
