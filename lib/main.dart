@@ -10,6 +10,7 @@ import 'audio_processing.dart';
 import 'app_preferences.dart';
 import 'audio_controller.dart';
 import 'domain.dart';
+import 'sections.dart';
 import 'waveform.dart';
 import 'waveform_view.dart';
 
@@ -39,6 +40,7 @@ class LibraryScreen extends StatefulWidget {
 class _LibraryScreenState extends State<LibraryScreen> {
   final _repository = PracticeRepository();
   final _annotations = AnnotationRepository();
+  final _sectionsRepository = SongSectionRepository();
   final _activity = ActivityQueue();
   final _audioProcessing = AudioProcessingRepository();
   late final AudioController _audio;
@@ -48,10 +50,13 @@ class _LibraryScreenState extends State<LibraryScreen> {
   PracticeFolder? _selected;
   Recording? _selectedRecording;
   List<PracticeAnnotation> _notes = const [];
+  List<SongSection> _sections = const [];
   String? _bandFolder;
   double _volumeBoostDb = 0;
   int? _rangeStartMs;
   String? _rangeRecordingId;
+  int? _sectionStartMs;
+  String? _sectionRecordingId;
 
   @override
   void initState() {
@@ -134,6 +139,8 @@ class _LibraryScreenState extends State<LibraryScreen> {
       _selectedRecording = null;
       _rangeStartMs = null;
       _rangeRecordingId = null;
+      _sectionStartMs = null;
+      _sectionRecordingId = null;
     });
     _waveform.clear();
     await _preferences.rememberSelection(practice.name, null);
@@ -145,15 +152,26 @@ class _LibraryScreenState extends State<LibraryScreen> {
 
   Future<void> _selectRecording(Recording recording,
       {bool autoPlay = false}) async {
+    final rememberedBoost = _preferences.boostFor(recording.id);
     setState(() {
       _selectedRecording = recording;
-      _volumeBoostDb = 0;
+      _volumeBoostDb = rememberedBoost;
     });
     final practice = _selected;
     if (practice != null) {
       unawaited(_waveform.load(practice, recording));
     }
-    await _audio.load(recording, autoPlay: autoPlay);
+    File? playbackFile;
+    if (practice != null && rememberedBoost > 0) {
+      try {
+        playbackFile = await _audioProcessing.createBoostedPlaybackFile(
+            practice, recording, rememberedBoost);
+      } on StateError {
+        if (mounted) setState(() => _volumeBoostDb = 0);
+      }
+    }
+    await _audio.load(recording,
+        autoPlay: autoPlay, playbackFile: playbackFile);
     if (_selected != null)
       await _preferences.rememberSelection(_selected!.name, recording.id);
     await _refreshNotes(recording);
@@ -180,6 +198,7 @@ class _LibraryScreenState extends State<LibraryScreen> {
       });
       if (!mounted || _selectedRecording?.id != recording.id) return;
       setState(() => _volumeBoostDb = decibels);
+      await _preferences.setBoost(recording.id, decibels);
       await _audio.load(recording,
           playbackFile: source, autoPlay: resumePlaying);
       await _audio.seek(resumeAt);
@@ -363,25 +382,79 @@ class _LibraryScreenState extends State<LibraryScreen> {
     });
   }
 
+  void _startSection(Recording recording) {
+    if (_audio.duration == null || _audio.duration == Duration.zero) return;
+    setState(() {
+      _sectionStartMs = _audio.position.inMilliseconds;
+      _sectionRecordingId = recording.id;
+    });
+  }
+
   Future<void> _onWaveformSeek(double progress) async {
     final duration = _audio.duration;
     final recording = _audio.recording;
     if (duration == null || duration == Duration.zero || recording == null)
       return;
     final clickedMs = (duration.inMilliseconds * progress).round();
+    final sectionStart =
+        _sectionRecordingId == recording.id ? _sectionStartMs : null;
     final pendingStart =
         _rangeRecordingId == recording.id ? _rangeStartMs : null;
     await _audio.seek(Duration(milliseconds: clickedMs));
+    if (sectionStart != null) {
+      final startMs = sectionStart < clickedMs ? sectionStart : clickedMs;
+      final endMs = sectionStart < clickedMs ? clickedMs : sectionStart;
+      if (startMs != endMs) {
+        if (mounted) {
+          setState(() {
+            _sectionStartMs = null;
+            _sectionRecordingId = null;
+          });
+        }
+        await _addSection(recording, startMs, endMs);
+      }
+      return;
+    }
     if (pendingStart == null) return;
     final startMs = pendingStart < clickedMs ? pendingStart : clickedMs;
     final endMs = pendingStart < clickedMs ? clickedMs : pendingStart;
     if (startMs == endMs) return;
-    if (mounted)
+    if (mounted) {
       setState(() {
         _rangeStartMs = null;
         _rangeRecordingId = null;
       });
+    }
     await _addRangeAnnotation(recording, startMs, endMs);
+  }
+
+  Future<void> _addSection(Recording recording, int startMs, int endMs) async {
+    final practice = _selected;
+    if (practice == null) return;
+    final label = TextEditingController();
+    final accepted = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: Text('Song section: ${_formatMilliseconds(startMs)} – ${_formatMilliseconds(endMs)}'),
+        content: TextField(
+          controller: label,
+          autofocus: true,
+          decoration: const InputDecoration(labelText: 'Section name (Verse, Chorus, Bridge…)'),
+        ),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('Cancel')),
+          FilledButton(onPressed: () => Navigator.pop(context, true), child: const Text('Save section')),
+        ],
+      ),
+    );
+    if (accepted == true && label.text.trim().isNotEmpty) {
+      await _sectionsRepository.add(
+        practice.directory.path,
+        SongSection(recordingId: recording.id, startMs: startMs, endMs: endMs, label: label.text.trim()),
+      );
+      await _refreshSections(recording);
+    }
+    label.dispose();
   }
 
   Future<void> _addRangeAnnotation(
@@ -418,9 +491,19 @@ class _LibraryScreenState extends State<LibraryScreen> {
         endMs: endMs,
         text: text.text.trim(),
       );
-      await _refreshNotes(recording);
+    await _refreshNotes(recording);
+    await _refreshSections(recording);
     }
     text.dispose();
+  }
+
+  Future<void> _refreshSections(Recording recording) async {
+    final practice = _selected;
+    if (practice == null) return;
+    final sections = await _sectionsRepository.load(practice.directory.path);
+    if (mounted && _selectedRecording?.id == recording.id) {
+      setState(() => _sections = sections.where((section) => section.recordingId == recording.id).toList());
+    }
   }
 
   String _formatMilliseconds(int milliseconds) {
@@ -571,10 +654,12 @@ class _LibraryScreenState extends State<LibraryScreen> {
                   onBatchRename: _previewAndApplyRename,
                   onAddAnnotation: _addAnnotation,
                   onStartRangeNote: _startRangeNote,
+                  onStartSection: _startSection,
                   onWaveformSeek: _onWaveformSeek,
                   rangeStartMs: _rangeRecordingId == _selectedRecording?.id
                       ? _rangeStartMs
                       : null,
+                  sectionStartMs: _sectionRecordingId == _selectedRecording?.id ? _sectionStartMs : null,
                   volumeBoostDb: _volumeBoostDb,
                   onSetVolumeBoost: _setVolumeBoost,
                   notes: _notes,
@@ -628,8 +713,10 @@ class _RecordingList extends StatelessWidget {
     required this.onBatchRename,
     required this.onAddAnnotation,
     required this.onStartRangeNote,
+    required this.onStartSection,
     required this.onWaveformSeek,
     required this.rangeStartMs,
+    required this.sectionStartMs,
     required this.volumeBoostDb,
     required this.onSetVolumeBoost,
     required this.notes,
@@ -646,8 +733,10 @@ class _RecordingList extends StatelessWidget {
   final Future<void> Function() onBatchRename;
   final ValueChanged<Recording> onAddAnnotation;
   final ValueChanged<Recording> onStartRangeNote;
+  final ValueChanged<Recording> onStartSection;
   final ValueChanged<double> onWaveformSeek;
   final int? rangeStartMs;
+  final int? sectionStartMs;
   final double volumeBoostDb;
   final ValueChanged<double> onSetVolumeBoost;
   final List<PracticeAnnotation> notes;
@@ -726,8 +815,10 @@ class _RecordingList extends StatelessWidget {
           waveform: waveform,
           onAddAnnotation: onAddAnnotation,
           onStartRangeNote: onStartRangeNote,
+          onStartSection: onStartSection,
           onWaveformSeek: onWaveformSeek,
           rangeStartMs: rangeStartMs,
+          sectionStartMs: sectionStartMs,
           volumeBoostDb: volumeBoostDb,
           onSetVolumeBoost: onSetVolumeBoost,
           notes: notes,
@@ -755,8 +846,10 @@ class _PlayerPanel extends StatefulWidget {
     required this.waveform,
     required this.onAddAnnotation,
     required this.onStartRangeNote,
+    required this.onStartSection,
     required this.onWaveformSeek,
     required this.rangeStartMs,
+    required this.sectionStartMs,
     required this.volumeBoostDb,
     required this.onSetVolumeBoost,
     required this.notes,
@@ -765,8 +858,10 @@ class _PlayerPanel extends StatefulWidget {
   final WaveformController waveform;
   final ValueChanged<Recording> onAddAnnotation;
   final ValueChanged<Recording> onStartRangeNote;
+  final ValueChanged<Recording> onStartSection;
   final ValueChanged<double> onWaveformSeek;
   final int? rangeStartMs;
+  final int? sectionStartMs;
   final double volumeBoostDb;
   final ValueChanged<double> onSetVolumeBoost;
   final List<PracticeAnnotation> notes;
@@ -785,8 +880,10 @@ class _PlayerPanelState extends State<_PlayerPanel> {
     final waveform = widget.waveform;
     final onAddAnnotation = widget.onAddAnnotation;
     final onStartRangeNote = widget.onStartRangeNote;
+    final onStartSection = widget.onStartSection;
     final onWaveformSeek = widget.onWaveformSeek;
     final rangeStartMs = widget.rangeStartMs;
+    final sectionStartMs = widget.sectionStartMs;
     final volumeBoostDb = widget.volumeBoostDb;
     final onSetVolumeBoost = widget.onSetVolumeBoost;
     final notes = widget.notes;
@@ -862,10 +959,10 @@ class _PlayerPanelState extends State<_PlayerPanel> {
                                 ? 0
                                 : position.inMilliseconds /
                                     duration.inMilliseconds,
-                            rangeStartProgress: rangeStartMs == null ||
+                            rangeStartProgress: (rangeStartMs ?? sectionStartMs) == null ||
                                     duration == Duration.zero
                                 ? null
-                                : rangeStartMs! / duration.inMilliseconds,
+                                : (rangeStartMs ?? sectionStartMs!) / duration.inMilliseconds,
                             hoverProgress: _hoverProgress,
                             hoverTimeLabel: _hoverProgress == null ||
                                     duration == Duration.zero
@@ -933,6 +1030,13 @@ class _PlayerPanelState extends State<_PlayerPanel> {
                         label: const Text('Add point note'),
                       ),
                       TextButton.icon(
+                        onPressed: canPlay ? () => onStartSection(controller.recording!) : null,
+                        icon: const Icon(Icons.view_timeline_outlined),
+                        label: Text(sectionStartMs == null
+                            ? 'Start song section here'
+                            : 'Click waveform to end section'),
+                      ),
+                      TextButton.icon(
                         onPressed: canPlay
                             ? () => onStartRangeNote(controller.recording!)
                             : null,
@@ -950,6 +1054,8 @@ class _PlayerPanelState extends State<_PlayerPanel> {
                           PopupMenuItem(value: 3, child: Text('Boost +3 dB')),
                           PopupMenuItem(value: 6, child: Text('Boost +6 dB')),
                           PopupMenuItem(value: 9, child: Text('Boost +9 dB')),
+                          PopupMenuItem(value: 12, child: Text('Boost +12 dB')),
+                          PopupMenuItem(value: 15, child: Text('Boost +15 dB')),
                         ],
                         child: Padding(
                           padding: const EdgeInsets.symmetric(

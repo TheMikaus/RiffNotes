@@ -8,6 +8,7 @@ class AppPreferences extends ChangeNotifier {
   static const _displayNameKey = 'display_name';
   static const _lastPracticeKey = 'last_practice';
   static const _lastRecordingKey = 'last_recording';
+  static const _boostsKey = 'playback_boosts';
 
   String? _bandFolder;
   bool _autoPlayOnTakeSelection = false;
@@ -15,6 +16,7 @@ class AppPreferences extends ChangeNotifier {
   String _displayName = 'Bandmate';
   String? _lastPractice;
   String? _lastRecording;
+  Map<String, double> _boostsByRecording = <String, double>{};
 
   String? get bandFolder => _bandFolder;
   bool get autoPlayOnTakeSelection => _autoPlayOnTakeSelection;
@@ -22,6 +24,7 @@ class AppPreferences extends ChangeNotifier {
   String get displayName => _displayName;
   String? get lastPractice => _lastPractice;
   String? get lastRecording => _lastRecording;
+  double boostFor(String recordingId) => _boostsByRecording[recordingId] ?? 0;
 
   Future<void> load() async {
     final store = await SharedPreferences.getInstance();
@@ -31,6 +34,15 @@ class AppPreferences extends ChangeNotifier {
     _displayName = store.getString(_displayNameKey) ?? 'Bandmate';
     _lastPractice = store.getString(_lastPracticeKey);
     _lastRecording = store.getString(_lastRecordingKey);
+    final boosts = store.getString(_boostsKey);
+    if (boosts != null) {
+      try {
+        final decoded = jsonDecode(boosts) as Map<String, dynamic>;
+        _boostsByRecording = decoded.map((key, value) => MapEntry(key, (value as num).toDouble()));
+      } on FormatException {
+        _boostsByRecording = <String, double>{};
+      }
+    }
     notifyListeners();
   }
 
@@ -73,4 +85,15 @@ class AppPreferences extends ChangeNotifier {
     await store.setString(_displayNameKey, _displayName);
     notifyListeners();
   }
+
+  Future<void> setBoost(String recordingId, double decibels) async {
+    if (decibels == 0) {
+      _boostsByRecording.remove(recordingId);
+    } else {
+      _boostsByRecording[recordingId] = decibels;
+    }
+    final store = await SharedPreferences.getInstance();
+    await store.setString(_boostsKey, jsonEncode(_boostsByRecording));
+  }
 }
+import 'dart:convert';
