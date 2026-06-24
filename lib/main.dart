@@ -6,6 +6,7 @@ import 'package:flutter/material.dart';
 
 import 'activity.dart';
 import 'annotations.dart';
+import 'audio_processing.dart';
 import 'app_preferences.dart';
 import 'audio_controller.dart';
 import 'domain.dart';
@@ -20,7 +21,10 @@ class RiffNotesApp extends StatelessWidget {
   @override
   Widget build(BuildContext context) => MaterialApp(
         title: 'RiffNotes',
-        theme: ThemeData(colorSchemeSeed: Colors.deepPurple, brightness: Brightness.dark, useMaterial3: true),
+        theme: ThemeData(
+            colorSchemeSeed: Colors.deepPurple,
+            brightness: Brightness.dark,
+            useMaterial3: true),
         home: const LibraryScreen(),
       );
 }
@@ -36,6 +40,7 @@ class _LibraryScreenState extends State<LibraryScreen> {
   final _repository = PracticeRepository();
   final _annotations = AnnotationRepository();
   final _activity = ActivityQueue();
+  final _audioProcessing = AudioProcessingRepository();
   late final AudioController _audio;
   late final WaveformController _waveform;
   late final AppPreferences _preferences;
@@ -44,6 +49,7 @@ class _LibraryScreenState extends State<LibraryScreen> {
   Recording? _selectedRecording;
   List<PracticeAnnotation> _notes = const [];
   String? _bandFolder;
+  double _volumeBoostDb = 0;
   int? _rangeStartMs;
   String? _rangeRecordingId;
 
@@ -64,7 +70,8 @@ class _LibraryScreenState extends State<LibraryScreen> {
   }
 
   Future<void> _chooseBandFolder() async {
-    final selection = await FilePicker.platform.getDirectoryPath(dialogTitle: 'Choose your Band Folder');
+    final selection = await FilePicker.platform
+        .getDirectoryPath(dialogTitle: 'Choose your Band Folder');
     if (selection == null) {
       return;
     }
@@ -79,7 +86,8 @@ class _LibraryScreenState extends State<LibraryScreen> {
     }
   }
 
-  Future<void> _openBandFolder(String selection, {bool remember = false}) async {
+  Future<void> _openBandFolder(String selection,
+      {bool remember = false}) async {
     if (remember) {
       await _preferences.setBandFolder(selection);
     }
@@ -87,7 +95,8 @@ class _LibraryScreenState extends State<LibraryScreen> {
       return;
     }
     setState(() => _bandFolder = selection);
-    final practices = await _activity.run('Scanning practice folders', (update) async {
+    final practices =
+        await _activity.run('Scanning practice folders', (update) async {
       update(null, 'Looking for practice folders…');
       final found = await _repository.discoverBandFolder(Directory(selection));
       update(1, '${found.length} practices ready');
@@ -96,17 +105,24 @@ class _LibraryScreenState extends State<LibraryScreen> {
     if (mounted) {
       setState(() {
         _practices = practices;
-        _selected = practices.where((item) => item.name == _preferences.lastPractice).firstOrNull ?? (practices.isEmpty ? null : practices.first);
+        _selected = practices
+                .where((item) => item.name == _preferences.lastPractice)
+                .firstOrNull ??
+            (practices.isEmpty ? null : practices.first);
         _selectedRecording = null;
         _rangeStartMs = null;
         _rangeRecordingId = null;
       });
       _waveform.clear();
       final selected = _selected;
-      final remembered = selected?.recordings.where((item) => item.id == _preferences.lastRecording).firstOrNull;
+      final remembered = selected?.recordings
+          .where((item) => item.id == _preferences.lastRecording)
+          .firstOrNull;
       if (remembered != null) {
         await _selectRecording(remembered);
-      } else if (_preferences.autoPlayOnPracticeSelection && selected != null && selected.recordings.isNotEmpty) {
+      } else if (_preferences.autoPlayOnPracticeSelection &&
+          selected != null &&
+          selected.recordings.isNotEmpty) {
         await _selectRecording(selected.recordings.first, autoPlay: true);
       }
     }
@@ -121,28 +137,71 @@ class _LibraryScreenState extends State<LibraryScreen> {
     });
     _waveform.clear();
     await _preferences.rememberSelection(practice.name, null);
-    if (_preferences.autoPlayOnPracticeSelection && practice.recordings.isNotEmpty) {
+    if (_preferences.autoPlayOnPracticeSelection &&
+        practice.recordings.isNotEmpty) {
       await _selectRecording(practice.recordings.first, autoPlay: true);
     }
   }
 
-  Future<void> _selectRecording(Recording recording, {bool autoPlay = false}) async {
-    setState(() => _selectedRecording = recording);
+  Future<void> _selectRecording(Recording recording,
+      {bool autoPlay = false}) async {
+    setState(() {
+      _selectedRecording = recording;
+      _volumeBoostDb = 0;
+    });
     final practice = _selected;
     if (practice != null) {
       unawaited(_waveform.load(practice, recording));
     }
     await _audio.load(recording, autoPlay: autoPlay);
-    if (_selected != null) await _preferences.rememberSelection(_selected!.name, recording.id);
+    if (_selected != null)
+      await _preferences.rememberSelection(_selected!.name, recording.id);
     await _refreshNotes(recording);
+  }
+
+  Future<void> _setVolumeBoost(double decibels) async {
+    final practice = _selected;
+    final recording = _selectedRecording;
+    if (practice == null || recording == null) return;
+    final resumeAt = _audio.position;
+    final resumePlaying = _audio.isPlaying;
+    try {
+      final source =
+          await _activity.run('Preparing volume boost', (update) async {
+        update(
+            null,
+            decibels == 0
+                ? 'Restoring original playback…'
+                : 'Creating +${decibels.toStringAsFixed(0)} dB playback copy…');
+        final result = await _audioProcessing.createBoostedPlaybackFile(
+            practice, recording, decibels);
+        update(1, 'Playback level ready');
+        return result;
+      });
+      if (!mounted || _selectedRecording?.id != recording.id) return;
+      setState(() => _volumeBoostDb = decibels);
+      await _audio.load(recording,
+          playbackFile: source, autoPlay: resumePlaying);
+      await _audio.seek(resumeAt);
+    } on ProcessException {
+      if (mounted)
+        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+            content: Text('FFmpeg is required to apply a playback boost.')));
+    } on StateError catch (error) {
+      if (mounted)
+        ScaffoldMessenger.of(context)
+            .showSnackBar(SnackBar(content: Text(error.message)));
+    }
   }
 
   Future<void> _refreshNotes(Recording recording) async {
     final practice = _selected;
     if (practice == null) return;
-    final notes = await _annotations.loadForUser(practice.directory.path, _preferences.displayName);
+    final notes = await _annotations.loadForUser(
+        practice.directory.path, _preferences.displayName);
     if (mounted && _selectedRecording?.id == recording.id) {
-      setState(() => _notes = notes.where((note) => note.recordingId == recording.id).toList());
+      setState(() => _notes =
+          notes.where((note) => note.recordingId == recording.id).toList());
     }
   }
 
@@ -180,7 +239,11 @@ class _LibraryScreenState extends State<LibraryScreen> {
               ),
             ],
           ),
-          actions: [TextButton(onPressed: () => Navigator.pop(context), child: const Text('Done'))],
+          actions: [
+            TextButton(
+                onPressed: () => Navigator.pop(context),
+                child: const Text('Done'))
+          ],
         ),
       ),
     );
@@ -195,7 +258,8 @@ class _LibraryScreenState extends State<LibraryScreen> {
     if (practice == null) {
       return;
     }
-    final updatedPractice = await _activity.run('Saving take details', (update) async {
+    final updatedPractice =
+        await _activity.run('Saving take details', (update) async {
       update(null, 'Saving ${recording.filename}…');
       final result = await _repository.updateRecording(
         practice,
@@ -210,9 +274,13 @@ class _LibraryScreenState extends State<LibraryScreen> {
       setState(() {
         _selected = updatedPractice;
         _practices = _practices
-            .map((item) => item.directory.path == updatedPractice.directory.path ? updatedPractice : item)
+            .map((item) => item.directory.path == updatedPractice.directory.path
+                ? updatedPractice
+                : item)
             .toList(growable: false);
-        _selectedRecording = updatedPractice.recordings.where((item) => item.id == recording.id).firstOrNull;
+        _selectedRecording = updatedPractice.recordings
+            .where((item) => item.id == recording.id)
+            .firstOrNull;
       });
     }
   }
@@ -230,8 +298,12 @@ class _LibraryScreenState extends State<LibraryScreen> {
           onSubmitted: (value) => Navigator.pop(context, value),
         ),
         actions: [
-          TextButton(onPressed: () => Navigator.pop(context), child: const Text('Cancel')),
-          FilledButton(onPressed: () => Navigator.pop(context, controller.text), child: const Text('Save')),
+          TextButton(
+              onPressed: () => Navigator.pop(context),
+              child: const Text('Cancel')),
+          FilledButton(
+              onPressed: () => Navigator.pop(context, controller.text),
+              child: const Text('Save')),
         ],
       ),
     );
@@ -254,12 +326,20 @@ class _LibraryScreenState extends State<LibraryScreen> {
     final accepted = await showDialog<bool>(
       context: context,
       builder: (context) => AlertDialog(
-          title: Text('Point note at ${_formatMilliseconds(startMs)}'),
-          content: TextField(controller: text, autofocus: true, maxLines: 3, decoration: const InputDecoration(labelText: 'Comment')),
-          actions: [
-            TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('Cancel')),
-            FilledButton(onPressed: () => Navigator.pop(context, true), child: const Text('Save note')),
-          ],
+        title: Text('Point note at ${_formatMilliseconds(startMs)}'),
+        content: TextField(
+            controller: text,
+            autofocus: true,
+            maxLines: 3,
+            decoration: const InputDecoration(labelText: 'Comment')),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(context, false),
+              child: const Text('Cancel')),
+          FilledButton(
+              onPressed: () => Navigator.pop(context, true),
+              child: const Text('Save note')),
+        ],
       ),
     );
     if (accepted == true && text.text.trim().isNotEmpty) {
@@ -286,33 +366,46 @@ class _LibraryScreenState extends State<LibraryScreen> {
   Future<void> _onWaveformSeek(double progress) async {
     final duration = _audio.duration;
     final recording = _audio.recording;
-    if (duration == null || duration == Duration.zero || recording == null) return;
+    if (duration == null || duration == Duration.zero || recording == null)
+      return;
     final clickedMs = (duration.inMilliseconds * progress).round();
-    final pendingStart = _rangeRecordingId == recording.id ? _rangeStartMs : null;
+    final pendingStart =
+        _rangeRecordingId == recording.id ? _rangeStartMs : null;
     await _audio.seek(Duration(milliseconds: clickedMs));
     if (pendingStart == null) return;
     final startMs = pendingStart < clickedMs ? pendingStart : clickedMs;
     final endMs = pendingStart < clickedMs ? clickedMs : pendingStart;
     if (startMs == endMs) return;
-    if (mounted) setState(() {
-      _rangeStartMs = null;
-      _rangeRecordingId = null;
-    });
+    if (mounted)
+      setState(() {
+        _rangeStartMs = null;
+        _rangeRecordingId = null;
+      });
     await _addRangeAnnotation(recording, startMs, endMs);
   }
 
-  Future<void> _addRangeAnnotation(Recording recording, int startMs, int endMs) async {
+  Future<void> _addRangeAnnotation(
+      Recording recording, int startMs, int endMs) async {
     final practice = _selected;
     if (practice == null) return;
     final text = TextEditingController();
     final accepted = await showDialog<bool>(
       context: context,
       builder: (context) => AlertDialog(
-        title: Text('Range note: ${_formatMilliseconds(startMs)} – ${_formatMilliseconds(endMs)}'),
-        content: TextField(controller: text, autofocus: true, maxLines: 3, decoration: const InputDecoration(labelText: 'Comment')),
+        title: Text(
+            'Range note: ${_formatMilliseconds(startMs)} – ${_formatMilliseconds(endMs)}'),
+        content: TextField(
+            controller: text,
+            autofocus: true,
+            maxLines: 3,
+            decoration: const InputDecoration(labelText: 'Comment')),
         actions: [
-          TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('Cancel')),
-          FilledButton(onPressed: () => Navigator.pop(context, true), child: const Text('Save range note')),
+          TextButton(
+              onPressed: () => Navigator.pop(context, false),
+              child: const Text('Cancel')),
+          FilledButton(
+              onPressed: () => Navigator.pop(context, true),
+              child: const Text('Save range note')),
         ],
       ),
     );
@@ -342,7 +435,8 @@ class _LibraryScreenState extends State<LibraryScreen> {
     }
     final proposals = _repository.planRename(practice);
     if (proposals.isEmpty) {
-      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Title one or more takes before batch renaming.')));
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+          content: Text('Title one or more takes before batch renaming.')));
       return;
     }
     final hasIssues = proposals.any((proposal) => proposal.issue != null);
@@ -356,7 +450,9 @@ class _LibraryScreenState extends State<LibraryScreen> {
             mainAxisSize: MainAxisSize.min,
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              Text(hasIssues ? 'Resolve the listed conflicts before renaming.' : 'Files keep their audio type and metadata stays linked.'),
+              Text(hasIssues
+                  ? 'Resolve the listed conflicts before renaming.'
+                  : 'Files keep their audio type and metadata stays linked.'),
               const SizedBox(height: 12),
               Flexible(
                 child: ListView.builder(
@@ -366,8 +462,13 @@ class _LibraryScreenState extends State<LibraryScreen> {
                     final proposal = proposals[index];
                     return ListTile(
                       dense: true,
-                      title: Text('${proposal.recording.filename} → ${proposal.targetFilename}'),
-                      subtitle: proposal.issue == null ? null : Text(proposal.issue!, style: TextStyle(color: Theme.of(context).colorScheme.error)),
+                      title: Text(
+                          '${proposal.recording.filename} → ${proposal.targetFilename}'),
+                      subtitle: proposal.issue == null
+                          ? null
+                          : Text(proposal.issue!,
+                              style: TextStyle(
+                                  color: Theme.of(context).colorScheme.error)),
                     );
                   },
                 ),
@@ -376,7 +477,9 @@ class _LibraryScreenState extends State<LibraryScreen> {
           ),
         ),
         actions: [
-          TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('Cancel')),
+          TextButton(
+              onPressed: () => Navigator.pop(context, false),
+              child: const Text('Cancel')),
           FilledButton(
             onPressed: hasIssues ? null : () => Navigator.pop(context, true),
             child: const Text('Rename files'),
@@ -389,8 +492,10 @@ class _LibraryScreenState extends State<LibraryScreen> {
     }
     try {
       await _audio.stop();
-      final updatedPractice = await _activity.run('Renaming takes', (update) async {
-        update(null, 'Safely renaming ${proposals.where((proposal) => proposal.willRename).length} files…');
+      final updatedPractice =
+          await _activity.run('Renaming takes', (update) async {
+        update(null,
+            'Safely renaming ${proposals.where((proposal) => proposal.willRename).length} files…');
         final result = await _repository.applyRename(practice, proposals);
         update(1, 'Rename complete');
         return result;
@@ -400,17 +505,22 @@ class _LibraryScreenState extends State<LibraryScreen> {
           _selected = updatedPractice;
           _selectedRecording = null;
           _practices = _practices
-              .map((item) => item.directory.path == updatedPractice.directory.path ? updatedPractice : item)
+              .map((item) =>
+                  item.directory.path == updatedPractice.directory.path
+                      ? updatedPractice
+                      : item)
               .toList(growable: false);
         });
       }
     } on StateError catch (error) {
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(error.message)));
+        ScaffoldMessenger.of(context)
+            .showSnackBar(SnackBar(content: Text(error.message)));
       }
     } on FileSystemException catch (error) {
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Rename failed: ${error.message}')));
+        ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(content: Text('Rename failed: ${error.message}')));
       }
     }
   }
@@ -422,14 +532,26 @@ class _LibraryScreenState extends State<LibraryScreen> {
           appBar: AppBar(
             title: const Text('RiffNotes'),
             actions: [
-              TextButton.icon(onPressed: _chooseBandFolder, icon: const Icon(Icons.folder_open), label: const Text('Band Folder')),
-              IconButton(tooltip: 'Preferences', onPressed: _showPreferences, icon: const Icon(Icons.settings_outlined)),
+              TextButton.icon(
+                  onPressed: _chooseBandFolder,
+                  icon: const Icon(Icons.folder_open),
+                  label: const Text('Band Folder')),
+              IconButton(
+                  tooltip: 'Preferences',
+                  onPressed: _showPreferences,
+                  icon: const Icon(Icons.settings_outlined)),
             ],
           ),
           body: Column(children: [
             _ActivityStrip(activities: _activity.activities),
-            Expanded(child: Row(children: [
-              SizedBox(width: 260, child: _PracticeList(practices: _practices, selected: _selected, onSelect: _selectPractice)),
+            Expanded(
+                child: Row(children: [
+              SizedBox(
+                  width: 260,
+                  child: _PracticeList(
+                      practices: _practices,
+                      selected: _selected,
+                      onSelect: _selectPractice)),
               const VerticalDivider(width: 1),
               Expanded(
                 child: _RecordingList(
@@ -450,7 +572,11 @@ class _LibraryScreenState extends State<LibraryScreen> {
                   onAddAnnotation: _addAnnotation,
                   onStartRangeNote: _startRangeNote,
                   onWaveformSeek: _onWaveformSeek,
-                  rangeStartMs: _rangeRecordingId == _selectedRecording?.id ? _rangeStartMs : null,
+                  rangeStartMs: _rangeRecordingId == _selectedRecording?.id
+                      ? _rangeStartMs
+                      : null,
+                  volumeBoostDb: _volumeBoostDb,
+                  onSetVolumeBoost: _setVolumeBoost,
                   notes: _notes,
                   audio: _audio,
                   waveform: _waveform,
@@ -463,7 +589,10 @@ class _LibraryScreenState extends State<LibraryScreen> {
 }
 
 class _PracticeList extends StatelessWidget {
-  const _PracticeList({required this.practices, required this.selected, required this.onSelect});
+  const _PracticeList(
+      {required this.practices,
+      required this.selected,
+      required this.onSelect});
   final List<PracticeFolder> practices;
   final PracticeFolder? selected;
   final ValueChanged<PracticeFolder> onSelect;
@@ -474,7 +603,8 @@ class _PracticeList extends StatelessWidget {
         children: [
           Text('PRACTICES', style: Theme.of(context).textTheme.labelLarge),
           const SizedBox(height: 8),
-          if (practices.isEmpty) const ListTile(title: Text('Choose a Band Folder to begin.')),
+          if (practices.isEmpty)
+            const ListTile(title: Text('Choose a Band Folder to begin.')),
           for (final practice in practices)
             ListTile(
               selected: practice == selected,
@@ -500,6 +630,8 @@ class _RecordingList extends StatelessWidget {
     required this.onStartRangeNote,
     required this.onWaveformSeek,
     required this.rangeStartMs,
+    required this.volumeBoostDb,
+    required this.onSetVolumeBoost,
     required this.notes,
     required this.audio,
     required this.waveform,
@@ -509,28 +641,37 @@ class _RecordingList extends StatelessWidget {
   final Recording? selected;
   final ValueChanged<Recording> onSelect;
   final ValueChanged<Recording> onEditTitle;
-  final Future<void> Function(Recording recording, bool isBestTake) onToggleBest;
+  final Future<void> Function(Recording recording, bool isBestTake)
+      onToggleBest;
   final Future<void> Function() onBatchRename;
   final ValueChanged<Recording> onAddAnnotation;
   final ValueChanged<Recording> onStartRangeNote;
   final ValueChanged<double> onWaveformSeek;
   final int? rangeStartMs;
+  final double volumeBoostDb;
+  final ValueChanged<double> onSetVolumeBoost;
   final List<PracticeAnnotation> notes;
   final AudioController audio;
   final WaveformController waveform;
 
   @override
   Widget build(BuildContext context) {
-    if (practice == null) return Center(child: Text(bandFolder == null ? 'Start by choosing your Band Folder.' : 'No practice folders found.'));
+    if (practice == null)
+      return Center(
+          child: Text(bandFolder == null
+              ? 'Start by choosing your Band Folder.'
+              : 'No practice folders found.'));
     return Column(
       children: [
         Expanded(
           child: ListView(
             padding: const EdgeInsets.all(24),
             children: [
-              Text(practice!.name, style: Theme.of(context).textTheme.headlineMedium),
+              Text(practice!.name,
+                  style: Theme.of(context).textTheme.headlineMedium),
               Row(children: [
-                const Expanded(child: Text('Select a take to load it into the player.')),
+                const Expanded(
+                    child: Text('Select a take to load it into the player.')),
                 FilledButton.icon(
                   onPressed: onBatchRename,
                   icon: const Icon(Icons.drive_file_rename_outline),
@@ -539,9 +680,12 @@ class _RecordingList extends StatelessWidget {
               ]),
               const SizedBox(height: 18),
               for (final recording in practice!.recordings)
-                Card(child: ListTile(
+                Card(
+                    child: ListTile(
                   selected: selected?.id == recording.id,
-                  leading: Icon(recording.isBestTake ? Icons.star : Icons.audiotrack, color: recording.isBestTake ? Colors.amber : null),
+                  leading: Icon(
+                      recording.isBestTake ? Icons.star : Icons.audiotrack,
+                      color: recording.isBestTake ? Colors.amber : null),
                   title: Text(recording.title ?? recording.filename),
                   subtitle: Text(
                     recording.title == null
@@ -552,17 +696,24 @@ class _RecordingList extends StatelessWidget {
                     mainAxisSize: MainAxisSize.min,
                     children: [
                       IconButton(
-                        tooltip: recording.isBestTake ? 'Remove Best Take' : 'Mark Best Take',
-                        icon: Icon(recording.isBestTake ? Icons.star : Icons.star_border),
+                        tooltip: recording.isBestTake
+                            ? 'Remove Best Take'
+                            : 'Mark Best Take',
+                        icon: Icon(recording.isBestTake
+                            ? Icons.star
+                            : Icons.star_border),
                         color: recording.isBestTake ? Colors.amber : null,
-                        onPressed: () => onToggleBest(recording, !recording.isBestTake),
+                        onPressed: () =>
+                            onToggleBest(recording, !recording.isBestTake),
                       ),
                       IconButton(
                         tooltip: 'Title this take',
                         icon: const Icon(Icons.edit_outlined),
                         onPressed: () => onEditTitle(recording),
                       ),
-                      Text(recording.extension.replaceFirst('.', '').toUpperCase()),
+                      Text(recording.extension
+                          .replaceFirst('.', '')
+                          .toUpperCase()),
                     ],
                   ),
                   onTap: () => onSelect(recording),
@@ -577,6 +728,8 @@ class _RecordingList extends StatelessWidget {
           onStartRangeNote: onStartRangeNote,
           onWaveformSeek: onWaveformSeek,
           rangeStartMs: rangeStartMs,
+          volumeBoostDb: volumeBoostDb,
+          onSetVolumeBoost: onSetVolumeBoost,
           notes: notes,
         ),
       ],
@@ -596,7 +749,7 @@ class _RecordingList extends StatelessWidget {
   }
 }
 
-class _PlayerPanel extends StatelessWidget {
+class _PlayerPanel extends StatefulWidget {
   const _PlayerPanel({
     required this.controller,
     required this.waveform,
@@ -604,6 +757,8 @@ class _PlayerPanel extends StatelessWidget {
     required this.onStartRangeNote,
     required this.onWaveformSeek,
     required this.rangeStartMs,
+    required this.volumeBoostDb,
+    required this.onSetVolumeBoost,
     required this.notes,
   });
   final AudioController controller;
@@ -612,93 +767,163 @@ class _PlayerPanel extends StatelessWidget {
   final ValueChanged<Recording> onStartRangeNote;
   final ValueChanged<double> onWaveformSeek;
   final int? rangeStartMs;
+  final double volumeBoostDb;
+  final ValueChanged<double> onSetVolumeBoost;
   final List<PracticeAnnotation> notes;
 
   @override
-  Widget build(BuildContext context) => AnimatedBuilder(
-        animation: Listenable.merge([controller, waveform]),
-        builder: (context, _) {
-          final duration = controller.duration ?? Duration.zero;
-          final position = controller.position > duration ? duration : controller.position;
-          final canPlay = controller.recording != null && !controller.isLoading && controller.error == null;
-          return Material(
-            color: Theme.of(context).colorScheme.surfaceContainerHighest,
-            child: Padding(
-              padding: const EdgeInsets.fromLTRB(24, 12, 24, 16),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  Text(controller.recording?.filename ?? 'No take selected', style: Theme.of(context).textTheme.titleMedium),
-                  if (controller.isLoading) const Padding(
+  State<_PlayerPanel> createState() => _PlayerPanelState();
+}
+
+class _PlayerPanelState extends State<_PlayerPanel> {
+  double? _hoverProgress;
+  PracticeAnnotation? _hoveredNote;
+
+  @override
+  Widget build(BuildContext context) {
+    final controller = widget.controller;
+    final waveform = widget.waveform;
+    final onAddAnnotation = widget.onAddAnnotation;
+    final onStartRangeNote = widget.onStartRangeNote;
+    final onWaveformSeek = widget.onWaveformSeek;
+    final rangeStartMs = widget.rangeStartMs;
+    final volumeBoostDb = widget.volumeBoostDb;
+    final onSetVolumeBoost = widget.onSetVolumeBoost;
+    final notes = widget.notes;
+    return AnimatedBuilder(
+      animation: Listenable.merge([controller, waveform]),
+      builder: (context, _) {
+        final duration = controller.duration ?? Duration.zero;
+        final position =
+            controller.position > duration ? duration : controller.position;
+        final canPlay = controller.recording != null &&
+            !controller.isLoading &&
+            controller.error == null;
+        return Material(
+          color: Theme.of(context).colorScheme.surfaceContainerHighest,
+          child: Padding(
+            padding: const EdgeInsets.fromLTRB(24, 12, 24, 16),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Text(controller.recording?.filename ?? 'No take selected',
+                    style: Theme.of(context).textTheme.titleMedium),
+                if (controller.isLoading)
+                  const Padding(
                     padding: EdgeInsets.only(top: 8),
                     child: LinearProgressIndicator(),
                   ),
-                  if (controller.error != null) Padding(
+                if (controller.error != null)
+                  Padding(
                     padding: const EdgeInsets.only(top: 8),
-                    child: Text(controller.error!, style: TextStyle(color: Theme.of(context).colorScheme.error)),
+                    child: Text(controller.error!,
+                        style: TextStyle(
+                            color: Theme.of(context).colorScheme.error)),
                   ),
-                  if (controller.recording != null) ...[
-                    const SizedBox(height: 8),
-                    if (waveform.isLoading) const LinearProgressIndicator(),
-                    if (waveform.isLoading)
-                      const Padding(
-                        padding: EdgeInsets.only(top: 6),
-                        child: Text('Generating waveform… you can keep listening while this runs.'),
+                if (controller.recording != null) ...[
+                  const SizedBox(height: 8),
+                  if (waveform.isLoading) const LinearProgressIndicator(),
+                  if (waveform.isLoading)
+                    const Padding(
+                      padding: EdgeInsets.only(top: 6),
+                      child: Text(
+                          'Generating waveform… you can keep listening while this runs.'),
+                    ),
+                  if (waveform.error != null)
+                    Padding(
+                      padding: const EdgeInsets.only(top: 6),
+                      child: Text(waveform.error!,
+                          style: TextStyle(
+                              color: Theme.of(context).colorScheme.error)),
+                    ),
+                  if (waveform.data case final data?) ...[
+                    Padding(
+                      padding: const EdgeInsets.only(top: 6),
+                      child: Row(children: [
+                        const Icon(Icons.graphic_eq, size: 16),
+                        const SizedBox(width: 6),
+                        Text(data.fromCache
+                            ? 'Waveform loaded from practice cache'
+                            : 'Waveform generated and cached'),
+                      ]),
+                    ),
+                    Container(
+                      decoration: BoxDecoration(
+                        color:
+                            Theme.of(context).colorScheme.surfaceContainerHigh,
+                        borderRadius: BorderRadius.circular(8),
                       ),
-                    if (waveform.error != null)
-                      Padding(
-                        padding: const EdgeInsets.only(top: 6),
-                        child: Text(waveform.error!, style: TextStyle(color: Theme.of(context).colorScheme.error)),
+                      child: Column(
+                        children: [
+                          WaveformView(
+                            peaks: data.peaks,
+                            progress: duration == Duration.zero
+                                ? 0
+                                : position.inMilliseconds /
+                                    duration.inMilliseconds,
+                            rangeStartProgress: rangeStartMs == null ||
+                                    duration == Duration.zero
+                                ? null
+                                : rangeStartMs! / duration.inMilliseconds,
+                            hoverProgress: _hoverProgress,
+                            hoverTimeLabel: _hoverProgress == null ||
+                                    duration == Duration.zero
+                                ? null
+                                : _format(Duration(
+                                    milliseconds: (_hoverProgress! *
+                                            duration.inMilliseconds)
+                                        .round())),
+                            highlightStartProgress: _hoveredNote == null ||
+                                    duration == Duration.zero
+                                ? null
+                                : _hoveredNote!.startMs /
+                                    duration.inMilliseconds,
+                            highlightEndProgress: _hoveredNote == null ||
+                                    duration == Duration.zero
+                                ? null
+                                : (_hoveredNote!.endMs ??
+                                        _hoveredNote!.startMs) /
+                                    duration.inMilliseconds,
+                            onSeekProgress: onWaveformSeek,
+                            onHoverProgress: (progress) {
+                              if (_hoverProgress != progress)
+                                setState(() => _hoverProgress = progress);
+                            },
+                          ),
+                          Padding(
+                            padding: const EdgeInsets.fromLTRB(8, 0, 8, 4),
+                            child: Row(children: [
+                              IconButton(
+                                tooltip:
+                                    controller.isPlaying ? 'Pause' : 'Play',
+                                iconSize: 32,
+                                onPressed:
+                                    canPlay ? controller.togglePlayback : null,
+                                icon: Icon(controller.isPlaying
+                                    ? Icons.pause_circle
+                                    : Icons.play_circle),
+                              ),
+                              IconButton(
+                                tooltip: 'Stop',
+                                onPressed: canPlay ? controller.stop : null,
+                                icon: const Icon(Icons.stop_circle_outlined),
+                              ),
+                              const SizedBox(width: 8),
+                              Text(
+                                  '${_format(position)} / ${_format(duration)}'),
+                              const SizedBox(width: 12),
+                              const Expanded(
+                                  child: Text('Click waveform to seek')),
+                            ]),
+                          ),
+                        ],
                       ),
-                    if (waveform.data case final data?) ...[
-                      Padding(
-                        padding: const EdgeInsets.only(top: 6),
-                        child: Row(children: [
-                          const Icon(Icons.graphic_eq, size: 16),
-                          const SizedBox(width: 6),
-                          Text(data.fromCache ? 'Waveform loaded from practice cache' : 'Waveform generated and cached'),
-                        ]),
-                      ),
-                      Container(
-                        decoration: BoxDecoration(
-                          color: Theme.of(context).colorScheme.surfaceContainerHigh,
-                          borderRadius: BorderRadius.circular(8),
-                        ),
-                        child: Column(
-                          children: [
-                            WaveformView(
-                              peaks: data.peaks,
-                              progress: duration == Duration.zero ? 0 : position.inMilliseconds / duration.inMilliseconds,
-                              rangeStartProgress: rangeStartMs == null || duration == Duration.zero ? null : rangeStartMs! / duration.inMilliseconds,
-                              onSeekProgress: onWaveformSeek,
-                            ),
-                            Padding(
-                              padding: const EdgeInsets.fromLTRB(8, 0, 8, 4),
-                              child: Row(children: [
-                                IconButton(
-                                  tooltip: controller.isPlaying ? 'Pause' : 'Play',
-                                  iconSize: 32,
-                                  onPressed: canPlay ? controller.togglePlayback : null,
-                                  icon: Icon(controller.isPlaying ? Icons.pause_circle : Icons.play_circle),
-                                ),
-                                IconButton(
-                                  tooltip: 'Stop',
-                                  onPressed: canPlay ? controller.stop : null,
-                                  icon: const Icon(Icons.stop_circle_outlined),
-                                ),
-                                const SizedBox(width: 8),
-                                Text('${_format(position)} / ${_format(duration)}'),
-                                const SizedBox(width: 12),
-                                const Expanded(child: Text('Click waveform to seek')),
-                              ]),
-                            ),
-                          ],
-                        ),
-                      ),
-                    ],
+                    ),
                   ],
-                  if (controller.recording != null) Wrap(
+                ],
+                if (controller.recording != null)
+                  Wrap(
                     alignment: WrapAlignment.end,
                     spacing: 8,
                     children: [
@@ -708,40 +933,89 @@ class _PlayerPanel extends StatelessWidget {
                         label: const Text('Add point note'),
                       ),
                       TextButton.icon(
-                        onPressed: canPlay ? () => onStartRangeNote(controller.recording!) : null,
+                        onPressed: canPlay
+                            ? () => onStartRangeNote(controller.recording!)
+                            : null,
                         icon: const Icon(Icons.select_all_outlined),
-                        label: Text(rangeStartMs == null ? 'Start range note here' : 'Click waveform to end range'),
+                        label: Text(rangeStartMs == null
+                            ? 'Start range note here'
+                            : 'Click waveform to end range'),
+                      ),
+                      PopupMenuButton<double>(
+                        tooltip: 'Playback volume boost',
+                        onSelected: onSetVolumeBoost,
+                        itemBuilder: (context) => const [
+                          PopupMenuItem(
+                              value: 0, child: Text('Original level (0 dB)')),
+                          PopupMenuItem(value: 3, child: Text('Boost +3 dB')),
+                          PopupMenuItem(value: 6, child: Text('Boost +6 dB')),
+                          PopupMenuItem(value: 9, child: Text('Boost +9 dB')),
+                        ],
+                        child: Padding(
+                          padding: const EdgeInsets.symmetric(
+                              horizontal: 8, vertical: 8),
+                          child: Row(mainAxisSize: MainAxisSize.min, children: [
+                            const Icon(Icons.volume_up_outlined),
+                            const SizedBox(width: 6),
+                            Text(_volumeLabel(volumeBoostDb)),
+                          ]),
+                        ),
                       ),
                     ],
                   ),
-                  if (controller.recording != null)
-                    ExpansionTile(
-                      tilePadding: EdgeInsets.zero,
-                      title: Text('Notes (${notes.length})'),
-                      children: notes.isEmpty
-                          ? const [ListTile(dense: true, title: Text('No notes for this take yet.'))]
-                          : notes.map((note) => ListTile(
+                if (controller.recording != null)
+                  ExpansionTile(
+                    tilePadding: EdgeInsets.zero,
+                    title: Text('Notes (${notes.length})'),
+                    children: notes.isEmpty
+                        ? const [
+                            ListTile(
                                 dense: true,
-                                leading: Icon(note.isRange ? Icons.compare_arrows : Icons.bookmark_outline),
-                                title: Text(note.isRange ? 'Range note • ${note.text}' : 'Point note • ${note.text}'),
-                                subtitle: Text(note.isRange
-                                    ? '${_format(Duration(milliseconds: note.startMs))} – ${_format(Duration(milliseconds: note.endMs!))}'
-                                    : _format(Duration(milliseconds: note.startMs))),
-                                onTap: () => controller.playFromNote(note.startMs, endMs: note.endMs),
-                              )).toList(),
-                    ),
-                ],
-              ),
+                                title: Text('No notes for this take yet.'))
+                          ]
+                        : notes
+                            .map((note) => MouseRegion(
+                                  onEnter: (_) =>
+                                      setState(() => _hoveredNote = note),
+                                  onExit: (_) {
+                                    if (_hoveredNote?.id == note.id)
+                                      setState(() => _hoveredNote = null);
+                                  },
+                                  child: ListTile(
+                                    dense: true,
+                                    leading: Icon(note.isRange
+                                        ? Icons.compare_arrows
+                                        : Icons.bookmark_outline),
+                                    title: Text(note.isRange
+                                        ? 'Range note • ${note.text}'
+                                        : 'Point note • ${note.text}'),
+                                    subtitle: Text(note.isRange
+                                        ? '${_format(Duration(milliseconds: note.startMs))} – ${_format(Duration(milliseconds: note.endMs!))}'
+                                        : _format(Duration(
+                                            milliseconds: note.startMs))),
+                                    onTap: () => controller.playFromNote(
+                                        note.startMs,
+                                        endMs: note.endMs),
+                                  ),
+                                ))
+                            .toList(),
+                  ),
+              ],
             ),
-          );
-        },
-      );
+          ),
+        );
+      },
+    );
+  }
 
   String _format(Duration duration) {
     final minutes = duration.inMinutes.remainder(60).toString().padLeft(2, '0');
     final seconds = duration.inSeconds.remainder(60).toString().padLeft(2, '0');
     return '$minutes:$seconds';
   }
+
+  String _volumeLabel(double decibels) =>
+      decibels == 0 ? 'Original level' : '+${decibels.toStringAsFixed(0)} dB';
 }
 
 class _ActivityStrip extends StatelessWidget {
@@ -750,16 +1024,22 @@ class _ActivityStrip extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final active = activities.where((item) => item.state == ActivityState.running).toList();
+    final active = activities
+        .where((item) => item.state == ActivityState.running)
+        .toList();
     if (active.isEmpty) return const SizedBox.shrink();
     final item = active.first;
     return Material(
       color: Theme.of(context).colorScheme.surfaceContainerHighest,
       child: ListTile(
-        leading: const SizedBox(width: 22, height: 22, child: CircularProgressIndicator(strokeWidth: 2)),
+        leading: const SizedBox(
+            width: 22,
+            height: 22,
+            child: CircularProgressIndicator(strokeWidth: 2)),
         title: Text(item.label),
         subtitle: Text(item.detail),
-        trailing: SizedBox(width: 180, child: LinearProgressIndicator(value: item.progress)),
+        trailing: SizedBox(
+            width: 180, child: LinearProgressIndicator(value: item.progress)),
       ),
     );
   }

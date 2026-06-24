@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:io';
 
 import 'package:flutter/foundation.dart';
 import 'package:just_audio/just_audio.dart';
@@ -45,7 +46,7 @@ class AudioController extends ChangeNotifier {
   bool get isLoading => _isLoading;
   String? get error => _error;
 
-  Future<void> load(Recording recording, {bool autoPlay = false}) async {
+  Future<void> load(Recording recording, {bool autoPlay = false, File? playbackFile}) async {
     final request = ++_loadRequest;
     _recording = recording;
     _position = Duration.zero;
@@ -55,7 +56,7 @@ class AudioController extends ChangeNotifier {
     notifyListeners();
     try {
       await _player.stop();
-      final duration = await _player.setFilePath(recording.file.path);
+      final duration = await _player.setFilePath((playbackFile ?? recording.file).path);
       if (request != _loadRequest) {
         return;
       }

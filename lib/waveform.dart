@@ -15,7 +15,7 @@ class WaveformData {
 
 class WaveformRepository {
   static const _cacheFolder = '.riffnotes-cache';
-  static const _cacheVersion = 1;
+  static const _cacheVersion = 2;
 
   Future<WaveformData> loadOrGenerate(PracticeFolder practice, Recording recording) async {
     final sourceStat = await recording.file.stat();
@@ -106,7 +106,9 @@ class WaveformRepository {
       final bucket = sample * count ~/ sampleCount;
       if (magnitude > peaks[bucket]) peaks[bucket] = magnitude;
     }
-    return peaks;
+    final maximum = peaks.reduce((largest, value) => value > largest ? value : largest);
+    if (maximum == 0) return peaks;
+    return peaks.map((value) => value / maximum).toList(growable: false);
   }
 }
 
