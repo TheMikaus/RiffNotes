@@ -4,6 +4,7 @@ import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 
 import 'activity.dart';
+import 'annotations.dart';
 import 'app_preferences.dart';
 import 'audio_controller.dart';
 import 'domain.dart';
@@ -30,6 +31,7 @@ class LibraryScreen extends StatefulWidget {
 
 class _LibraryScreenState extends State<LibraryScreen> {
   final _repository = PracticeRepository();
+  final _annotations = AnnotationRepository();
   final _activity = ActivityQueue();
   late final AudioController _audio;
   late final AppPreferences _preferences;
@@ -209,6 +211,64 @@ class _LibraryScreenState extends State<LibraryScreen> {
     }
   }
 
+  Future<void> _addAnnotation(Recording recording) async {
+    final practice = _selected;
+    if (practice == null) return;
+    final text = TextEditingController();
+    final end = TextEditingController();
+    var range = false;
+    final startMs = _audio.position.inMilliseconds;
+    final accepted = await showDialog<bool>(
+      context: context,
+      builder: (context) => StatefulBuilder(
+        builder: (context, setDialogState) => AlertDialog(
+          title: Text('Note at ${_formatMilliseconds(startMs)}'),
+          content: Column(mainAxisSize: MainAxisSize.min, children: [
+            TextField(controller: text, autofocus: true, maxLines: 3, decoration: const InputDecoration(labelText: 'Comment')),
+            SwitchListTile(
+              contentPadding: EdgeInsets.zero,
+              title: const Text('Applies to a range'),
+              value: range,
+              onChanged: (value) => setDialogState(() => range = value),
+            ),
+            if (range) TextField(
+              controller: end,
+              keyboardType: TextInputType.number,
+              decoration: const InputDecoration(labelText: 'End time in milliseconds'),
+            ),
+          ]),
+          actions: [
+            TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('Cancel')),
+            FilledButton(onPressed: () => Navigator.pop(context, true), child: const Text('Save note')),
+          ],
+        ),
+      ),
+    );
+    if (accepted == true && text.text.trim().isNotEmpty) {
+      final endMs = range ? int.tryParse(end.text.trim()) : null;
+      try {
+        await _annotations.add(
+          practiceFolder: practice.directory.path,
+          user: _preferences.displayName,
+          recording: recording,
+          startMs: startMs,
+          endMs: endMs,
+          text: text.text.trim(),
+        );
+        if (mounted) ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Note saved')));
+      } on ArgumentError {
+        if (mounted) ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Range end must be after the current time')));
+      }
+    }
+    text.dispose();
+    end.dispose();
+  }
+
+  String _formatMilliseconds(int milliseconds) {
+    final duration = Duration(milliseconds: milliseconds);
+    return '${duration.inMinutes.remainder(60).toString().padLeft(2, '0')}:${duration.inSeconds.remainder(60).toString().padLeft(2, '0')}';
+  }
+
   Future<void> _previewAndApplyRename() async {
     final practice = _selected;
     if (practice == null) {
@@ -321,6 +381,7 @@ class _LibraryScreenState extends State<LibraryScreen> {
                     isBestTake: isBestTake,
                   ),
                   onBatchRename: _previewAndApplyRename,
+                  onAddAnnotation: _addAnnotation,
                   audio: _audio,
                 ),
               ),
@@ -364,6 +425,7 @@ class _RecordingList extends StatelessWidget {
     required this.onEditTitle,
     required this.onToggleBest,
     required this.onBatchRename,
+    required this.onAddAnnotation,
     required this.audio,
   });
   final PracticeFolder? practice;
@@ -373,6 +435,7 @@ class _RecordingList extends StatelessWidget {
   final ValueChanged<Recording> onEditTitle;
   final Future<void> Function(Recording recording, bool isBestTake) onToggleBest;
   final Future<void> Function() onBatchRename;
+  final ValueChanged<Recording> onAddAnnotation;
   final AudioController audio;
 
   @override
@@ -426,7 +489,7 @@ class _RecordingList extends StatelessWidget {
             ],
           ),
         ),
-        _PlayerPanel(controller: audio),
+        _PlayerPanel(controller: audio, onAddAnnotation: onAddAnnotation),
       ],
     );
   }
@@ -445,8 +508,9 @@ class _RecordingList extends StatelessWidget {
 }
 
 class _PlayerPanel extends StatelessWidget {
-  const _PlayerPanel({required this.controller});
+  const _PlayerPanel({required this.controller, required this.onAddAnnotation});
   final AudioController controller;
+  final ValueChanged<Recording> onAddAnnotation;
 
   @override
   Widget build(BuildContext context) => AnimatedBuilder(
@@ -471,6 +535,14 @@ class _PlayerPanel extends StatelessWidget {
                   if (controller.error != null) Padding(
                     padding: const EdgeInsets.only(top: 8),
                     child: Text(controller.error!, style: TextStyle(color: Theme.of(context).colorScheme.error)),
+                  ),
+                  if (controller.recording != null) Align(
+                    alignment: Alignment.centerRight,
+                    child: TextButton.icon(
+                      onPressed: () => onAddAnnotation(controller.recording!),
+                      icon: const Icon(Icons.add_comment_outlined),
+                      label: const Text('Add note at current time'),
+                    ),
                   ),
                   SliderTheme(
                     data: SliderTheme.of(context).copyWith(
