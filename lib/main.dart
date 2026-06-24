@@ -660,11 +660,41 @@ class _PlayerPanel extends StatelessWidget {
                           Text(data.fromCache ? 'Waveform loaded from practice cache' : 'Waveform generated and cached'),
                         ]),
                       ),
-                      WaveformView(
-                        peaks: data.peaks,
-                        progress: duration == Duration.zero ? 0 : position.inMilliseconds / duration.inMilliseconds,
-                        rangeStartProgress: rangeStartMs == null || duration == Duration.zero ? null : rangeStartMs! / duration.inMilliseconds,
-                        onSeekProgress: onWaveformSeek,
+                      Container(
+                        decoration: BoxDecoration(
+                          color: Theme.of(context).colorScheme.surfaceContainerHigh,
+                          borderRadius: BorderRadius.circular(8),
+                        ),
+                        child: Column(
+                          children: [
+                            WaveformView(
+                              peaks: data.peaks,
+                              progress: duration == Duration.zero ? 0 : position.inMilliseconds / duration.inMilliseconds,
+                              rangeStartProgress: rangeStartMs == null || duration == Duration.zero ? null : rangeStartMs! / duration.inMilliseconds,
+                              onSeekProgress: onWaveformSeek,
+                            ),
+                            Padding(
+                              padding: const EdgeInsets.fromLTRB(8, 0, 8, 4),
+                              child: Row(children: [
+                                IconButton(
+                                  tooltip: controller.isPlaying ? 'Pause' : 'Play',
+                                  iconSize: 32,
+                                  onPressed: canPlay ? controller.togglePlayback : null,
+                                  icon: Icon(controller.isPlaying ? Icons.pause_circle : Icons.play_circle),
+                                ),
+                                IconButton(
+                                  tooltip: 'Stop',
+                                  onPressed: canPlay ? controller.stop : null,
+                                  icon: const Icon(Icons.stop_circle_outlined),
+                                ),
+                                const SizedBox(width: 8),
+                                Text('${_format(position)} / ${_format(duration)}'),
+                                const SizedBox(width: 12),
+                                const Expanded(child: Text('Click waveform to seek')),
+                              ]),
+                            ),
+                          ],
+                        ),
                       ),
                     ],
                   ],
@@ -700,23 +730,6 @@ class _PlayerPanel extends StatelessWidget {
                                 onTap: () => controller.playFromNote(note.startMs, endMs: note.endMs),
                               )).toList(),
                     ),
-                  Row(children: [
-                    IconButton(
-                      tooltip: controller.isPlaying ? 'Pause' : 'Play',
-                      iconSize: 32,
-                      onPressed: canPlay ? controller.togglePlayback : null,
-                      icon: Icon(controller.isPlaying ? Icons.pause_circle : Icons.play_circle),
-                    ),
-                    IconButton(
-                      tooltip: 'Stop',
-                      onPressed: canPlay ? controller.stop : null,
-                      icon: const Icon(Icons.stop_circle_outlined),
-                    ),
-                    const SizedBox(width: 8),
-                    Text('${_format(position)} / ${_format(duration)}'),
-                    const SizedBox(width: 12),
-                    const Expanded(child: Text('Click the waveform to seek')),
-                  ]),
                 ],
               ),
             ),

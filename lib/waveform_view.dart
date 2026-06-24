@@ -35,7 +35,7 @@ class WaveformView extends StatelessWidget {
                 unplayedColor: Theme.of(context).colorScheme.outlineVariant,
                 playheadColor: Theme.of(context).colorScheme.secondary,
               ),
-              child: const SizedBox(height: 112, width: double.infinity),
+              child: const SizedBox(height: 100, width: double.infinity),
             ),
           ),
         ),
@@ -67,7 +67,8 @@ class _WaveformPainter extends CustomPainter {
     final unplayed = Paint()..color = unplayedColor..strokeWidth = 1.4..strokeCap = StrokeCap.round;
     for (var index = 0; index < peaks.length; index += 1) {
       final x = index * size.width / (peaks.length - 1).clamp(1, peaks.length);
-      // Peak-to-peak height never exceeds 75% of the waveform viewport.
+      // The viewport is exactly 100 px high, so peak-to-peak height tops out
+      // at exactly 75 px (37.5 px above and below the centre line).
       final height = peaks[index].clamp(0.025, 1).toDouble() * (size.height * .375);
       canvas.drawLine(Offset(x, center - height), Offset(x, center + height), x / size.width <= progress ? played : unplayed);
     }
