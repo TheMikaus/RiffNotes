@@ -36,6 +36,7 @@ class AudioController extends ChangeNotifier {
   bool _isLoading = false;
   String? _error;
   int _loadRequest = 0;
+  Timer? _rangeTimer;
 
   Recording? get recording => _recording;
   Duration get position => _position;
@@ -90,8 +91,25 @@ class AudioController extends ChangeNotifier {
   }
 
   Future<void> stop() async {
+    _rangeTimer?.cancel();
     await _player.pause();
     await _player.seek(Duration.zero);
+  }
+
+  Future<void> playFromNote(int startMs, {int? endMs}) async {
+    _rangeTimer?.cancel();
+    await seek(Duration(milliseconds: startMs));
+    await _player.play();
+    if (endMs != null && endMs > startMs) {
+      final end = Duration(milliseconds: endMs);
+      _rangeTimer = Timer.periodic(const Duration(milliseconds: 80), (timer) async {
+        if (_player.position >= end) {
+          timer.cancel();
+          await _player.pause();
+          await _player.seek(Duration(milliseconds: startMs));
+        }
+      });
+    }
   }
 
   Future<void> seek(Duration target) async {
@@ -110,6 +128,7 @@ class AudioController extends ChangeNotifier {
     unawaited(_durationSubscription.cancel());
     unawaited(_stateSubscription.cancel());
     unawaited(_player.dispose());
+    _rangeTimer?.cancel();
     super.dispose();
   }
 }

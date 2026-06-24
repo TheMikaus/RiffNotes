@@ -3,6 +3,7 @@ import 'dart:io';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:riffnotes/annotations.dart';
 import 'package:riffnotes/domain.dart';
+import 'package:riffnotes/waveform.dart';
 
 void main() {
   test('recognizes only supported audio extensions', () {
@@ -71,5 +72,18 @@ void main() {
     expect(notes, hasLength(2));
     expect(notes[0].isRange, isFalse);
     expect(notes[1].isRange, isTrue);
+  });
+
+  test('reduces signed PCM samples to normalized waveform peaks', () {
+    final peaks = WaveformRepository.calculatePeaks(<int>[
+      0, 0, // silence
+      0xff, 0x7f, // positive peak
+      0, 0x80, // negative peak
+      0, 0x40, // half amplitude
+    ], buckets: 2);
+
+    expect(peaks, hasLength(2));
+    expect(peaks[0], closeTo(1, 0.001));
+    expect(peaks[1], closeTo(1, 0.001));
   });
 }

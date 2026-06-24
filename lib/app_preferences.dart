@@ -6,16 +6,22 @@ class AppPreferences extends ChangeNotifier {
   static const _autoPlayTakeKey = 'auto_play_on_take_selection';
   static const _autoPlayPracticeKey = 'auto_play_on_practice_selection';
   static const _displayNameKey = 'display_name';
+  static const _lastPracticeKey = 'last_practice';
+  static const _lastRecordingKey = 'last_recording';
 
   String? _bandFolder;
   bool _autoPlayOnTakeSelection = false;
   bool _autoPlayOnPracticeSelection = false;
   String _displayName = 'Bandmate';
+  String? _lastPractice;
+  String? _lastRecording;
 
   String? get bandFolder => _bandFolder;
   bool get autoPlayOnTakeSelection => _autoPlayOnTakeSelection;
   bool get autoPlayOnPracticeSelection => _autoPlayOnPracticeSelection;
   String get displayName => _displayName;
+  String? get lastPractice => _lastPractice;
+  String? get lastRecording => _lastRecording;
 
   Future<void> load() async {
     final store = await SharedPreferences.getInstance();
@@ -23,7 +29,17 @@ class AppPreferences extends ChangeNotifier {
     _autoPlayOnTakeSelection = store.getBool(_autoPlayTakeKey) ?? false;
     _autoPlayOnPracticeSelection = store.getBool(_autoPlayPracticeKey) ?? false;
     _displayName = store.getString(_displayNameKey) ?? 'Bandmate';
+    _lastPractice = store.getString(_lastPracticeKey);
+    _lastRecording = store.getString(_lastRecordingKey);
     notifyListeners();
+  }
+
+  Future<void> rememberSelection(String practice, String? recording) async {
+    _lastPractice = practice;
+    _lastRecording = recording;
+    final store = await SharedPreferences.getInstance();
+    await store.setString(_lastPracticeKey, practice);
+    if (recording == null) await store.remove(_lastRecordingKey); else await store.setString(_lastRecordingKey, recording);
   }
 
   Future<void> setBandFolder(String? path) async {

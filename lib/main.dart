@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:io';
 
 import 'package:file_picker/file_picker.dart';
@@ -8,6 +9,8 @@ import 'annotations.dart';
 import 'app_preferences.dart';
 import 'audio_controller.dart';
 import 'domain.dart';
+import 'waveform.dart';
+import 'waveform_view.dart';
 
 void main() => runApp(const RiffNotesApp());
 
@@ -34,6 +37,7 @@ class _LibraryScreenState extends State<LibraryScreen> {
   final _annotations = AnnotationRepository();
   final _activity = ActivityQueue();
   late final AudioController _audio;
+  late final WaveformController _waveform;
   late final AppPreferences _preferences;
   List<PracticeFolder> _practices = const [];
   PracticeFolder? _selected;
@@ -45,6 +49,7 @@ class _LibraryScreenState extends State<LibraryScreen> {
   void initState() {
     super.initState();
     _audio = AudioController();
+    _waveform = WaveformController();
     _preferences = AppPreferences();
     _restorePreferences();
   }
@@ -52,6 +57,7 @@ class _LibraryScreenState extends State<LibraryScreen> {
   @override
   void dispose() {
     _audio.dispose();
+    _waveform.dispose();
     super.dispose();
   }
 
@@ -88,11 +94,16 @@ class _LibraryScreenState extends State<LibraryScreen> {
     if (mounted) {
       setState(() {
         _practices = practices;
-        _selected = practices.isEmpty ? null : practices.first;
+        _selected = practices.where((item) => item.name == _preferences.lastPractice).firstOrNull ?? (practices.isEmpty ? null : practices.first);
         _selectedRecording = null;
       });
-      if (_preferences.autoPlayOnPracticeSelection && practices.isNotEmpty && practices.first.recordings.isNotEmpty) {
-        await _selectRecording(practices.first.recordings.first, autoPlay: true);
+      _waveform.clear();
+      final selected = _selected;
+      final remembered = selected?.recordings.where((item) => item.id == _preferences.lastRecording).firstOrNull;
+      if (remembered != null) {
+        await _selectRecording(remembered);
+      } else if (_preferences.autoPlayOnPracticeSelection && selected != null && selected.recordings.isNotEmpty) {
+        await _selectRecording(selected.recordings.first, autoPlay: true);
       }
     }
   }
@@ -102,6 +113,8 @@ class _LibraryScreenState extends State<LibraryScreen> {
       _selected = practice;
       _selectedRecording = null;
     });
+    _waveform.clear();
+    await _preferences.rememberSelection(practice.name, null);
     if (_preferences.autoPlayOnPracticeSelection && practice.recordings.isNotEmpty) {
       await _selectRecording(practice.recordings.first, autoPlay: true);
     }
@@ -109,7 +122,12 @@ class _LibraryScreenState extends State<LibraryScreen> {
 
   Future<void> _selectRecording(Recording recording, {bool autoPlay = false}) async {
     setState(() => _selectedRecording = recording);
+    final practice = _selected;
+    if (practice != null) {
+      unawaited(_waveform.load(practice, recording));
+    }
     await _audio.load(recording, autoPlay: autoPlay);
+    if (_selected != null) await _preferences.rememberSelection(_selected!.name, recording.id);
     await _refreshNotes(recording);
   }
 
@@ -267,7 +285,6 @@ class _LibraryScreenState extends State<LibraryScreen> {
           text: text.text.trim(),
         );
         await _refreshNotes(recording);
-        if (mounted) ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Note saved')));
       } on ArgumentError {
         if (mounted) ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Range end must be after the current time')));
       }
@@ -396,6 +413,7 @@ class _LibraryScreenState extends State<LibraryScreen> {
                   onAddAnnotation: _addAnnotation,
                   notes: _notes,
                   audio: _audio,
+                  waveform: _waveform,
                 ),
               ),
             ])),
@@ -441,6 +459,7 @@ class _RecordingList extends StatelessWidget {
     required this.onAddAnnotation,
     required this.notes,
     required this.audio,
+    required this.waveform,
   });
   final PracticeFolder? practice;
   final String? bandFolder;
@@ -452,6 +471,7 @@ class _RecordingList extends StatelessWidget {
   final ValueChanged<Recording> onAddAnnotation;
   final List<PracticeAnnotation> notes;
   final AudioController audio;
+  final WaveformController waveform;
 
   @override
   Widget build(BuildContext context) {
@@ -504,7 +524,7 @@ class _RecordingList extends StatelessWidget {
             ],
           ),
         ),
-        _PlayerPanel(controller: audio, onAddAnnotation: onAddAnnotation, notes: notes),
+        _PlayerPanel(controller: audio, waveform: waveform, onAddAnnotation: onAddAnnotation, notes: notes),
       ],
     );
   }
@@ -523,14 +543,15 @@ class _RecordingList extends StatelessWidget {
 }
 
 class _PlayerPanel extends StatelessWidget {
-  const _PlayerPanel({required this.controller, required this.onAddAnnotation, required this.notes});
+  const _PlayerPanel({required this.controller, required this.waveform, required this.onAddAnnotation, required this.notes});
   final AudioController controller;
+  final WaveformController waveform;
   final ValueChanged<Recording> onAddAnnotation;
   final List<PracticeAnnotation> notes;
 
   @override
   Widget build(BuildContext context) => AnimatedBuilder(
-        animation: controller,
+        animation: Listenable.merge([controller, waveform]),
         builder: (context, _) {
           final duration = controller.duration ?? Duration.zero;
           final position = controller.position > duration ? duration : controller.position;
@@ -552,6 +573,34 @@ class _PlayerPanel extends StatelessWidget {
                     padding: const EdgeInsets.only(top: 8),
                     child: Text(controller.error!, style: TextStyle(color: Theme.of(context).colorScheme.error)),
                   ),
+                  if (controller.recording != null) ...[
+                    const SizedBox(height: 8),
+                    if (waveform.isLoading) const LinearProgressIndicator(),
+                    if (waveform.isLoading)
+                      const Padding(
+                        padding: EdgeInsets.only(top: 6),
+                        child: Text('Generating waveform… you can keep listening while this runs.'),
+                      ),
+                    if (waveform.error != null)
+                      Padding(
+                        padding: const EdgeInsets.only(top: 6),
+                        child: Text(waveform.error!, style: TextStyle(color: Theme.of(context).colorScheme.error)),
+                      ),
+                    if (waveform.data case final data?) ...[
+                      Padding(
+                        padding: const EdgeInsets.only(top: 6),
+                        child: Row(children: [
+                          const Icon(Icons.graphic_eq, size: 16),
+                          const SizedBox(width: 6),
+                          Text(data.fromCache ? 'Waveform loaded from practice cache' : 'Waveform generated and cached'),
+                        ]),
+                      ),
+                      WaveformView(
+                        peaks: data.peaks,
+                        progress: duration == Duration.zero ? 0 : position.inMilliseconds / duration.inMilliseconds,
+                      ),
+                    ],
+                  ],
                   if (controller.recording != null) Align(
                     alignment: Alignment.centerRight,
                     child: TextButton.icon(
@@ -569,10 +618,11 @@ class _PlayerPanel extends StatelessWidget {
                           : notes.map((note) => ListTile(
                                 dense: true,
                                 leading: Icon(note.isRange ? Icons.compare_arrows : Icons.bookmark_outline),
-                                title: Text(note.text),
+                                title: Text(note.isRange ? 'Range note • ${note.text}' : 'Point note • ${note.text}'),
                                 subtitle: Text(note.isRange
                                     ? '${_format(Duration(milliseconds: note.startMs))} – ${_format(Duration(milliseconds: note.endMs!))}'
                                     : _format(Duration(milliseconds: note.startMs))),
+                                onTap: () => controller.playFromNote(note.startMs, endMs: note.endMs),
                               )).toList(),
                     ),
                   SliderTheme(
