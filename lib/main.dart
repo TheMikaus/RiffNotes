@@ -38,6 +38,7 @@ class _LibraryScreenState extends State<LibraryScreen> {
   List<PracticeFolder> _practices = const [];
   PracticeFolder? _selected;
   Recording? _selectedRecording;
+  List<PracticeAnnotation> _notes = const [];
   String? _bandFolder;
 
   @override
@@ -109,6 +110,16 @@ class _LibraryScreenState extends State<LibraryScreen> {
   Future<void> _selectRecording(Recording recording, {bool autoPlay = false}) async {
     setState(() => _selectedRecording = recording);
     await _audio.load(recording, autoPlay: autoPlay);
+    await _refreshNotes(recording);
+  }
+
+  Future<void> _refreshNotes(Recording recording) async {
+    final practice = _selected;
+    if (practice == null) return;
+    final notes = await _annotations.loadForUser(practice.directory.path, _preferences.displayName);
+    if (mounted && _selectedRecording?.id == recording.id) {
+      setState(() => _notes = notes.where((note) => note.recordingId == recording.id).toList());
+    }
   }
 
   Future<void> _showPreferences() async {
@@ -255,6 +266,7 @@ class _LibraryScreenState extends State<LibraryScreen> {
           endMs: endMs,
           text: text.text.trim(),
         );
+        await _refreshNotes(recording);
         if (mounted) ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Note saved')));
       } on ArgumentError {
         if (mounted) ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Range end must be after the current time')));
@@ -382,6 +394,7 @@ class _LibraryScreenState extends State<LibraryScreen> {
                   ),
                   onBatchRename: _previewAndApplyRename,
                   onAddAnnotation: _addAnnotation,
+                  notes: _notes,
                   audio: _audio,
                 ),
               ),
@@ -426,6 +439,7 @@ class _RecordingList extends StatelessWidget {
     required this.onToggleBest,
     required this.onBatchRename,
     required this.onAddAnnotation,
+    required this.notes,
     required this.audio,
   });
   final PracticeFolder? practice;
@@ -436,6 +450,7 @@ class _RecordingList extends StatelessWidget {
   final Future<void> Function(Recording recording, bool isBestTake) onToggleBest;
   final Future<void> Function() onBatchRename;
   final ValueChanged<Recording> onAddAnnotation;
+  final List<PracticeAnnotation> notes;
   final AudioController audio;
 
   @override
@@ -489,7 +504,7 @@ class _RecordingList extends StatelessWidget {
             ],
           ),
         ),
-        _PlayerPanel(controller: audio, onAddAnnotation: onAddAnnotation),
+        _PlayerPanel(controller: audio, onAddAnnotation: onAddAnnotation, notes: notes),
       ],
     );
   }
@@ -508,9 +523,10 @@ class _RecordingList extends StatelessWidget {
 }
 
 class _PlayerPanel extends StatelessWidget {
-  const _PlayerPanel({required this.controller, required this.onAddAnnotation});
+  const _PlayerPanel({required this.controller, required this.onAddAnnotation, required this.notes});
   final AudioController controller;
   final ValueChanged<Recording> onAddAnnotation;
+  final List<PracticeAnnotation> notes;
 
   @override
   Widget build(BuildContext context) => AnimatedBuilder(
@@ -544,6 +560,21 @@ class _PlayerPanel extends StatelessWidget {
                       label: const Text('Add note at current time'),
                     ),
                   ),
+                  if (controller.recording != null)
+                    ExpansionTile(
+                      tilePadding: EdgeInsets.zero,
+                      title: Text('Notes (${notes.length})'),
+                      children: notes.isEmpty
+                          ? const [ListTile(dense: true, title: Text('No notes for this take yet.'))]
+                          : notes.map((note) => ListTile(
+                                dense: true,
+                                leading: Icon(note.isRange ? Icons.compare_arrows : Icons.bookmark_outline),
+                                title: Text(note.text),
+                                subtitle: Text(note.isRange
+                                    ? '${_format(Duration(milliseconds: note.startMs))} – ${_format(Duration(milliseconds: note.endMs!))}'
+                                    : _format(Duration(milliseconds: note.startMs))),
+                              )).toList(),
+                    ),
                   SliderTheme(
                     data: SliderTheme.of(context).copyWith(
                       activeTrackColor: Theme.of(context).colorScheme.primary,
