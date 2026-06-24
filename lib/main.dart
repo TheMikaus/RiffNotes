@@ -50,6 +50,7 @@ class _LibraryScreenState extends State<LibraryScreen> {
   PracticeFolder? _selected;
   Recording? _selectedRecording;
   List<PracticeAnnotation> _notes = const [];
+  List<UserAnnotation> _reviewNotes = const [];
   List<SongSection> _sections = const [];
   String? _bandFolder;
   double _volumeBoostDb = 0;
@@ -57,6 +58,7 @@ class _LibraryScreenState extends State<LibraryScreen> {
   String? _rangeRecordingId;
   int? _sectionStartMs;
   String? _sectionRecordingId;
+  bool _showPracticeReview = false;
 
   @override
   void initState() {
@@ -119,6 +121,7 @@ class _LibraryScreenState extends State<LibraryScreen> {
         _rangeRecordingId = null;
       });
       _waveform.clear();
+      if (_selected != null) await _refreshPracticeReview(_selected!);
       final selected = _selected;
       final remembered = selected?.recordings
           .where((item) => item.id == _preferences.lastRecording)
@@ -143,6 +146,7 @@ class _LibraryScreenState extends State<LibraryScreen> {
       _sectionRecordingId = null;
     });
     _waveform.clear();
+    await _refreshPracticeReview(practice);
     await _preferences.rememberSelection(practice.name, null);
     if (_preferences.autoPlayOnPracticeSelection &&
         practice.recordings.isNotEmpty) {
@@ -222,6 +226,22 @@ class _LibraryScreenState extends State<LibraryScreen> {
       setState(() => _notes =
           notes.where((note) => note.recordingId == recording.id).toList());
     }
+  }
+
+  Future<void> _refreshPracticeReview(PracticeFolder practice) async {
+    final notes = await _annotations.loadAll(practice.directory.path);
+    if (mounted && _selected?.directory.path == practice.directory.path) {
+      setState(() => _reviewNotes = notes);
+    }
+  }
+
+  Future<void> _playReviewNote(UserAnnotation item) async {
+    final practice = _selected;
+    if (practice == null) return;
+    final recording = practice.recordings.where((take) => take.id == item.annotation.recordingId).firstOrNull;
+    if (recording == null) return;
+    if (_selectedRecording?.id != recording.id) await _selectRecording(recording);
+    await _audio.playFromNote(item.annotation.startMs, endMs: item.annotation.endMs);
   }
 
   Future<void> _showPreferences() async {
@@ -500,7 +520,7 @@ class _LibraryScreenState extends State<LibraryScreen> {
   Future<void> _refreshSections(Recording recording) async {
     final practice = _selected;
     if (practice == null) return;
-    final sections = await _sectionsRepository.load(practice.directory.path);
+    final sections = await _sectionsRepository.load(practice.directory.path, recording.id);
     if (mounted && _selectedRecording?.id == recording.id) {
       setState(() => _sections = sections.where((section) => section.recordingId == recording.id).toList());
     }
@@ -663,6 +683,11 @@ class _LibraryScreenState extends State<LibraryScreen> {
                   volumeBoostDb: _volumeBoostDb,
                   onSetVolumeBoost: _setVolumeBoost,
                   notes: _notes,
+                  sections: _sections,
+                  showPracticeReview: _showPracticeReview,
+                  onTogglePracticeReview: (value) => setState(() => _showPracticeReview = value),
+                  reviewNotes: _reviewNotes,
+                  onPlayReviewNote: _playReviewNote,
                   audio: _audio,
                   waveform: _waveform,
                 ),
@@ -720,6 +745,11 @@ class _RecordingList extends StatelessWidget {
     required this.volumeBoostDb,
     required this.onSetVolumeBoost,
     required this.notes,
+    required this.sections,
+    required this.showPracticeReview,
+    required this.onTogglePracticeReview,
+    required this.reviewNotes,
+    required this.onPlayReviewNote,
     required this.audio,
     required this.waveform,
   });
@@ -740,6 +770,11 @@ class _RecordingList extends StatelessWidget {
   final double volumeBoostDb;
   final ValueChanged<double> onSetVolumeBoost;
   final List<PracticeAnnotation> notes;
+  final List<SongSection> sections;
+  final bool showPracticeReview;
+  final ValueChanged<bool> onTogglePracticeReview;
+  final List<UserAnnotation> reviewNotes;
+  final ValueChanged<UserAnnotation> onPlayReviewNote;
   final AudioController audio;
   final WaveformController waveform;
 
@@ -756,8 +791,31 @@ class _RecordingList extends StatelessWidget {
           child: ListView(
             padding: const EdgeInsets.all(24),
             children: [
-              Text(practice!.name,
-                  style: Theme.of(context).textTheme.headlineMedium),
+              Row(children: [
+                Expanded(child: Text(practice!.name, style: Theme.of(context).textTheme.headlineMedium)),
+                SegmentedButton<bool>(
+                  segments: const [
+                    ButtonSegment(value: false, label: Text('Takes'), icon: Icon(Icons.queue_music)),
+                    ButtonSegment(value: true, label: Text('Practice review'), icon: Icon(Icons.rate_review_outlined)),
+                  ],
+                  selected: {showPracticeReview},
+                  onSelectionChanged: (value) => onTogglePracticeReview(value.first),
+                ),
+              ]),
+              if (showPracticeReview) ...[
+                const SizedBox(height: 12),
+                Text('All bandmate notes in this practice', style: Theme.of(context).textTheme.titleMedium),
+                const SizedBox(height: 8),
+                if (reviewNotes.isEmpty) const ListTile(title: Text('No notes have been saved for this practice yet.')),
+                for (final item in reviewNotes)
+                  Card(child: ListTile(
+                    leading: Icon(item.annotation.isRange ? Icons.compare_arrows : Icons.bookmark_outline),
+                    title: Text(item.annotation.text),
+                    subtitle: Text('${item.user} • ${_reviewTime(item.annotation)}'),
+                    trailing: const Icon(Icons.play_arrow),
+                    onTap: () => onPlayReviewNote(item),
+                  )),
+              ] else ...[
               Row(children: [
                 const Expanded(
                     child: Text('Select a take to load it into the player.')),
@@ -807,6 +865,7 @@ class _RecordingList extends StatelessWidget {
                   ),
                   onTap: () => onSelect(recording),
                 )),
+              ],
             ],
           ),
         ),
@@ -822,6 +881,7 @@ class _RecordingList extends StatelessWidget {
           volumeBoostDb: volumeBoostDb,
           onSetVolumeBoost: onSetVolumeBoost,
           notes: notes,
+          sections: sections,
         ),
       ],
     );
@@ -838,6 +898,11 @@ class _RecordingList extends StatelessWidget {
       return 'File unavailable';
     }
   }
+
+  String _reviewTime(PracticeAnnotation note) {
+    String stamp(int ms) => '${(ms ~/ 60000).toString().padLeft(2, '0')}:${((ms ~/ 1000) % 60).toString().padLeft(2, '0')}';
+    return note.isRange ? '${stamp(note.startMs)} – ${stamp(note.endMs!)}' : stamp(note.startMs);
+  }
 }
 
 class _PlayerPanel extends StatefulWidget {
@@ -853,6 +918,7 @@ class _PlayerPanel extends StatefulWidget {
     required this.volumeBoostDb,
     required this.onSetVolumeBoost,
     required this.notes,
+    required this.sections,
   });
   final AudioController controller;
   final WaveformController waveform;
@@ -865,6 +931,7 @@ class _PlayerPanel extends StatefulWidget {
   final double volumeBoostDb;
   final ValueChanged<double> onSetVolumeBoost;
   final List<PracticeAnnotation> notes;
+  final List<SongSection> sections;
 
   @override
   State<_PlayerPanel> createState() => _PlayerPanelState();
@@ -873,6 +940,7 @@ class _PlayerPanel extends StatefulWidget {
 class _PlayerPanelState extends State<_PlayerPanel> {
   double? _hoverProgress;
   PracticeAnnotation? _hoveredNote;
+  SongSection? _selectedSection;
 
   @override
   Widget build(BuildContext context) {
@@ -887,6 +955,7 @@ class _PlayerPanelState extends State<_PlayerPanel> {
     final volumeBoostDb = widget.volumeBoostDb;
     final onSetVolumeBoost = widget.onSetVolumeBoost;
     final notes = widget.notes;
+    final sections = widget.sections;
     return AnimatedBuilder(
       animation: Listenable.merge([controller, waveform]),
       builder: (context, _) {
@@ -953,6 +1022,15 @@ class _PlayerPanelState extends State<_PlayerPanel> {
                       ),
                       child: Column(
                         children: [
+                          SectionTimeline(
+                            sections: sections,
+                            duration: duration,
+                            selectedSection: _selectedSection,
+                            onSectionTap: (section) {
+                              setState(() => _selectedSection = section);
+                              unawaited(controller.seek(Duration(milliseconds: section.startMs)));
+                            },
+                          ),
                           WaveformView(
                             peaks: data.peaks,
                             progress: duration == Duration.zero
@@ -1006,6 +1084,24 @@ class _PlayerPanelState extends State<_PlayerPanel> {
                                 onPressed: canPlay ? controller.stop : null,
                                 icon: const Icon(Icons.stop_circle_outlined),
                               ),
+                              if (_selectedSection != null)
+                                IconButton(
+                                  tooltip: controller.isLoopingRange
+                                      ? 'Stop looping ${_selectedSection!.label}'
+                                      : 'Loop ${_selectedSection!.label}',
+                                  onPressed: () {
+                                    if (controller.isLoopingRange) {
+                                      controller.stopRangeLoop();
+                                    } else {
+                                      unawaited(controller.playRange(
+                                        _selectedSection!.startMs,
+                                        endMs: _selectedSection!.endMs,
+                                        loop: true,
+                                      ));
+                                    }
+                                  },
+                                  icon: Icon(controller.isLoopingRange ? Icons.repeat_one : Icons.repeat),
+                                ),
                               const SizedBox(width: 8),
                               Text(
                                   '${_format(position)} / ${_format(duration)}'),

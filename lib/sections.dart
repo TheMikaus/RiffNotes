@@ -29,10 +29,8 @@ class SongSection {
 }
 
 class SongSectionRepository {
-  static const _filename = '.riffnotes.sections.json';
-
-  Future<List<SongSection>> load(String practiceFolder) async {
-    final file = File(path.join(practiceFolder, _filename));
+  Future<List<SongSection>> load(String practiceFolder, String recordingId) async {
+    final file = _fileFor(practiceFolder, recordingId);
     if (!await file.exists()) return <SongSection>[];
     try {
       final decoded = jsonDecode(await file.readAsString()) as Map<String, dynamic>;
@@ -47,12 +45,15 @@ class SongSectionRepository {
   }
 
   Future<void> add(String practiceFolder, SongSection section) async {
-    final sections = await load(practiceFolder)..add(section);
+    final sections = await load(practiceFolder, section.recordingId)..add(section);
     sections.sort((a, b) => a.startMs.compareTo(b.startMs));
-    final file = File(path.join(practiceFolder, _filename));
+    final file = _fileFor(practiceFolder, section.recordingId);
     await file.writeAsString(const JsonEncoder.withIndent('  ').convert(<String, dynamic>{
       'version': 1,
       'sections': sections.map((item) => item.toJson()).toList(),
     }), flush: true);
   }
+
+  File _fileFor(String practiceFolder, String recordingId) =>
+      File(path.join(practiceFolder, '.riffnotes.$recordingId.sections.json'));
 }

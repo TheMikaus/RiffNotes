@@ -1,5 +1,64 @@
 import 'package:flutter/material.dart';
 
+import 'sections.dart';
+
+class SectionTimeline extends StatelessWidget {
+  const SectionTimeline({super.key, required this.sections, required this.duration, this.onSectionTap, this.selectedSection});
+
+  final List<SongSection> sections;
+  final Duration duration;
+  final ValueChanged<SongSection>? onSectionTap;
+  final SongSection? selectedSection;
+
+  @override
+  Widget build(BuildContext context) {
+    if (sections.isEmpty || duration == Duration.zero) return const SizedBox.shrink();
+    final colors = <Color>[Colors.blue, Colors.teal, Colors.deepPurple, Colors.orange, Colors.pink, Colors.green];
+    return SizedBox(
+      height: 30,
+      child: LayoutBuilder(
+        builder: (context, constraints) => ClipRRect(
+          borderRadius: const BorderRadius.vertical(top: Radius.circular(8)),
+          child: Stack(
+            fit: StackFit.expand,
+            children: [
+              ColoredBox(color: Theme.of(context).colorScheme.surfaceContainerHighest),
+              for (var index = 0; index < sections.length; index += 1)
+                Positioned(
+                  left: (sections[index].startMs / duration.inMilliseconds * constraints.maxWidth).clamp(0, constraints.maxWidth),
+                  width: ((sections[index].endMs - sections[index].startMs) / duration.inMilliseconds * constraints.maxWidth)
+                      .clamp(1, constraints.maxWidth),
+                  top: 3,
+                  bottom: 3,
+                  child: Tooltip(
+                    message: '${sections[index].label}: ${_time(sections[index].startMs)} – ${_time(sections[index].endMs)}',
+                    child: InkWell(
+                      onTap: onSectionTap == null ? null : () => onSectionTap!(sections[index]),
+                      child: Container(
+                      padding: const EdgeInsets.symmetric(horizontal: 6),
+                      alignment: Alignment.centerLeft,
+                      decoration: BoxDecoration(
+                        color: colors[index % colors.length].withValues(alpha: .72),
+                        border: Border.all(color: selectedSection == sections[index] ? Colors.white : colors[index % colors.length], width: selectedSection == sections[index] ? 2 : 1),
+                        borderRadius: BorderRadius.circular(4),
+                      ),
+                      child: Text(sections[index].label, overflow: TextOverflow.ellipsis, maxLines: 1, style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w600)),
+                    )),
+                  ),
+                ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  String _time(int milliseconds) {
+    final value = Duration(milliseconds: milliseconds);
+    return '${value.inMinutes.remainder(60).toString().padLeft(2, '0')}:${value.inSeconds.remainder(60).toString().padLeft(2, '0')}';
+  }
+}
+
 class WaveformView extends StatelessWidget {
   const WaveformView({
     super.key,

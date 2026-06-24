@@ -1,3 +1,5 @@
+import 'dart:convert';
+
 import 'package:flutter/foundation.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
@@ -96,4 +98,3 @@ class AppPreferences extends ChangeNotifier {
     await store.setString(_boostsKey, jsonEncode(_boostsByRecording));
   }
 }
-import 'dart:convert';

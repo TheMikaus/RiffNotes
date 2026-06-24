@@ -46,7 +46,37 @@ class PracticeAnnotation {
       );
 }
 
+class UserAnnotation {
+  const UserAnnotation({required this.user, required this.annotation});
+
+  final String user;
+  final PracticeAnnotation annotation;
+}
+
 class AnnotationRepository {
+  Future<List<UserAnnotation>> loadAll(String practiceFolder) async {
+    final folder = Directory(practiceFolder);
+    final result = <UserAnnotation>[];
+    await for (final entity in folder.list()) {
+      if (entity is! File) continue;
+      final filename = path.basename(entity.path);
+      final match = RegExp(r'^\.riffnotes\.(.+)\.bandnotes$').firstMatch(filename);
+      if (match == null) continue;
+      try {
+        final content = jsonDecode(await entity.readAsString()) as Map<String, dynamic>;
+        final user = content['user'] as String? ?? match.group(1)!;
+        final annotations = (content['annotations'] as List<dynamic>? ?? const <dynamic>[])
+            .cast<Map<String, dynamic>>()
+            .map(PracticeAnnotation.fromJson);
+        result.addAll(annotations.map((annotation) => UserAnnotation(user: user, annotation: annotation)));
+      } on FormatException {
+        // A malformed bandmate file should not hide the rest of the review.
+      }
+    }
+    result.sort((a, b) => a.annotation.createdAt.compareTo(b.annotation.createdAt));
+    return result;
+  }
+
   Future<List<PracticeAnnotation>> loadForUser(String practiceFolder, String user) async {
     final file = _fileFor(practiceFolder, user);
     if (!await file.exists()) return <PracticeAnnotation>[];

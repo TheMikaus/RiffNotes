@@ -38,6 +38,7 @@ class AudioController extends ChangeNotifier {
   String? _error;
   int _loadRequest = 0;
   Timer? _rangeTimer;
+  bool _isLoopingRange = false;
 
   Recording? get recording => _recording;
   Duration get position => _position;
@@ -45,6 +46,7 @@ class AudioController extends ChangeNotifier {
   bool get isPlaying => _isPlaying;
   bool get isLoading => _isLoading;
   String? get error => _error;
+  bool get isLoopingRange => _isLoopingRange;
 
   Future<void> load(Recording recording, {bool autoPlay = false, File? playbackFile}) async {
     final request = ++_loadRequest;
@@ -93,24 +95,43 @@ class AudioController extends ChangeNotifier {
 
   Future<void> stop() async {
     _rangeTimer?.cancel();
+    _isLoopingRange = false;
     await _player.pause();
     await _player.seek(Duration.zero);
   }
 
   Future<void> playFromNote(int startMs, {int? endMs}) async {
+    await playRange(startMs, endMs: endMs);
+  }
+
+  Future<void> playRange(int startMs, {int? endMs, bool loop = false}) async {
     _rangeTimer?.cancel();
+    _isLoopingRange = loop && endMs != null && endMs > startMs;
     await seek(Duration(milliseconds: startMs));
     await _player.play();
     if (endMs != null && endMs > startMs) {
       final end = Duration(milliseconds: endMs);
       _rangeTimer = Timer.periodic(const Duration(milliseconds: 80), (timer) async {
         if (_player.position >= end) {
-          timer.cancel();
-          await _player.pause();
-          await _player.seek(Duration(milliseconds: startMs));
+          if (_isLoopingRange) {
+            await _player.seek(Duration(milliseconds: startMs));
+            await _player.play();
+          } else {
+            timer.cancel();
+            await _player.pause();
+            await _player.seek(Duration(milliseconds: startMs));
+          }
         }
       });
     }
+    notifyListeners();
+  }
+
+  void stopRangeLoop() {
+    _rangeTimer?.cancel();
+    _rangeTimer = null;
+    _isLoopingRange = false;
+    notifyListeners();
   }
 
   Future<void> seek(Duration target) async {
