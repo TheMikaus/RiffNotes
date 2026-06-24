@@ -44,6 +44,8 @@ class _LibraryScreenState extends State<LibraryScreen> {
   Recording? _selectedRecording;
   List<PracticeAnnotation> _notes = const [];
   String? _bandFolder;
+  int? _rangeStartMs;
+  String? _rangeRecordingId;
 
   @override
   void initState() {
@@ -96,6 +98,8 @@ class _LibraryScreenState extends State<LibraryScreen> {
         _practices = practices;
         _selected = practices.where((item) => item.name == _preferences.lastPractice).firstOrNull ?? (practices.isEmpty ? null : practices.first);
         _selectedRecording = null;
+        _rangeStartMs = null;
+        _rangeRecordingId = null;
       });
       _waveform.clear();
       final selected = _selected;
@@ -112,6 +116,8 @@ class _LibraryScreenState extends State<LibraryScreen> {
     setState(() {
       _selected = practice;
       _selectedRecording = null;
+      _rangeStartMs = null;
+      _rangeRecordingId = null;
     });
     _waveform.clear();
     await _preferences.rememberSelection(practice.name, null);
@@ -244,53 +250,84 @@ class _LibraryScreenState extends State<LibraryScreen> {
     final practice = _selected;
     if (practice == null) return;
     final text = TextEditingController();
-    final end = TextEditingController();
-    var range = false;
     final startMs = _audio.position.inMilliseconds;
     final accepted = await showDialog<bool>(
       context: context,
-      builder: (context) => StatefulBuilder(
-        builder: (context, setDialogState) => AlertDialog(
-          title: Text('Note at ${_formatMilliseconds(startMs)}'),
-          content: Column(mainAxisSize: MainAxisSize.min, children: [
-            TextField(controller: text, autofocus: true, maxLines: 3, decoration: const InputDecoration(labelText: 'Comment')),
-            SwitchListTile(
-              contentPadding: EdgeInsets.zero,
-              title: const Text('Applies to a range'),
-              value: range,
-              onChanged: (value) => setDialogState(() => range = value),
-            ),
-            if (range) TextField(
-              controller: end,
-              keyboardType: TextInputType.number,
-              decoration: const InputDecoration(labelText: 'End time in milliseconds'),
-            ),
-          ]),
+      builder: (context) => AlertDialog(
+          title: Text('Point note at ${_formatMilliseconds(startMs)}'),
+          content: TextField(controller: text, autofocus: true, maxLines: 3, decoration: const InputDecoration(labelText: 'Comment')),
           actions: [
             TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('Cancel')),
             FilledButton(onPressed: () => Navigator.pop(context, true), child: const Text('Save note')),
           ],
-        ),
       ),
     );
     if (accepted == true && text.text.trim().isNotEmpty) {
-      final endMs = range ? int.tryParse(end.text.trim()) : null;
-      try {
-        await _annotations.add(
-          practiceFolder: practice.directory.path,
-          user: _preferences.displayName,
-          recording: recording,
-          startMs: startMs,
-          endMs: endMs,
-          text: text.text.trim(),
-        );
-        await _refreshNotes(recording);
-      } on ArgumentError {
-        if (mounted) ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Range end must be after the current time')));
-      }
+      await _annotations.add(
+        practiceFolder: practice.directory.path,
+        user: _preferences.displayName,
+        recording: recording,
+        startMs: startMs,
+        text: text.text.trim(),
+      );
+      await _refreshNotes(recording);
     }
     text.dispose();
-    end.dispose();
+  }
+
+  void _startRangeNote(Recording recording) {
+    if (_audio.duration == null || _audio.duration == Duration.zero) return;
+    setState(() {
+      _rangeStartMs = _audio.position.inMilliseconds;
+      _rangeRecordingId = recording.id;
+    });
+  }
+
+  Future<void> _onWaveformSeek(double progress) async {
+    final duration = _audio.duration;
+    final recording = _audio.recording;
+    if (duration == null || duration == Duration.zero || recording == null) return;
+    final clickedMs = (duration.inMilliseconds * progress).round();
+    final pendingStart = _rangeRecordingId == recording.id ? _rangeStartMs : null;
+    await _audio.seek(Duration(milliseconds: clickedMs));
+    if (pendingStart == null) return;
+    final startMs = pendingStart < clickedMs ? pendingStart : clickedMs;
+    final endMs = pendingStart < clickedMs ? clickedMs : pendingStart;
+    if (startMs == endMs) return;
+    if (mounted) setState(() {
+      _rangeStartMs = null;
+      _rangeRecordingId = null;
+    });
+    await _addRangeAnnotation(recording, startMs, endMs);
+  }
+
+  Future<void> _addRangeAnnotation(Recording recording, int startMs, int endMs) async {
+    final practice = _selected;
+    if (practice == null) return;
+    final text = TextEditingController();
+    final accepted = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: Text('Range note: ${_formatMilliseconds(startMs)} – ${_formatMilliseconds(endMs)}'),
+        content: TextField(controller: text, autofocus: true, maxLines: 3, decoration: const InputDecoration(labelText: 'Comment')),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('Cancel')),
+          FilledButton(onPressed: () => Navigator.pop(context, true), child: const Text('Save range note')),
+        ],
+      ),
+    );
+    if (accepted == true && text.text.trim().isNotEmpty) {
+      await _annotations.add(
+        practiceFolder: practice.directory.path,
+        user: _preferences.displayName,
+        recording: recording,
+        startMs: startMs,
+        endMs: endMs,
+        text: text.text.trim(),
+      );
+      await _refreshNotes(recording);
+    }
+    text.dispose();
   }
 
   String _formatMilliseconds(int milliseconds) {
@@ -411,6 +448,9 @@ class _LibraryScreenState extends State<LibraryScreen> {
                   ),
                   onBatchRename: _previewAndApplyRename,
                   onAddAnnotation: _addAnnotation,
+                  onStartRangeNote: _startRangeNote,
+                  onWaveformSeek: _onWaveformSeek,
+                  rangeStartMs: _rangeRecordingId == _selectedRecording?.id ? _rangeStartMs : null,
                   notes: _notes,
                   audio: _audio,
                   waveform: _waveform,
@@ -457,6 +497,9 @@ class _RecordingList extends StatelessWidget {
     required this.onToggleBest,
     required this.onBatchRename,
     required this.onAddAnnotation,
+    required this.onStartRangeNote,
+    required this.onWaveformSeek,
+    required this.rangeStartMs,
     required this.notes,
     required this.audio,
     required this.waveform,
@@ -469,6 +512,9 @@ class _RecordingList extends StatelessWidget {
   final Future<void> Function(Recording recording, bool isBestTake) onToggleBest;
   final Future<void> Function() onBatchRename;
   final ValueChanged<Recording> onAddAnnotation;
+  final ValueChanged<Recording> onStartRangeNote;
+  final ValueChanged<double> onWaveformSeek;
+  final int? rangeStartMs;
   final List<PracticeAnnotation> notes;
   final AudioController audio;
   final WaveformController waveform;
@@ -524,7 +570,15 @@ class _RecordingList extends StatelessWidget {
             ],
           ),
         ),
-        _PlayerPanel(controller: audio, waveform: waveform, onAddAnnotation: onAddAnnotation, notes: notes),
+        _PlayerPanel(
+          controller: audio,
+          waveform: waveform,
+          onAddAnnotation: onAddAnnotation,
+          onStartRangeNote: onStartRangeNote,
+          onWaveformSeek: onWaveformSeek,
+          rangeStartMs: rangeStartMs,
+          notes: notes,
+        ),
       ],
     );
   }
@@ -543,10 +597,21 @@ class _RecordingList extends StatelessWidget {
 }
 
 class _PlayerPanel extends StatelessWidget {
-  const _PlayerPanel({required this.controller, required this.waveform, required this.onAddAnnotation, required this.notes});
+  const _PlayerPanel({
+    required this.controller,
+    required this.waveform,
+    required this.onAddAnnotation,
+    required this.onStartRangeNote,
+    required this.onWaveformSeek,
+    required this.rangeStartMs,
+    required this.notes,
+  });
   final AudioController controller;
   final WaveformController waveform;
   final ValueChanged<Recording> onAddAnnotation;
+  final ValueChanged<Recording> onStartRangeNote;
+  final ValueChanged<double> onWaveformSeek;
+  final int? rangeStartMs;
   final List<PracticeAnnotation> notes;
 
   @override
@@ -598,16 +663,26 @@ class _PlayerPanel extends StatelessWidget {
                       WaveformView(
                         peaks: data.peaks,
                         progress: duration == Duration.zero ? 0 : position.inMilliseconds / duration.inMilliseconds,
+                        rangeStartProgress: rangeStartMs == null || duration == Duration.zero ? null : rangeStartMs! / duration.inMilliseconds,
+                        onSeekProgress: onWaveformSeek,
                       ),
                     ],
                   ],
-                  if (controller.recording != null) Align(
-                    alignment: Alignment.centerRight,
-                    child: TextButton.icon(
-                      onPressed: () => onAddAnnotation(controller.recording!),
-                      icon: const Icon(Icons.add_comment_outlined),
-                      label: const Text('Add note at current time'),
-                    ),
+                  if (controller.recording != null) Wrap(
+                    alignment: WrapAlignment.end,
+                    spacing: 8,
+                    children: [
+                      TextButton.icon(
+                        onPressed: () => onAddAnnotation(controller.recording!),
+                        icon: const Icon(Icons.add_comment_outlined),
+                        label: const Text('Add point note'),
+                      ),
+                      TextButton.icon(
+                        onPressed: canPlay ? () => onStartRangeNote(controller.recording!) : null,
+                        icon: const Icon(Icons.select_all_outlined),
+                        label: Text(rangeStartMs == null ? 'Start range note here' : 'Click waveform to end range'),
+                      ),
+                    ],
                   ),
                   if (controller.recording != null)
                     ExpansionTile(
@@ -625,39 +700,23 @@ class _PlayerPanel extends StatelessWidget {
                                 onTap: () => controller.playFromNote(note.startMs, endMs: note.endMs),
                               )).toList(),
                     ),
-                  SliderTheme(
-                    data: SliderTheme.of(context).copyWith(
-                      activeTrackColor: Theme.of(context).colorScheme.primary,
-                      inactiveTrackColor: Theme.of(context).colorScheme.outline,
-                      disabledActiveTrackColor: Theme.of(context).colorScheme.primary.withValues(alpha: 0.45),
-                      disabledInactiveTrackColor: Theme.of(context).colorScheme.outline.withValues(alpha: 0.7),
-                      thumbColor: Theme.of(context).colorScheme.primary,
-                      trackHeight: 5,
+                  Row(children: [
+                    IconButton(
+                      tooltip: controller.isPlaying ? 'Pause' : 'Play',
+                      iconSize: 32,
+                      onPressed: canPlay ? controller.togglePlayback : null,
+                      icon: Icon(controller.isPlaying ? Icons.pause_circle : Icons.play_circle),
                     ),
-                    child: Row(children: [
-                      IconButton(
-                        tooltip: controller.isPlaying ? 'Pause' : 'Play',
-                        iconSize: 32,
-                        onPressed: canPlay ? controller.togglePlayback : null,
-                        icon: Icon(controller.isPlaying ? Icons.pause_circle : Icons.play_circle),
-                      ),
-                      IconButton(
-                        tooltip: 'Stop',
-                        onPressed: canPlay ? controller.stop : null,
-                        icon: const Icon(Icons.stop_circle_outlined),
-                      ),
-                      Text(_format(position)),
-                      Expanded(
-                        child: Slider(
-                          value: duration == Duration.zero ? 0 : position.inMilliseconds / duration.inMilliseconds,
-                          onChanged: canPlay && duration > Duration.zero
-                              ? (value) => controller.seek(Duration(milliseconds: (value * duration.inMilliseconds).round()))
-                              : null,
-                        ),
-                      ),
-                      Text(_format(duration)),
-                    ]),
-                  ),
+                    IconButton(
+                      tooltip: 'Stop',
+                      onPressed: canPlay ? controller.stop : null,
+                      icon: const Icon(Icons.stop_circle_outlined),
+                    ),
+                    const SizedBox(width: 8),
+                    Text('${_format(position)} / ${_format(duration)}'),
+                    const SizedBox(width: 12),
+                    const Expanded(child: Text('Click the waveform to seek')),
+                  ]),
                 ],
               ),
             ),
