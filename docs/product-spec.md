@@ -16,7 +16,7 @@ Make band-practice review fast: identify takes, listen, annotate, share notes, p
 2. Opening a practice lists WAV and MP3 recordings (typical maximum: 40 takes).
 3. The user can play, pause, seek, and view a waveform.
 4. A recording can be given a song title and safely renamed to `##SongName_Take#`.
-5. The user can create timestamped annotations and named sections.
+5. The user can create point annotations and range annotations (a note with a start/end span), plus named sections.
 6. Best Take is a multi-select flag, not a single winner.
 7. Each user has an independent portable note file; all discovered users' notes are readable.
 8. The UI remains interactive during scanning, waveform generation, conversion, matching, export, and sync. Each task gives a name, status, measurable progress when available, and a completion/failure result.
@@ -50,3 +50,8 @@ Make band-practice review fast: identify takes, listen, annotate, share notes, p
 
 Each recording has a generated UUID and current filename. All cross-references use UUIDs, never filenames.
 
+### Annotation types
+
+- **Point annotation:** a comment at one playback time.
+- **Range annotation:** a comment that applies from a selected start time through an end time; it is not a song-structure label.
+- **Section:** a separate structural marker such as verse, chorus, bridge, or outro, intended for later reference and navigation.

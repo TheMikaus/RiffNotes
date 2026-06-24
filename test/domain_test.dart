@@ -1,6 +1,7 @@
 import 'dart:io';
 
 import 'package:flutter_test/flutter_test.dart';
+import 'package:riffnotes/annotations.dart';
 import 'package:riffnotes/domain.dart';
 
 void main() {
@@ -57,5 +58,18 @@ void main() {
     expect(File('${folder.path}${Platform.pathSeparator}02_My_Song_Take2.mp3').existsSync(), isTrue);
     expect(renamed.recordings[0].isBestTake, isTrue);
     expect(renamed.recordings[0].title, 'My Song');
+  });
+
+  test('stores point and range annotations in a user file', () async {
+    final folder = await Directory.systemTemp.createTemp('riffnotes-notes-');
+    addTearDown(() => folder.delete(recursive: true));
+    final recording = Recording(id: 'take-1', file: File('${folder.path}${Platform.pathSeparator}take.wav'), title: null, isBestTake: false);
+    final repository = AnnotationRepository();
+    await repository.add(practiceFolder: folder.path, user: 'Alex', recording: recording, startMs: 1200, text: 'Point note');
+    await repository.add(practiceFolder: folder.path, user: 'Alex', recording: recording, startMs: 3000, endMs: 5400, text: 'Range note');
+    final notes = await repository.loadForUser(folder.path, 'Alex');
+    expect(notes, hasLength(2));
+    expect(notes[0].isRange, isFalse);
+    expect(notes[1].isRange, isTrue);
   });
 }
