@@ -3,7 +3,12 @@ import 'package:flutter/material.dart';
 import 'sections.dart';
 
 class SectionTimeline extends StatelessWidget {
-  const SectionTimeline({super.key, required this.sections, required this.duration, this.onSectionTap, this.selectedSection});
+  const SectionTimeline(
+      {super.key,
+      required this.sections,
+      required this.duration,
+      this.onSectionTap,
+      this.selectedSection});
 
   final List<SongSection> sections;
   final Duration duration;
@@ -12,8 +17,16 @@ class SectionTimeline extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    if (sections.isEmpty || duration == Duration.zero) return const SizedBox.shrink();
-    final colors = <Color>[Colors.blue, Colors.teal, Colors.deepPurple, Colors.orange, Colors.pink, Colors.green];
+    if (sections.isEmpty || duration == Duration.zero)
+      return const SizedBox.shrink();
+    final colors = <Color>[
+      Colors.blue,
+      Colors.teal,
+      Colors.deepPurple,
+      Colors.orange,
+      Colors.pink,
+      Colors.green
+    ];
     return SizedBox(
       height: 30,
       child: LayoutBuilder(
@@ -22,28 +35,47 @@ class SectionTimeline extends StatelessWidget {
           child: Stack(
             fit: StackFit.expand,
             children: [
-              ColoredBox(color: Theme.of(context).colorScheme.surfaceContainerHighest),
+              ColoredBox(
+                  color: Theme.of(context).colorScheme.surfaceContainerHighest),
               for (var index = 0; index < sections.length; index += 1)
                 Positioned(
-                  left: (sections[index].startMs / duration.inMilliseconds * constraints.maxWidth).clamp(0, constraints.maxWidth),
-                  width: ((sections[index].endMs - sections[index].startMs) / duration.inMilliseconds * constraints.maxWidth)
+                  left: (sections[index].startMs /
+                          duration.inMilliseconds *
+                          constraints.maxWidth)
+                      .clamp(0, constraints.maxWidth),
+                  width: ((sections[index].endMs - sections[index].startMs) /
+                          duration.inMilliseconds *
+                          constraints.maxWidth)
                       .clamp(1, constraints.maxWidth),
                   top: 3,
                   bottom: 3,
                   child: Tooltip(
-                    message: '${sections[index].label}: ${_time(sections[index].startMs)} – ${_time(sections[index].endMs)}',
+                    message:
+                        '${sections[index].label}: ${_time(sections[index].startMs)} – ${_time(sections[index].endMs)}',
                     child: InkWell(
-                      onTap: onSectionTap == null ? null : () => onSectionTap!(sections[index]),
-                      child: Container(
-                      padding: const EdgeInsets.symmetric(horizontal: 6),
-                      alignment: Alignment.centerLeft,
-                      decoration: BoxDecoration(
-                        color: colors[index % colors.length].withValues(alpha: .72),
-                        border: Border.all(color: selectedSection == sections[index] ? Colors.white : colors[index % colors.length], width: selectedSection == sections[index] ? 2 : 1),
-                        borderRadius: BorderRadius.circular(4),
-                      ),
-                      child: Text(sections[index].label, overflow: TextOverflow.ellipsis, maxLines: 1, style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w600)),
-                    )),
+                        onTap: onSectionTap == null
+                            ? null
+                            : () => onSectionTap!(sections[index]),
+                        child: Container(
+                          padding: const EdgeInsets.symmetric(horizontal: 6),
+                          alignment: Alignment.centerLeft,
+                          decoration: BoxDecoration(
+                            color: colors[index % colors.length]
+                                .withValues(alpha: .72),
+                            border: Border.all(
+                                color: selectedSection == sections[index]
+                                    ? Colors.white
+                                    : colors[index % colors.length],
+                                width:
+                                    selectedSection == sections[index] ? 2 : 1),
+                            borderRadius: BorderRadius.circular(4),
+                          ),
+                          child: Text(sections[index].label,
+                              overflow: TextOverflow.ellipsis,
+                              maxLines: 1,
+                              style: const TextStyle(
+                                  fontSize: 12, fontWeight: FontWeight.w600)),
+                        )),
                   ),
                 ),
             ],
@@ -93,14 +125,19 @@ class WaveformView extends StatelessWidget {
             onExit: (_) => onHoverProgress(null),
             onHover: (event) {
               if (constraints.maxWidth > 0) {
-                onHoverProgress((event.localPosition.dx / constraints.maxWidth).clamp(0, 1).toDouble());
+                onHoverProgress((event.localPosition.dx / constraints.maxWidth)
+                    .clamp(0, 1)
+                    .toDouble());
               }
             },
             child: GestureDetector(
               behavior: HitTestBehavior.opaque,
               onTapDown: (details) {
                 if (constraints.maxWidth > 0) {
-                  onSeekProgress((details.localPosition.dx / constraints.maxWidth).clamp(0, 1).toDouble());
+                  onSeekProgress(
+                      (details.localPosition.dx / constraints.maxWidth)
+                          .clamp(0, 1)
+                          .toDouble());
                 }
               },
               child: Stack(
@@ -115,21 +152,27 @@ class WaveformView extends StatelessWidget {
                       highlightStartProgress: highlightStartProgress,
                       highlightEndProgress: highlightEndProgress,
                       playedColor: Theme.of(context).colorScheme.primary,
-                      unplayedColor: Theme.of(context).colorScheme.outlineVariant,
+                      unplayedColor:
+                          Theme.of(context).colorScheme.outlineVariant,
                       playheadColor: Theme.of(context).colorScheme.secondary,
                     ),
                     child: const SizedBox(height: 100, width: double.infinity),
                   ),
                   if (hoverProgress != null && hoverTimeLabel != null)
                     Positioned(
-                      left: (hoverProgress! * (constraints.maxWidth - 50)).clamp(0, constraints.maxWidth - 50),
+                      left: (hoverProgress! * (constraints.maxWidth - 50))
+                          .clamp(0, constraints.maxWidth - 50),
                       top: 4,
                       child: IgnorePointer(
                         child: DecoratedBox(
-                          decoration: BoxDecoration(color: Colors.black87, borderRadius: BorderRadius.circular(3)),
+                          decoration: BoxDecoration(
+                              color: Colors.black87,
+                              borderRadius: BorderRadius.circular(3)),
                           child: Padding(
-                            padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 2),
-                            child: Text(hoverTimeLabel!, style: const TextStyle(fontSize: 11)),
+                            padding: const EdgeInsets.symmetric(
+                                horizontal: 5, vertical: 2),
+                            child: Text(hoverTimeLabel!,
+                                style: const TextStyle(fontSize: 11)),
                           ),
                         ),
                       ),
@@ -173,27 +216,51 @@ class _WaveformPainter extends CustomPainter {
       final end = (highlightEndProgress ?? start).clamp(start, 1);
       final left = size.width * start.clamp(0, 1);
       final width = (size.width * end) - left;
-      canvas.drawRect(Rect.fromLTWH(left - 1, 0, width + 2, size.height), Paint()..color = Colors.amber.withValues(alpha: .28));
+      canvas.drawRect(Rect.fromLTWH(left - 1, 0, width + 2, size.height),
+          Paint()..color = Colors.amber.withValues(alpha: .28));
     }
-    final played = Paint()..color = playedColor..strokeWidth = 1.4..strokeCap = StrokeCap.round;
-    final unplayed = Paint()..color = unplayedColor..strokeWidth = 1.4..strokeCap = StrokeCap.round;
+    final played = Paint()
+      ..color = playedColor
+      ..strokeWidth = 1.4
+      ..strokeCap = StrokeCap.round;
+    final unplayed = Paint()
+      ..color = unplayedColor
+      ..strokeWidth = 1.4
+      ..strokeCap = StrokeCap.round;
     for (var index = 0; index < peaks.length; index += 1) {
       final x = index * size.width / (peaks.length - 1).clamp(1, peaks.length);
       // The viewport is exactly 100 px high, so peak-to-peak height tops out
       // at exactly 75 px (37.5 px above and below the centre line).
-      final height = peaks[index].clamp(0.025, 1).toDouble() * (size.height * .375);
-      canvas.drawLine(Offset(x, center - height), Offset(x, center + height), x / size.width <= progress ? played : unplayed);
+      final height =
+          peaks[index].clamp(0.025, 1).toDouble() * (size.height * .375);
+      canvas.drawLine(Offset(x, center - height), Offset(x, center + height),
+          x / size.width <= progress ? played : unplayed);
     }
     if (rangeStartProgress case final start?) {
       final markerX = size.width * start.clamp(0, 1);
-      canvas.drawLine(Offset(markerX, 2), Offset(markerX, size.height - 2), Paint()..color = Colors.amber..strokeWidth = 2);
+      canvas.drawLine(
+          Offset(markerX, 2),
+          Offset(markerX, size.height - 2),
+          Paint()
+            ..color = Colors.amber
+            ..strokeWidth = 2);
     }
     if (hoverProgress case final hover?) {
       final hoverX = size.width * hover.clamp(0, 1);
-      canvas.drawLine(Offset(hoverX, 0), Offset(hoverX, size.height), Paint()..color = Colors.white70..strokeWidth = 1);
+      canvas.drawLine(
+          Offset(hoverX, 0),
+          Offset(hoverX, size.height),
+          Paint()
+            ..color = Colors.white70
+            ..strokeWidth = 1);
     }
     final playheadX = size.width * progress;
-    canvas.drawLine(Offset(playheadX, 4), Offset(playheadX, size.height - 4), Paint()..color = playheadColor..strokeWidth = 2);
+    canvas.drawLine(
+        Offset(playheadX, 4),
+        Offset(playheadX, size.height - 4),
+        Paint()
+          ..color = playheadColor
+          ..strokeWidth = 2);
   }
 
   @override

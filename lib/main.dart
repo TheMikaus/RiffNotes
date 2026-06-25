@@ -3,6 +3,7 @@ import 'dart:io';
 
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
+import 'package:path/path.dart' as path;
 
 import 'activity.dart';
 import 'annotations.dart';
@@ -329,6 +330,13 @@ class _LibraryScreenState extends State<LibraryScreen> {
                   setDialogState(() {});
                 },
               ),
+              const ListTile(
+                contentPadding: EdgeInsets.zero,
+                leading: Icon(Icons.speaker_outlined),
+                title: Text('Audio output device'),
+                subtitle: Text(
+                    'Currently uses the Windows default output. Device selection needs an audio backend upgrade.'),
+              ),
             ],
           ),
           actions: [
@@ -540,6 +548,99 @@ class _LibraryScreenState extends State<LibraryScreen> {
     label.dispose();
   }
 
+  Future<void> _editSection(SongSection section) async {
+    final practice = _selected;
+    final recording = _selectedRecording;
+    if (practice == null || recording == null) return;
+    final label = TextEditingController(text: section.label);
+    final start =
+        TextEditingController(text: _formatMilliseconds(section.startMs));
+    final end = TextEditingController(text: _formatMilliseconds(section.endMs));
+    final accepted = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Edit song section'),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            TextField(
+              controller: label,
+              autofocus: true,
+              decoration: const InputDecoration(labelText: 'Section name'),
+            ),
+            TextField(
+              controller: start,
+              decoration: const InputDecoration(labelText: 'Start mm:ss'),
+            ),
+            TextField(
+              controller: end,
+              decoration: const InputDecoration(labelText: 'End mm:ss'),
+            ),
+          ],
+        ),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(context, false),
+              child: const Text('Cancel')),
+          FilledButton(
+              onPressed: () => Navigator.pop(context, true),
+              child: const Text('Save section')),
+        ],
+      ),
+    );
+    if (accepted == true && label.text.trim().isNotEmpty) {
+      final startMs = _parseTimestamp(start.text.trim()) ?? section.startMs;
+      final endMs = _parseTimestamp(end.text.trim()) ?? section.endMs;
+      if (endMs <= startMs) {
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+              content: Text('Section end must be after the start.')));
+        }
+      } else {
+        await _sectionsRepository.replace(
+          practice.directory.path,
+          section,
+          SongSection(
+            recordingId: section.recordingId,
+            startMs: startMs,
+            endMs: endMs,
+            label: label.text.trim(),
+          ),
+        );
+        await _refreshSections(recording);
+      }
+    }
+    label.dispose();
+    start.dispose();
+    end.dispose();
+  }
+
+  Future<void> _deleteSection(SongSection section) async {
+    final practice = _selected;
+    final recording = _selectedRecording;
+    if (practice == null || recording == null) return;
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: Text('Delete ${section.label}?'),
+        content: Text(
+            '${_formatMilliseconds(section.startMs)} – ${_formatMilliseconds(section.endMs)} will be removed.'),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(context, false),
+              child: const Text('Cancel')),
+          FilledButton(
+              onPressed: () => Navigator.pop(context, true),
+              child: const Text('Delete')),
+        ],
+      ),
+    );
+    if (confirmed == true) {
+      await _sectionsRepository.delete(practice.directory.path, section);
+      await _refreshSections(recording);
+    }
+  }
+
   Future<void> _addRangeAnnotation(
       Recording recording, int startMs, int endMs) async {
     final practice = _selected;
@@ -595,6 +696,148 @@ class _LibraryScreenState extends State<LibraryScreen> {
   String _formatMilliseconds(int milliseconds) {
     final duration = Duration(milliseconds: milliseconds);
     return '${duration.inMinutes.remainder(60).toString().padLeft(2, '0')}:${duration.inSeconds.remainder(60).toString().padLeft(2, '0')}';
+  }
+
+  int? _parseTimestamp(String value) {
+    final parts = value.split(':').map((item) => int.tryParse(item)).toList();
+    if (parts.any((item) => item == null)) return null;
+    if (parts.length == 2) {
+      return (parts[0]! * 60 + parts[1]!) * 1000;
+    }
+    if (parts.length == 3) {
+      return (parts[0]! * 3600 + parts[1]! * 60 + parts[2]!) * 1000;
+    }
+    return null;
+  }
+
+  Future<void> _exportAudio(
+      Recording recording, SongSection? section, String extension) async {
+    final baseName = _exportBaseName(recording, section);
+    final selectedPath = await FilePicker.platform.saveFile(
+      dialogTitle: section == null ? 'Export track' : 'Export section',
+      fileName: '$baseName.$extension',
+      type: FileType.custom,
+      allowedExtensions: [extension],
+    );
+    if (selectedPath == null) return;
+    final output = File(selectedPath);
+    try {
+      await _activity.run('Exporting audio', (update) async {
+        update(null, 'Creating ${path.basename(output.path)}…');
+        await _audioProcessing.exportAudio(
+          recording: recording,
+          output: output,
+          decibels: _volumeBoostDb,
+          channelMode: _channelMode,
+          startMs: section?.startMs,
+          endMs: section?.endMs,
+        );
+        update(1, 'Export complete');
+      });
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(content: Text('Exported ${path.basename(output.path)}')));
+      }
+    } on ProcessException {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+            content: Text('FFmpeg is required to export processed audio.')));
+      }
+    } on StateError catch (error) {
+      if (mounted) {
+        ScaffoldMessenger.of(context)
+            .showSnackBar(SnackBar(content: Text(error.message)));
+      }
+    }
+  }
+
+  Future<void> _convertSelectedWavToMp3(Recording recording) async {
+    final practice = _selected;
+    if (practice == null || recording.extension != '.wav') return;
+    final target = File(path.join(practice.directory.path,
+        '${path.basenameWithoutExtension(recording.filename)}.mp3'));
+    if (await target.exists()) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+            content: Text('${path.basename(target.path)} already exists.')));
+      }
+      return;
+    }
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Convert WAV to MP3?'),
+        content: Text(
+            'This will create ${path.basename(target.path)}, verify it, then remove ${recording.filename}. Notes and sections stay linked.'),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(context, false),
+              child: const Text('Cancel')),
+          FilledButton(
+              onPressed: () => Navigator.pop(context, true),
+              child: const Text('Convert')),
+        ],
+      ),
+    );
+    if (confirmed != true) return;
+    try {
+      await _audio.stop();
+      final updatedPractice =
+          await _activity.run('Converting WAV to MP3', (update) async {
+        update(null, 'Creating ${path.basename(target.path)}…');
+        await _audioProcessing.convertWavToMp3(recording, target);
+        update(.8, 'MP3 verified; removing original WAV…');
+        await recording.file.delete();
+        final result =
+            await _repository.replaceRecordingFile(practice, recording, target);
+        update(1, 'Conversion complete');
+        return result;
+      });
+      if (!mounted) return;
+      final converted = updatedPractice.recordings
+          .where((item) => item.id == recording.id)
+          .firstOrNull;
+      setState(() {
+        _selected = updatedPractice;
+        _practices = _practices
+            .map((item) => item.directory.path == updatedPractice.directory.path
+                ? updatedPractice
+                : item)
+            .toList(growable: false);
+      });
+      if (converted != null) {
+        await _selectRecording(converted);
+      }
+    } on ProcessException {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+            content: Text('FFmpeg is required to convert WAV files to MP3.')));
+      }
+    } on FileSystemException catch (error) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(content: Text('Conversion failed: ${error.message}')));
+      }
+    } on StateError catch (error) {
+      if (mounted) {
+        ScaffoldMessenger.of(context)
+            .showSnackBar(SnackBar(content: Text(error.message)));
+      }
+    }
+  }
+
+  String _exportBaseName(Recording recording, SongSection? section) {
+    final raw = [
+      recording.title ?? path.basenameWithoutExtension(recording.filename),
+      if (section != null) section.label,
+    ].join('_');
+    final sanitized = raw
+        .replaceAll(RegExp(r'[<>:"/\\|?*\x00-\x1F]'), '')
+        .trim()
+        .replaceAll(RegExp(r'\s+'), '_')
+        .replaceAll(RegExp(r'_+'), '_')
+        .replaceAll(RegExp(r'[. ]+$'), '');
+    return sanitized.isEmpty ? 'RiffNotes_Export' : sanitized;
   }
 
   Future<void> _previewAndApplyRename() async {
@@ -741,6 +984,10 @@ class _LibraryScreenState extends State<LibraryScreen> {
                   onAddAnnotation: _addAnnotation,
                   onStartRangeNote: _startRangeNote,
                   onStartSection: _startSection,
+                  onEditSection: _editSection,
+                  onDeleteSection: _deleteSection,
+                  onExportAudio: _exportAudio,
+                  onConvertToMp3: _convertSelectedWavToMp3,
                   onWaveformSeek: _onWaveformSeek,
                   rangeStartMs: _rangeRecordingId == _selectedRecording?.id
                       ? _rangeStartMs
@@ -810,6 +1057,10 @@ class _RecordingList extends StatelessWidget {
     required this.onAddAnnotation,
     required this.onStartRangeNote,
     required this.onStartSection,
+    required this.onEditSection,
+    required this.onDeleteSection,
+    required this.onExportAudio,
+    required this.onConvertToMp3,
     required this.onWaveformSeek,
     required this.rangeStartMs,
     required this.sectionStartMs,
@@ -837,6 +1088,12 @@ class _RecordingList extends StatelessWidget {
   final ValueChanged<Recording> onAddAnnotation;
   final ValueChanged<Recording> onStartRangeNote;
   final ValueChanged<Recording> onStartSection;
+  final ValueChanged<SongSection> onEditSection;
+  final ValueChanged<SongSection> onDeleteSection;
+  final Future<void> Function(
+          Recording recording, SongSection? section, String extension)
+      onExportAudio;
+  final ValueChanged<Recording> onConvertToMp3;
   final ValueChanged<double> onWaveformSeek;
   final int? rangeStartMs;
   final int? sectionStartMs;
@@ -967,6 +1224,10 @@ class _RecordingList extends StatelessWidget {
           onAddAnnotation: onAddAnnotation,
           onStartRangeNote: onStartRangeNote,
           onStartSection: onStartSection,
+          onEditSection: onEditSection,
+          onDeleteSection: onDeleteSection,
+          onExportAudio: onExportAudio,
+          onConvertToMp3: onConvertToMp3,
           onWaveformSeek: onWaveformSeek,
           rangeStartMs: rangeStartMs,
           sectionStartMs: sectionStartMs,
@@ -1009,6 +1270,10 @@ class _PlayerPanel extends StatefulWidget {
     required this.onAddAnnotation,
     required this.onStartRangeNote,
     required this.onStartSection,
+    required this.onEditSection,
+    required this.onDeleteSection,
+    required this.onExportAudio,
+    required this.onConvertToMp3,
     required this.onWaveformSeek,
     required this.rangeStartMs,
     required this.sectionStartMs,
@@ -1024,6 +1289,12 @@ class _PlayerPanel extends StatefulWidget {
   final ValueChanged<Recording> onAddAnnotation;
   final ValueChanged<Recording> onStartRangeNote;
   final ValueChanged<Recording> onStartSection;
+  final ValueChanged<SongSection> onEditSection;
+  final ValueChanged<SongSection> onDeleteSection;
+  final Future<void> Function(
+          Recording recording, SongSection? section, String extension)
+      onExportAudio;
+  final ValueChanged<Recording> onConvertToMp3;
   final ValueChanged<double> onWaveformSeek;
   final int? rangeStartMs;
   final int? sectionStartMs;
@@ -1038,6 +1309,13 @@ class _PlayerPanel extends StatefulWidget {
   State<_PlayerPanel> createState() => _PlayerPanelState();
 }
 
+class _ExportChoice {
+  const _ExportChoice(this.extension, this.sectionOnly);
+
+  final String extension;
+  final bool sectionOnly;
+}
+
 class _PlayerPanelState extends State<_PlayerPanel> {
   double? _hoverProgress;
   PracticeAnnotation? _hoveredNote;
@@ -1050,6 +1328,10 @@ class _PlayerPanelState extends State<_PlayerPanel> {
     final onAddAnnotation = widget.onAddAnnotation;
     final onStartRangeNote = widget.onStartRangeNote;
     final onStartSection = widget.onStartSection;
+    final onEditSection = widget.onEditSection;
+    final onDeleteSection = widget.onDeleteSection;
+    final onExportAudio = widget.onExportAudio;
+    final onConvertToMp3 = widget.onConvertToMp3;
     final onWaveformSeek = widget.onWaveformSeek;
     final rangeStartMs = widget.rangeStartMs;
     final sectionStartMs = widget.sectionStartMs;
@@ -1210,6 +1492,26 @@ class _PlayerPanelState extends State<_PlayerPanel> {
                                       ? Icons.repeat_one
                                       : Icons.repeat),
                                 ),
+                              if (_selectedSection != null)
+                                IconButton(
+                                  tooltip: 'Edit ${_selectedSection!.label}',
+                                  onPressed: () {
+                                    final section = _selectedSection!;
+                                    setState(() => _selectedSection = null);
+                                    onEditSection(section);
+                                  },
+                                  icon: const Icon(Icons.edit_note_outlined),
+                                ),
+                              if (_selectedSection != null)
+                                IconButton(
+                                  tooltip: 'Delete ${_selectedSection!.label}',
+                                  onPressed: () {
+                                    final section = _selectedSection!;
+                                    setState(() => _selectedSection = null);
+                                    onDeleteSection(section);
+                                  },
+                                  icon: const Icon(Icons.delete_outline),
+                                ),
                               const SizedBox(width: 8),
                               Text(
                                   '${_format(position)} / ${_format(duration)}'),
@@ -1300,6 +1602,50 @@ class _PlayerPanelState extends State<_PlayerPanel> {
                           ]),
                         ),
                       ),
+                      PopupMenuButton<_ExportChoice>(
+                        tooltip: 'Export audio',
+                        onSelected: (choice) {
+                          final recording = controller.recording!;
+                          final section =
+                              choice.sectionOnly ? _selectedSection : null;
+                          unawaited(onExportAudio(
+                              recording, section, choice.extension));
+                        },
+                        itemBuilder: (context) => [
+                          const PopupMenuItem(
+                              value: _ExportChoice('wav', false),
+                              child: Text('Export track as WAV')),
+                          const PopupMenuItem(
+                              value: _ExportChoice('mp3', false),
+                              child: Text('Export track as MP3')),
+                          if (_selectedSection != null) ...const [
+                            PopupMenuDivider(),
+                            PopupMenuItem(
+                                value: _ExportChoice('wav', true),
+                                child: Text('Export selected section as WAV')),
+                            PopupMenuItem(
+                                value: _ExportChoice('mp3', true),
+                                child: Text('Export selected section as MP3')),
+                          ],
+                        ],
+                        child: const Padding(
+                          padding:
+                              EdgeInsets.symmetric(horizontal: 8, vertical: 8),
+                          child: Row(mainAxisSize: MainAxisSize.min, children: [
+                            Icon(Icons.ios_share_outlined),
+                            SizedBox(width: 6),
+                            Text('Export'),
+                          ]),
+                        ),
+                      ),
+                      if (controller.recording!.extension == '.wav' ||
+                          controller.recording!.extension == '.wave')
+                        TextButton.icon(
+                          onPressed: () =>
+                              onConvertToMp3(controller.recording!),
+                          icon: const Icon(Icons.audio_file_outlined),
+                          label: const Text('Convert to MP3'),
+                        ),
                     ],
                   ),
                 if (controller.recording != null)

@@ -47,7 +47,8 @@ class Recording {
   String get filename => path.basename(file.path);
   String get extension => path.extension(file.path).toLowerCase();
 
-  Recording copyWith({String? title, bool? isBestTake, File? file}) => Recording(
+  Recording copyWith({String? title, bool? isBestTake, File? file}) =>
+      Recording(
         id: id,
         file: file ?? this.file,
         title: title ?? this.title,
@@ -88,7 +89,9 @@ class PracticeRepository {
     final recordings = <Recording>[];
     var catalogueChanged = false;
     await for (final entity in folder.list()) {
-      if (entity is File && supportedAudioExtensions.contains(path.extension(entity.path).toLowerCase())) {
+      if (entity is File &&
+          supportedAudioExtensions
+              .contains(path.extension(entity.path).toLowerCase())) {
         final filename = path.basename(entity.path);
         final entry = catalogue[filename] as Map<String, dynamic>?;
         final id = entry?['id'] as String? ?? _newId();
@@ -142,6 +145,24 @@ class PracticeRepository {
     );
   }
 
+  Future<PracticeFolder> replaceRecordingFile(
+    PracticeFolder practice,
+    Recording recording,
+    File replacement,
+  ) async {
+    final catalogue = await _loadCatalogue(practice.directory);
+    final existing =
+        catalogue.remove(recording.filename) as Map<String, dynamic>?;
+    catalogue[path.basename(replacement.path)] = existing ??
+        <String, dynamic>{
+          'id': recording.id,
+          'title': recording.title,
+          'isBestTake': recording.isBestTake,
+        };
+    await _writeCatalogue(practice.directory, catalogue);
+    return openPractice(practice.directory);
+  }
+
   List<RenameProposal> planRename(PracticeFolder practice) {
     final proposals = <RenameProposal>[];
     final takesPerTitle = <String, int>{};
@@ -158,11 +179,13 @@ class PracticeRepository {
       takesPerTitle[normalizedTitle] = take;
       proposals.add(RenameProposal(
         recording: recording,
-        targetFilename: '${sequence.toString().padLeft(2, '0')}_${normalizedTitle}_Take$take${recording.extension}',
+        targetFilename:
+            '${sequence.toString().padLeft(2, '0')}_${normalizedTitle}_Take$take${recording.extension}',
       ));
     }
 
-    final sources = proposals.map((item) => item.recording.filename.toLowerCase()).toSet();
+    final sources =
+        proposals.map((item) => item.recording.filename.toLowerCase()).toSet();
     final targets = <String, int>{};
     for (var index = 0; index < proposals.length; index += 1) {
       final target = proposals[index].targetFilename.toLowerCase();
@@ -171,29 +194,44 @@ class PracticeRepository {
 
     return proposals.map((proposal) {
       final target = proposal.targetFilename.toLowerCase();
-      final targetFile = File(path.join(practice.directory.path, proposal.targetFilename));
+      final targetFile =
+          File(path.join(practice.directory.path, proposal.targetFilename));
       if ((targets[target] ?? 0) > 1) {
-        return RenameProposal(recording: proposal.recording, targetFilename: proposal.targetFilename, issue: 'Duplicate target name');
+        return RenameProposal(
+            recording: proposal.recording,
+            targetFilename: proposal.targetFilename,
+            issue: 'Duplicate target name');
       }
       if (targetFile.existsSync() && !sources.contains(target)) {
-        return RenameProposal(recording: proposal.recording, targetFilename: proposal.targetFilename, issue: 'A different file already uses this name');
+        return RenameProposal(
+            recording: proposal.recording,
+            targetFilename: proposal.targetFilename,
+            issue: 'A different file already uses this name');
       }
       return proposal;
     }).toList(growable: false);
   }
 
-  Future<PracticeFolder> applyRename(PracticeFolder practice, List<RenameProposal> proposals) async {
-    final active = proposals.where((proposal) => proposal.willRename).toList(growable: false);
+  Future<PracticeFolder> applyRename(
+      PracticeFolder practice, List<RenameProposal> proposals) async {
+    final active = proposals
+        .where((proposal) => proposal.willRename)
+        .toList(growable: false);
     if (active.isEmpty) {
       return practice;
     }
-    final blocked = proposals.where((proposal) => proposal.issue != null).toList(growable: false);
+    final blocked = proposals
+        .where((proposal) => proposal.issue != null)
+        .toList(growable: false);
     if (blocked.isNotEmpty) {
       throw StateError('Resolve rename conflicts before applying the rename.');
     }
 
-    final catalogueFile = File(path.join(practice.directory.path, _catalogueName));
-    final originalCatalogue = await catalogueFile.exists() ? await catalogueFile.readAsString() : null;
+    final catalogueFile =
+        File(path.join(practice.directory.path, _catalogueName));
+    final originalCatalogue = await catalogueFile.exists()
+        ? await catalogueFile.readAsString()
+        : null;
     final catalogue = await _loadCatalogue(practice.directory);
     final temporaryFiles = <RenameProposal, File>{};
     final completed = <RenameProposal>[];
@@ -208,20 +246,24 @@ class PracticeRepository {
         await proposal.recording.file.rename(temporary.path);
       }
       for (final proposal in active) {
-        final target = File(path.join(practice.directory.path, proposal.targetFilename));
+        final target =
+            File(path.join(practice.directory.path, proposal.targetFilename));
         await temporaryFiles[proposal]!.rename(target.path);
         completed.add(proposal);
-        final existing = catalogue.remove(proposal.recording.filename) as Map<String, dynamic>?;
-        catalogue[proposal.targetFilename] = existing ?? <String, dynamic>{
-          'id': proposal.recording.id,
-          'title': proposal.recording.title,
-          'isBestTake': proposal.recording.isBestTake,
-        };
+        final existing = catalogue.remove(proposal.recording.filename)
+            as Map<String, dynamic>?;
+        catalogue[proposal.targetFilename] = existing ??
+            <String, dynamic>{
+              'id': proposal.recording.id,
+              'title': proposal.recording.title,
+              'isBestTake': proposal.recording.isBestTake,
+            };
       }
       await _writeCatalogue(practice.directory, catalogue);
     } catch (_) {
       for (final proposal in completed.reversed) {
-        final target = File(path.join(practice.directory.path, proposal.targetFilename));
+        final target =
+            File(path.join(practice.directory.path, proposal.targetFilename));
         if (await target.exists()) {
           await target.rename(temporaryFiles[proposal]!.path);
         }
@@ -248,7 +290,8 @@ class PracticeRepository {
     final file = File(path.join(folder.path, _catalogueName));
     if (!await file.exists()) return <String, dynamic>{};
     try {
-      final decoded = jsonDecode(await file.readAsString()) as Map<String, dynamic>;
+      final decoded =
+          jsonDecode(await file.readAsString()) as Map<String, dynamic>;
       final recordings = decoded['recordings'];
       if (recordings is Map<String, dynamic>) {
         return recordings;
@@ -259,7 +302,8 @@ class PracticeRepository {
     }
   }
 
-  Future<void> _writeCatalogue(Directory folder, Map<String, dynamic> recordings) async {
+  Future<void> _writeCatalogue(
+      Directory folder, Map<String, dynamic> recordings) async {
     final file = File(path.join(folder.path, _catalogueName));
     const encoder = JsonEncoder.withIndent('  ');
     await file.writeAsString(
@@ -277,7 +321,8 @@ class PracticeRepository {
     return '${_hex(parts.sublist(0, 4))}-${_hex(parts.sublist(4, 6))}-${_hex(parts.sublist(6, 8))}-${_hex(parts.sublist(8, 10))}-${_hex(parts.sublist(10))}';
   }
 
-  String _hex(List<int> bytes) => bytes.map((value) => value.toRadixString(16).padLeft(2, '0')).join();
+  String _hex(List<int> bytes) =>
+      bytes.map((value) => value.toRadixString(16).padLeft(2, '0')).join();
 
   String _filenameSafeTitle(String title) {
     final sanitized = title

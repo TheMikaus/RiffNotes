@@ -36,7 +36,8 @@ class PracticeAnnotation {
         'createdAt': createdAt.toIso8601String(),
       };
 
-  factory PracticeAnnotation.fromJson(Map<String, dynamic> json) => PracticeAnnotation(
+  factory PracticeAnnotation.fromJson(Map<String, dynamic> json) =>
+      PracticeAnnotation(
         id: json['id'] as String,
         recordingId: json['recordingId'] as String,
         startMs: json['startMs'] as int,
@@ -60,27 +61,34 @@ class AnnotationRepository {
     await for (final entity in folder.list()) {
       if (entity is! File) continue;
       final filename = path.basename(entity.path);
-      final match = RegExp(r'^\.riffnotes\.(.+)\.bandnotes$').firstMatch(filename);
+      final match =
+          RegExp(r'^\.riffnotes\.(.+)\.bandnotes$').firstMatch(filename);
       if (match == null) continue;
       try {
-        final content = jsonDecode(await entity.readAsString()) as Map<String, dynamic>;
+        final content =
+            jsonDecode(await entity.readAsString()) as Map<String, dynamic>;
         final user = content['user'] as String? ?? match.group(1)!;
-        final annotations = (content['annotations'] as List<dynamic>? ?? const <dynamic>[])
-            .cast<Map<String, dynamic>>()
-            .map(PracticeAnnotation.fromJson);
-        result.addAll(annotations.map((annotation) => UserAnnotation(user: user, annotation: annotation)));
+        final annotations =
+            (content['annotations'] as List<dynamic>? ?? const <dynamic>[])
+                .cast<Map<String, dynamic>>()
+                .map(PracticeAnnotation.fromJson);
+        result.addAll(annotations.map((annotation) =>
+            UserAnnotation(user: user, annotation: annotation)));
       } on FormatException {
         // A malformed bandmate file should not hide the rest of the review.
       }
     }
-    result.sort((a, b) => a.annotation.createdAt.compareTo(b.annotation.createdAt));
+    result.sort(
+        (a, b) => a.annotation.createdAt.compareTo(b.annotation.createdAt));
     return result;
   }
 
-  Future<List<PracticeAnnotation>> loadForUser(String practiceFolder, String user) async {
+  Future<List<PracticeAnnotation>> loadForUser(
+      String practiceFolder, String user) async {
     final file = _fileFor(practiceFolder, user);
     if (!await file.exists()) return <PracticeAnnotation>[];
-    final content = jsonDecode(await file.readAsString()) as Map<String, dynamic>;
+    final content =
+        jsonDecode(await file.readAsString()) as Map<String, dynamic>;
     final notes = (content['annotations'] as List<dynamic>? ?? const [])
         .cast<Map<String, dynamic>>()
         .map(PracticeAnnotation.fromJson)
@@ -115,17 +123,23 @@ class AnnotationRepository {
     return annotation;
   }
 
-  Future<void> _write(String folder, String user, List<PracticeAnnotation> notes) async {
+  Future<void> _write(
+      String folder, String user, List<PracticeAnnotation> notes) async {
     final file = _fileFor(folder, user);
     const encoder = JsonEncoder.withIndent('  ');
-    await file.writeAsString(encoder.convert({
-      'version': 1,
-      'user': user,
-      'annotations': notes.map((note) => note.toJson()).toList(),
-    }), flush: true);
+    await file.writeAsString(
+        encoder.convert({
+          'version': 1,
+          'user': user,
+          'annotations': notes.map((note) => note.toJson()).toList(),
+        }),
+        flush: true);
   }
 
-  File _fileFor(String folder, String user) => File(path.join(folder, '.riffnotes.${_safeUser(user)}.bandnotes'));
-  String _safeUser(String user) => user.trim().replaceAll(RegExp(r'[^a-zA-Z0-9_-]'), '_');
-  String _id() => '${DateTime.now().microsecondsSinceEpoch}-${Random.secure().nextInt(1 << 32)}';
+  File _fileFor(String folder, String user) =>
+      File(path.join(folder, '.riffnotes.${_safeUser(user)}.bandnotes'));
+  String _safeUser(String user) =>
+      user.trim().replaceAll(RegExp(r'[^a-zA-Z0-9_-]'), '_');
+  String _id() =>
+      '${DateTime.now().microsecondsSinceEpoch}-${Random.secure().nextInt(1 << 32)}';
 }

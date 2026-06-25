@@ -17,9 +17,11 @@ class WaveformRepository {
   static const _cacheFolder = '.riffnotes-cache';
   static const _cacheVersion = 2;
 
-  Future<WaveformData> loadOrGenerate(PracticeFolder practice, Recording recording) async {
+  Future<WaveformData> loadOrGenerate(
+      PracticeFolder practice, Recording recording) async {
     final sourceStat = await recording.file.stat();
-    final cache = File(path.join(practice.directory.path, _cacheFolder, '${recording.id}.waveform.json'));
+    final cache = File(path.join(practice.directory.path, _cacheFolder,
+        '${recording.id}.waveform.json'));
     final cached = await _readCache(cache, sourceStat);
     if (cached != null) {
       return WaveformData(peaks: cached, fromCache: true);
@@ -46,7 +48,9 @@ class WaveformRepository {
     );
     if (result.exitCode != 0) {
       final error = _decodeOutput(result.stderr);
-      throw StateError(error.isEmpty ? 'FFmpeg could not read this audio file.' : error.trim());
+      throw StateError(error.isEmpty
+          ? 'FFmpeg could not read this audio file.'
+          : error.trim());
     }
     final output = result.stdout;
     if (output is! List<int> || output.length < 2) {
@@ -70,15 +74,19 @@ class WaveformRepository {
   Future<List<double>?> _readCache(File cache, FileStat sourceStat) async {
     if (!await cache.exists()) return null;
     try {
-      final decoded = jsonDecode(await cache.readAsString()) as Map<String, dynamic>;
+      final decoded =
+          jsonDecode(await cache.readAsString()) as Map<String, dynamic>;
       if (decoded['version'] != _cacheVersion ||
           decoded['sourceBytes'] != sourceStat.size ||
-          decoded['sourceModifiedMs'] != sourceStat.modified.millisecondsSinceEpoch) {
+          decoded['sourceModifiedMs'] !=
+              sourceStat.modified.millisecondsSinceEpoch) {
         return null;
       }
       final values = decoded['peaks'];
       if (values is! List || values.isEmpty) return null;
-      return values.map((value) => (value as num).toDouble()).toList(growable: false);
+      return values
+          .map((value) => (value as num).toDouble())
+          .toList(growable: false);
     } on FormatException {
       return null;
     } on TypeError {
@@ -106,14 +114,16 @@ class WaveformRepository {
       final bucket = sample * count ~/ sampleCount;
       if (magnitude > peaks[bucket]) peaks[bucket] = magnitude;
     }
-    final maximum = peaks.reduce((largest, value) => value > largest ? value : largest);
+    final maximum =
+        peaks.reduce((largest, value) => value > largest ? value : largest);
     if (maximum == 0) return peaks;
     return peaks.map((value) => value / maximum).toList(growable: false);
   }
 }
 
 class WaveformController extends ChangeNotifier {
-  WaveformController({WaveformRepository? repository}) : _repository = repository ?? WaveformRepository();
+  WaveformController({WaveformRepository? repository})
+      : _repository = repository ?? WaveformRepository();
 
   final WaveformRepository _repository;
   int _request = 0;
@@ -135,11 +145,15 @@ class WaveformController extends ChangeNotifier {
       final data = await _repository.loadOrGenerate(practice, recording);
       if (request == _request) _data = data;
     } on ProcessException {
-      if (request == _request) _error = 'FFmpeg was not found. Install FFmpeg, then restart RiffNotes.';
+      if (request == _request)
+        _error =
+            'FFmpeg was not found. Install FFmpeg, then restart RiffNotes.';
     } on FileSystemException {
-      if (request == _request) _error = 'Could not create the waveform cache for this practice.';
+      if (request == _request)
+        _error = 'Could not create the waveform cache for this practice.';
     } on StateError catch (error) {
-      if (request == _request) _error = 'Waveform unavailable: ${error.message}';
+      if (request == _request)
+        _error = 'Waveform unavailable: ${error.message}';
     } catch (_) {
       if (request == _request) _error = 'Waveform unavailable for this file.';
     } finally {

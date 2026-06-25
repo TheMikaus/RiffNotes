@@ -62,16 +62,100 @@ class AudioProcessingRepository {
     return output;
   }
 
+  Future<File> exportAudio({
+    required Recording recording,
+    required File output,
+    required double decibels,
+    required PlaybackChannelMode channelMode,
+    int? startMs,
+    int? endMs,
+  }) async {
+    await output.parent.create(recursive: true);
+    final filters = _filters(decibels: decibels, channelMode: channelMode);
+    final durationMs = startMs != null && endMs != null && endMs > startMs
+        ? endMs - startMs
+        : null;
+    final extension = path.extension(output.path).toLowerCase();
+    final codecArgs = switch (extension) {
+      '.mp3' => <String>['-codec:a', 'libmp3lame', '-q:a', '2'],
+      _ => <String>['-c:a', 'pcm_s16le'],
+    };
+    final result = await Process.run(
+        'ffmpeg',
+        <String>[
+          '-y',
+          '-v',
+          'error',
+          if (startMs != null) ...[
+            '-ss',
+            _seconds(startMs),
+          ],
+          '-i',
+          recording.file.path,
+          if (durationMs != null) ...[
+            '-t',
+            _seconds(durationMs),
+          ],
+          if (filters.isNotEmpty) ...['-af', filters.join(',')],
+          ...codecArgs,
+          output.path,
+        ],
+        stdoutEncoding: null,
+        stderrEncoding: null);
+    if (result.exitCode != 0 || !await output.exists()) {
+      throw StateError('FFmpeg could not export the audio file.');
+    }
+    return output;
+  }
+
+  Future<File> convertWavToMp3(Recording recording, File output) async {
+    await output.parent.create(recursive: true);
+    final result = await Process.run(
+        'ffmpeg',
+        <String>[
+          '-y',
+          '-v',
+          'error',
+          '-i',
+          recording.file.path,
+          '-codec:a',
+          'libmp3lame',
+          '-q:a',
+          '2',
+          output.path,
+        ],
+        stdoutEncoding: null,
+        stderrEncoding: null);
+    if (result.exitCode != 0 ||
+        !await output.exists() ||
+        await output.length() == 0) {
+      throw StateError('FFmpeg could not convert the WAV file to MP3.');
+    }
+    return output;
+  }
+
   String _channelFilter(PlaybackChannelMode channelMode) {
     switch (channelMode) {
       case PlaybackChannelMode.stereo:
         return 'anull';
       case PlaybackChannelMode.muteLeft:
-        return 'pan=stereo|c0=0*c0|c1=c1';
+        return 'aformat=channel_layouts=stereo,pan=stereo|c0=0*c0|c1=c1';
       case PlaybackChannelMode.muteRight:
-        return 'pan=stereo|c0=c0|c1=0*c1';
+        return 'aformat=channel_layouts=stereo,pan=stereo|c0=c0|c1=0*c1';
       case PlaybackChannelMode.mono:
-        return 'pan=mono|c0=0.5*c0+0.5*c1';
+        return 'aformat=channel_layouts=stereo,pan=mono|c0=0.5*c0+0.5*c1';
     }
   }
+
+  List<String> _filters({
+    required double decibels,
+    required PlaybackChannelMode channelMode,
+  }) =>
+      <String>[
+        if (channelMode != PlaybackChannelMode.stereo)
+          _channelFilter(channelMode),
+        if (decibels > 0) 'volume=${decibels.toStringAsFixed(1)}dB',
+      ];
+
+  String _seconds(int milliseconds) => (milliseconds / 1000).toStringAsFixed(3);
 }

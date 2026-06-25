@@ -48,7 +48,8 @@ class AudioController extends ChangeNotifier {
   String? get error => _error;
   bool get isLoopingRange => _isLoopingRange;
 
-  Future<void> load(Recording recording, {bool autoPlay = false, File? playbackFile}) async {
+  Future<void> load(Recording recording,
+      {bool autoPlay = false, File? playbackFile}) async {
     final request = ++_loadRequest;
     _recording = recording;
     _position = Duration.zero;
@@ -58,7 +59,8 @@ class AudioController extends ChangeNotifier {
     notifyListeners();
     try {
       await _player.stop();
-      final duration = await _player.setFilePath((playbackFile ?? recording.file).path);
+      final duration =
+          await _player.setFilePath((playbackFile ?? recording.file).path);
       if (request != _loadRequest) {
         return;
       }
@@ -72,7 +74,8 @@ class AudioController extends ChangeNotifier {
       }
     } catch (_) {
       if (request == _loadRequest) {
-        _error = 'Unable to load ${recording.filename}. Check that the file is a valid WAV or MP3.';
+        _error =
+            'Unable to load ${recording.filename}. Check that the file is a valid WAV or MP3.';
       }
     } finally {
       if (request == _loadRequest) {
@@ -111,7 +114,8 @@ class AudioController extends ChangeNotifier {
     await _player.play();
     if (endMs != null && endMs > startMs) {
       final end = Duration(milliseconds: endMs);
-      _rangeTimer = Timer.periodic(const Duration(milliseconds: 80), (timer) async {
+      _rangeTimer =
+          Timer.periodic(const Duration(milliseconds: 80), (timer) async {
         if (_player.position >= end) {
           if (_isLoopingRange) {
             await _player.seek(Duration(milliseconds: startMs));
