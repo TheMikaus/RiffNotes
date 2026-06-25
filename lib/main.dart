@@ -2147,31 +2147,6 @@ class _PlayerPanelState extends State<_PlayerPanel> {
                         ),
                         child: Column(
                           children: [
-                            Padding(
-                              padding: const EdgeInsets.fromLTRB(8, 4, 8, 0),
-                              child: Row(children: [
-                                const Text('Waveform zoom'),
-                                const SizedBox(width: 8),
-                                SegmentedButton<double>(
-                                  segments: const [
-                                    ButtonSegment(value: 1, label: Text('1x')),
-                                    ButtonSegment(
-                                        value: 1.5, label: Text('1.5x')),
-                                    ButtonSegment(value: 2, label: Text('2x')),
-                                  ],
-                                  selected: {_waveformZoom},
-                                  onSelectionChanged: (value) => setState(
-                                      () => _waveformZoom = value.first),
-                                ),
-                                const Spacer(),
-                                Text(
-                                  _waveformFocus.hasFocus
-                                      ? '←/→ seek • Space play/pause'
-                                      : 'Click waveform for keyboard controls',
-                                  style: Theme.of(context).textTheme.bodySmall,
-                                ),
-                              ]),
-                            ),
                             LayoutBuilder(
                               builder: (context, constraints) {
                                 final contentWidth =
@@ -2282,6 +2257,39 @@ class _PlayerPanelState extends State<_PlayerPanel> {
                                   onPressed: canPlay ? controller.stop : null,
                                   icon: const Icon(Icons.stop_circle_outlined),
                                 ),
+                                PopupMenuButton<double>(
+                                  tooltip:
+                                      'Waveform zoom (${_zoomLabel(_waveformZoom)})',
+                                  onSelected: (value) =>
+                                      setState(() => _waveformZoom = value),
+                                  itemBuilder: (context) => const [
+                                    PopupMenuItem(
+                                        value: 1, child: Text('Zoom 1x')),
+                                    PopupMenuItem(
+                                        value: 1.5, child: Text('Zoom 1.5x')),
+                                    PopupMenuItem(
+                                        value: 2, child: Text('Zoom 2x')),
+                                    PopupMenuItem(
+                                        value: 2.5, child: Text('Zoom 2.5x')),
+                                    PopupMenuItem(
+                                        value: 3, child: Text('Zoom 3x')),
+                                    PopupMenuItem(
+                                        value: 3.5, child: Text('Zoom 3.5x')),
+                                    PopupMenuItem(
+                                        value: 4, child: Text('Zoom 4x')),
+                                  ],
+                                  child: Padding(
+                                    padding: const EdgeInsets.symmetric(
+                                        horizontal: 8, vertical: 8),
+                                    child: Row(
+                                        mainAxisSize: MainAxisSize.min,
+                                        children: [
+                                          const Icon(Icons.zoom_in_outlined),
+                                          const SizedBox(width: 4),
+                                          Text(_zoomLabel(_waveformZoom)),
+                                        ]),
+                                  ),
+                                ),
                                 if (_selectedSection != null)
                                   IconButton(
                                     tooltip: controller.isLoopingRange
@@ -2339,8 +2347,11 @@ class _PlayerPanelState extends State<_PlayerPanel> {
                                 Text(
                                     '${_format(position)} / ${_format(duration)}'),
                                 const SizedBox(width: 12),
-                                const Expanded(
-                                    child: Text('Click waveform to seek')),
+                                Expanded(
+                                  child: Text(_waveformFocus.hasFocus
+                                      ? '←/→ seek • Space play/pause'
+                                      : 'Click waveform to seek'),
+                                ),
                               ]),
                             ),
                           ],
@@ -2530,6 +2541,9 @@ class _PlayerPanelState extends State<_PlayerPanel> {
 
   String _volumeLabel(double decibels) =>
       decibels == 0 ? 'Original level' : '+${decibels.toStringAsFixed(0)} dB';
+
+  String _zoomLabel(double zoom) =>
+      '${zoom == zoom.roundToDouble() ? zoom.toStringAsFixed(0) : zoom.toStringAsFixed(1)}x';
 }
 
 class _ActivityStrip extends StatelessWidget {
