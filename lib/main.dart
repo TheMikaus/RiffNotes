@@ -48,6 +48,7 @@ class _LibraryScreenState extends State<LibraryScreen> {
   final _activity = ActivityQueue();
   final _audioProcessing = AudioProcessingRepository();
   final _fingerprints = FingerprintRepository();
+  final _fingerprintDecisions = FingerprintDecisionRepository();
   late final AudioController _audio;
   late final WaveformController _waveform;
   late final AppPreferences _preferences;
@@ -58,6 +59,7 @@ class _LibraryScreenState extends State<LibraryScreen> {
   List<UserAnnotation> _reviewNotes = const [];
   List<SongSection> _sections = const [];
   List<FingerprintMatch> _fingerprintMatches = const [];
+  FingerprintDecisions _fingerprintDecisionState = const FingerprintDecisions();
   String? _bandFolder;
   double _volumeBoostDb = 0;
   PlaybackChannelMode _channelMode = PlaybackChannelMode.stereo;
@@ -168,6 +170,7 @@ class _LibraryScreenState extends State<LibraryScreen> {
       });
       _waveform.clear();
       if (_selected != null) await _refreshPracticeReview(_selected!);
+      if (_selected != null) await _refreshFingerprintDecisions(_selected!);
       final selected = _selected;
       final remembered = selected?.recordings
           .where((item) =>
@@ -194,6 +197,7 @@ class _LibraryScreenState extends State<LibraryScreen> {
     });
     _waveform.clear();
     await _refreshPracticeReview(practice);
+    await _refreshFingerprintDecisions(practice);
     await _preferences.rememberPractice(practice.name);
     final remembered = practice.recordings
         .where((item) =>
@@ -330,6 +334,13 @@ class _LibraryScreenState extends State<LibraryScreen> {
     }
   }
 
+  Future<void> _refreshFingerprintDecisions(PracticeFolder practice) async {
+    final decisions = await _fingerprintDecisions.load(practice.directory.path);
+    if (mounted && _selected?.directory.path == practice.directory.path) {
+      setState(() => _fingerprintDecisionState = decisions);
+    }
+  }
+
   Future<void> _uploadSelectedPractice() async {
     final practice = _selected;
     if (practice == null) return;
@@ -447,11 +458,19 @@ class _LibraryScreenState extends State<LibraryScreen> {
         return result;
       });
       if (!mounted) return;
-      setState(() => _fingerprintMatches = matches);
+      final decisions =
+          await _fingerprintDecisions.load(practice.directory.path);
+      final visibleMatches = matches
+          .where((match) => !decisions.ignoredKeys.contains(match.key))
+          .toList(growable: false);
+      setState(() {
+        _fingerprintMatches = visibleMatches;
+        _fingerprintDecisionState = decisions;
+      });
       ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-          content: Text(matches.isEmpty
+          content: Text(visibleMatches.isEmpty
               ? 'No confident fingerprint matches found.'
-              : 'Found ${matches.length} fingerprint match suggestions.')));
+              : 'Found ${visibleMatches.length} fingerprint match suggestions.')));
     } on ProcessException {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
@@ -462,6 +481,117 @@ class _LibraryScreenState extends State<LibraryScreen> {
         ScaffoldMessenger.of(context)
             .showSnackBar(SnackBar(content: Text(error.message)));
       }
+    }
+  }
+
+  Future<void> _reviewFingerprintMatches() async {
+    final practice = _selected;
+    if (practice == null) return;
+    await showDialog<void>(
+      context: context,
+      builder: (context) => StatefulBuilder(
+        builder: (context, setDialogState) {
+          final matches = _fingerprintMatches.toList()
+            ..sort((a, b) {
+              final recording =
+                  a.recordingFilename.compareTo(b.recordingFilename);
+              if (recording != 0) return recording;
+              return b.confidence.compareTo(a.confidence);
+            });
+          return AlertDialog(
+            title: const Text('Review fingerprint matches'),
+            content: SizedBox(
+              width: 820,
+              child: matches.isEmpty
+                  ? const Text('No pending fingerprint matches to review.')
+                  : ListView.builder(
+                      shrinkWrap: true,
+                      itemCount: matches.length,
+                      itemBuilder: (context, index) {
+                        final match = matches[index];
+                        final recording = practice.recordings
+                            .where((item) => item.id == match.recordingId)
+                            .firstOrNull;
+                        return Card(
+                          child: ListTile(
+                            leading: const Icon(Icons.fingerprint),
+                            title: Text(
+                                '${match.recordingFilename} → ${match.displayName}'),
+                            subtitle: Text(
+                                'Confidence ${(match.confidence * 100).round()}%${recording?.title == null ? '' : ' • current title: ${recording!.title}'}'),
+                            trailing: Wrap(
+                              spacing: 8,
+                              children: [
+                                TextButton(
+                                  onPressed: () async {
+                                    await _ignoreFingerprintMatch(match);
+                                    setDialogState(() {});
+                                  },
+                                  child: const Text('Ignore'),
+                                ),
+                                FilledButton(
+                                  onPressed: recording == null
+                                      ? null
+                                      : () async {
+                                          await _acceptFingerprintMatch(
+                                              recording, match);
+                                          setDialogState(() {});
+                                        },
+                                  child: const Text('Accept title'),
+                                ),
+                              ],
+                            ),
+                          ),
+                        );
+                      },
+                    ),
+            ),
+            actions: [
+              TextButton(
+                  onPressed: () => Navigator.pop(context),
+                  child: const Text('Done')),
+            ],
+          );
+        },
+      ),
+    );
+  }
+
+  Future<void> _acceptFingerprintMatch(
+      Recording recording, FingerprintMatch match) async {
+    final practice = _selected;
+    if (practice == null) return;
+    final title = match.masterTitle ??
+        path.basenameWithoutExtension(match.masterFilename);
+    await _updateRecording(
+      recording,
+      title: title,
+      isBestTake: recording.isBestTake,
+    );
+    await _fingerprintDecisions.accept(practice.directory.path, match);
+    final decisions = await _fingerprintDecisions.load(practice.directory.path);
+    if (mounted) {
+      setState(() {
+        _fingerprintDecisionState = decisions;
+        _fingerprintMatches = _fingerprintMatches
+            .where((item) => item.recordingId != match.recordingId)
+            .toList(growable: false);
+      });
+    }
+  }
+
+  Future<void> _ignoreFingerprintMatch(FingerprintMatch match) async {
+    final practice = _selected;
+    if (practice == null) return;
+    await _fingerprintDecisions.ignore(practice.directory.path, match);
+    final decisions = await _fingerprintDecisions.load(practice.directory.path);
+    if (mounted) {
+      setState(() {
+        _fingerprintDecisionState = decisions;
+        _fingerprintMatches = _fingerprintMatches
+            .where((item) => item.key != match.key)
+            .toList(growable: false);
+      });
     }
   }
 
@@ -1246,6 +1376,13 @@ class _LibraryScreenState extends State<LibraryScreen> {
                       ? null
                       : _matchSelectedPracticeFingerprints,
                   icon: const Icon(Icons.fingerprint)),
+              IconButton(
+                  tooltip:
+                      'Review ${_fingerprintMatches.length} fingerprint match suggestions; ${_fingerprintDecisionState.accepted.length} accepted',
+                  onPressed: _selected == null || _fingerprintMatches.isEmpty
+                      ? null
+                      : _reviewFingerprintMatches,
+                  icon: const Icon(Icons.rule_folder_outlined)),
               IconButton(
                   tooltip: 'Preferences',
                   onPressed: _showPreferences,

@@ -203,4 +203,30 @@ void main() {
     expect(fingerprint.every((value) => value >= 0 && value <= 1), isTrue);
     expect(fingerprint.reduce((a, b) => a > b ? a : b), closeTo(1, .001));
   });
+
+  test('persists accepted and ignored fingerprint decisions', () async {
+    final folder = await Directory.systemTemp.createTemp('riffnotes-fp-');
+    addTearDown(() async {
+      if (await folder.exists()) await folder.delete(recursive: true);
+    });
+    const match = FingerprintMatch(
+      recordingId: 'practice-1',
+      recordingFilename: 'practice.mp3',
+      masterRecordingId: 'master-1',
+      masterFilename: 'song.mp3',
+      masterTitle: 'The Song',
+      sectionLabel: 'Chorus',
+      confidence: .82,
+    );
+    final repository = FingerprintDecisionRepository();
+
+    await repository.ignore(folder.path, match);
+    var decisions = await repository.load(folder.path);
+    expect(decisions.ignoredKeys, contains(match.key));
+
+    await repository.accept(folder.path, match);
+    decisions = await repository.load(folder.path);
+    expect(decisions.ignoredKeys, isNot(contains(match.key)));
+    expect(decisions.accepted.single.displayName, 'The Song / Chorus');
+  });
 }

@@ -226,6 +226,118 @@ class FingerprintRepository {
   }
 }
 
+class FingerprintDecisionRepository {
+  static const _filename = '.riffnotes.fingerprint-decisions.json';
+
+  Future<FingerprintDecisions> load(String practiceFolder) async {
+    final file = File(path.join(practiceFolder, _filename));
+    if (!await file.exists()) return const FingerprintDecisions();
+    try {
+      final decoded =
+          jsonDecode(await file.readAsString()) as Map<String, dynamic>;
+      return FingerprintDecisions(
+        accepted: (decoded['accepted'] as List<dynamic>? ?? const <dynamic>[])
+            .cast<Map<String, dynamic>>()
+            .map(FingerprintDecision.fromJson)
+            .toList(growable: false),
+        ignoredKeys:
+            (decoded['ignoredKeys'] as List<dynamic>? ?? const <dynamic>[])
+                .map((value) => value as String)
+                .toSet(),
+      );
+    } on FormatException {
+      return const FingerprintDecisions();
+    } on TypeError {
+      return const FingerprintDecisions();
+    }
+  }
+
+  Future<void> accept(String practiceFolder, FingerprintMatch match) async {
+    final decisions = await load(practiceFolder);
+    final accepted = decisions.accepted
+        .where((item) => item.recordingId != match.recordingId)
+        .toList()
+      ..add(FingerprintDecision(
+        recordingId: match.recordingId,
+        masterRecordingId: match.masterRecordingId,
+        displayName: match.displayName,
+        confidence: match.confidence,
+        decidedAt: DateTime.now().toUtc(),
+      ));
+    final ignored = {...decisions.ignoredKeys}..remove(match.key);
+    await _write(practiceFolder,
+        FingerprintDecisions(accepted: accepted, ignoredKeys: ignored));
+  }
+
+  Future<void> ignore(String practiceFolder, FingerprintMatch match) async {
+    final decisions = await load(practiceFolder);
+    await _write(
+      practiceFolder,
+      FingerprintDecisions(
+        accepted: decisions.accepted,
+        ignoredKeys: {...decisions.ignoredKeys, match.key},
+      ),
+    );
+  }
+
+  Future<void> _write(
+      String practiceFolder, FingerprintDecisions decisions) async {
+    final file = File(path.join(practiceFolder, _filename));
+    const encoder = JsonEncoder.withIndent('  ');
+    await file.writeAsString(
+      encoder.convert(<String, dynamic>{
+        'version': 1,
+        'accepted': decisions.accepted.map((item) => item.toJson()).toList(),
+        'ignoredKeys': decisions.ignoredKeys.toList()..sort(),
+      }),
+      flush: true,
+    );
+  }
+}
+
+class FingerprintDecisions {
+  const FingerprintDecisions({
+    this.accepted = const <FingerprintDecision>[],
+    this.ignoredKeys = const <String>{},
+  });
+
+  final List<FingerprintDecision> accepted;
+  final Set<String> ignoredKeys;
+}
+
+class FingerprintDecision {
+  const FingerprintDecision({
+    required this.recordingId,
+    required this.masterRecordingId,
+    required this.displayName,
+    required this.confidence,
+    required this.decidedAt,
+  });
+
+  final String recordingId;
+  final String masterRecordingId;
+  final String displayName;
+  final double confidence;
+  final DateTime decidedAt;
+
+  Map<String, dynamic> toJson() => <String, dynamic>{
+        'recordingId': recordingId,
+        'masterRecordingId': masterRecordingId,
+        'displayName': displayName,
+        'confidence': confidence,
+        'decidedAt': decidedAt.toIso8601String(),
+      };
+
+  factory FingerprintDecision.fromJson(Map<String, dynamic> json) =>
+      FingerprintDecision(
+        recordingId: json['recordingId'] as String,
+        masterRecordingId: json['masterRecordingId'] as String,
+        displayName: json['displayName'] as String,
+        confidence: (json['confidence'] as num).toDouble(),
+        decidedAt: DateTime.parse(json['decidedAt'] as String),
+      );
+}
+
 class AudioFingerprint {
   const AudioFingerprint({required this.durationMs, required this.values});
 
@@ -251,6 +363,9 @@ class FingerprintMatch {
   final String? masterTitle;
   final String? sectionLabel;
   final double confidence;
+
+  String get key =>
+      '$recordingId|$masterRecordingId|${sectionLabel ?? ''}|$masterFilename';
 
   String get displayName {
     final song = masterTitle ?? path.basenameWithoutExtension(masterFilename);
