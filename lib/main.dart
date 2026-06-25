@@ -129,10 +129,9 @@ class _LibraryScreenState extends State<LibraryScreen> {
           .firstOrNull;
       if (remembered != null) {
         await _selectRecording(remembered);
-      } else if (_preferences.autoPlayOnPracticeSelection &&
-          selected != null &&
-          selected.recordings.isNotEmpty) {
-        await _selectRecording(selected.recordings.first, autoPlay: true);
+      } else if (selected != null && selected.recordings.isNotEmpty) {
+        await _selectRecording(selected.recordings.first,
+            autoPlay: _preferences.autoPlayOnPracticeSelection);
       }
     }
   }
@@ -155,9 +154,9 @@ class _LibraryScreenState extends State<LibraryScreen> {
         .firstOrNull;
     if (remembered != null) {
       await _selectRecording(remembered);
-    } else if (_preferences.autoPlayOnPracticeSelection &&
-        practice.recordings.isNotEmpty) {
-      await _selectRecording(practice.recordings.first, autoPlay: true);
+    } else if (practice.recordings.isNotEmpty) {
+      await _selectRecording(practice.recordings.first,
+          autoPlay: _preferences.autoPlayOnPracticeSelection);
     }
   }
 
