@@ -3,6 +3,7 @@ import 'dart:io';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:riffnotes/annotations.dart';
 import 'package:riffnotes/app_preferences.dart';
+import 'package:riffnotes/audio_processing.dart';
 import 'package:riffnotes/domain.dart';
 import 'package:riffnotes/waveform.dart';
 import 'package:shared_preferences/shared_preferences.dart';
@@ -124,6 +125,19 @@ void main() {
     expect(preferences.lastPractice, '2026-06-01');
     expect(preferences.lastRecordingForPractice('2026-06-01'), 'take-a');
     expect(preferences.lastRecordingForPractice('2026-06-08'), 'take-b');
+  });
+
+  test('remembers playback boost and channel mode per recording', () async {
+    SharedPreferences.setMockInitialValues({});
+    final preferences = AppPreferences();
+    await preferences.load();
+
+    await preferences.setBoost('take-a', 9);
+    await preferences.setChannelMode('take-a', PlaybackChannelMode.muteLeft);
+
+    expect(preferences.boostFor('take-a'), 9);
+    expect(preferences.channelModeFor('take-a'), PlaybackChannelMode.muteLeft);
+    expect(preferences.channelModeFor('take-b'), PlaybackChannelMode.stereo);
   });
 
   test('reduces signed PCM samples to normalized waveform peaks', () {

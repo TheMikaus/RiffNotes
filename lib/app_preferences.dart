@@ -3,6 +3,8 @@ import 'dart:convert';
 import 'package:flutter/foundation.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
+import 'audio_processing.dart';
+
 class AppPreferences extends ChangeNotifier {
   static const _bandFolderKey = 'band_folder';
   static const _autoPlayTakeKey = 'auto_play_on_take_selection';
@@ -12,6 +14,7 @@ class AppPreferences extends ChangeNotifier {
   static const _lastRecordingKey = 'last_recording';
   static const _lastRecordingsByPracticeKey = 'last_recordings_by_practice';
   static const _boostsKey = 'playback_boosts';
+  static const _channelModesKey = 'playback_channel_modes';
 
   String? _bandFolder;
   bool _autoPlayOnTakeSelection = false;
@@ -21,6 +24,8 @@ class AppPreferences extends ChangeNotifier {
   String? _lastRecording;
   Map<String, String> _lastRecordingsByPractice = <String, String>{};
   Map<String, double> _boostsByRecording = <String, double>{};
+  Map<String, PlaybackChannelMode> _channelModesByRecording =
+      <String, PlaybackChannelMode>{};
 
   String? get bandFolder => _bandFolder;
   bool get autoPlayOnTakeSelection => _autoPlayOnTakeSelection;
@@ -32,6 +37,8 @@ class AppPreferences extends ChangeNotifier {
       _lastRecordingsByPractice[practice] ??
       (practice == _lastPractice ? _lastRecording : null);
   double boostFor(String recordingId) => _boostsByRecording[recordingId] ?? 0;
+  PlaybackChannelMode channelModeFor(String recordingId) =>
+      _channelModesByRecording[recordingId] ?? PlaybackChannelMode.stereo;
 
   Future<void> load() async {
     final store = await SharedPreferences.getInstance();
@@ -63,6 +70,18 @@ class AppPreferences extends ChangeNotifier {
             .map((key, value) => MapEntry(key, (value as num).toDouble()));
       } on FormatException {
         _boostsByRecording = <String, double>{};
+      }
+    }
+    final channelModes = store.getString(_channelModesKey);
+    if (channelModes != null) {
+      try {
+        final decoded = jsonDecode(channelModes) as Map<String, dynamic>;
+        _channelModesByRecording = decoded.map((key, value) => MapEntry(
+            key, PlaybackChannelMode.fromStorageValue(value as String?)));
+      } on FormatException {
+        _channelModesByRecording = <String, PlaybackChannelMode>{};
+      } on TypeError {
+        _channelModesByRecording = <String, PlaybackChannelMode>{};
       }
     }
     notifyListeners();
@@ -133,5 +152,19 @@ class AppPreferences extends ChangeNotifier {
     }
     final store = await SharedPreferences.getInstance();
     await store.setString(_boostsKey, jsonEncode(_boostsByRecording));
+  }
+
+  Future<void> setChannelMode(
+      String recordingId, PlaybackChannelMode channelMode) async {
+    if (channelMode == PlaybackChannelMode.stereo) {
+      _channelModesByRecording.remove(recordingId);
+    } else {
+      _channelModesByRecording[recordingId] = channelMode;
+    }
+    final store = await SharedPreferences.getInstance();
+    await store.setString(
+        _channelModesKey,
+        jsonEncode(_channelModesByRecording
+            .map((key, value) => MapEntry(key, value.storageValue))));
   }
 }

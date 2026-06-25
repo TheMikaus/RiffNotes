@@ -54,6 +54,7 @@ class _LibraryScreenState extends State<LibraryScreen> {
   List<SongSection> _sections = const [];
   String? _bandFolder;
   double _volumeBoostDb = 0;
+  PlaybackChannelMode _channelMode = PlaybackChannelMode.stereo;
   int? _rangeStartMs;
   String? _rangeRecordingId;
   int? _sectionStartMs;
@@ -163,21 +164,32 @@ class _LibraryScreenState extends State<LibraryScreen> {
   Future<void> _selectRecording(Recording recording,
       {bool autoPlay = false}) async {
     final rememberedBoost = _preferences.boostFor(recording.id);
+    final rememberedChannelMode = _preferences.channelModeFor(recording.id);
     setState(() {
       _selectedRecording = recording;
       _volumeBoostDb = rememberedBoost;
+      _channelMode = rememberedChannelMode;
     });
     final practice = _selected;
     if (practice != null) {
       unawaited(_waveform.load(practice, recording));
     }
     File? playbackFile;
-    if (practice != null && rememberedBoost > 0) {
+    if (practice != null) {
       try {
-        playbackFile = await _audioProcessing.createBoostedPlaybackFile(
-            practice, recording, rememberedBoost);
+        playbackFile = await _audioProcessing.createPlaybackFile(
+          practice,
+          recording,
+          decibels: rememberedBoost,
+          channelMode: rememberedChannelMode,
+        );
       } on StateError {
-        if (mounted) setState(() => _volumeBoostDb = 0);
+        if (mounted) {
+          setState(() {
+            _volumeBoostDb = 0;
+            _channelMode = PlaybackChannelMode.stereo;
+          });
+        }
       }
     }
     await _audio.load(recording,
@@ -188,6 +200,18 @@ class _LibraryScreenState extends State<LibraryScreen> {
   }
 
   Future<void> _setVolumeBoost(double decibels) async {
+    await _setPlaybackProcessing(decibels: decibels, channelMode: _channelMode);
+  }
+
+  Future<void> _setChannelMode(PlaybackChannelMode channelMode) async {
+    await _setPlaybackProcessing(
+        decibels: _volumeBoostDb, channelMode: channelMode);
+  }
+
+  Future<void> _setPlaybackProcessing({
+    required double decibels,
+    required PlaybackChannelMode channelMode,
+  }) async {
     final practice = _selected;
     final recording = _selectedRecording;
     if (practice == null || recording == null) return;
@@ -195,32 +219,51 @@ class _LibraryScreenState extends State<LibraryScreen> {
     final resumePlaying = _audio.isPlaying;
     try {
       final source =
-          await _activity.run('Preparing volume boost', (update) async {
+          await _activity.run('Preparing playback audio', (update) async {
+        final processingLabel = _playbackProcessingLabel(decibels, channelMode);
         update(
             null,
-            decibels == 0
+            decibels == 0 && channelMode == PlaybackChannelMode.stereo
                 ? 'Restoring original playback…'
-                : 'Creating +${decibels.toStringAsFixed(0)} dB playback copy…');
-        final result = await _audioProcessing.createBoostedPlaybackFile(
-            practice, recording, decibels);
-        update(1, 'Playback level ready');
+                : 'Creating $processingLabel playback copy…');
+        final result = await _audioProcessing.createPlaybackFile(
+          practice,
+          recording,
+          decibels: decibels,
+          channelMode: channelMode,
+        );
+        update(1, 'Playback audio ready');
         return result;
       });
       if (!mounted || _selectedRecording?.id != recording.id) return;
-      setState(() => _volumeBoostDb = decibels);
+      setState(() {
+        _volumeBoostDb = decibels;
+        _channelMode = channelMode;
+      });
       await _preferences.setBoost(recording.id, decibels);
+      await _preferences.setChannelMode(recording.id, channelMode);
       await _audio.load(recording,
           playbackFile: source, autoPlay: resumePlaying);
       await _audio.seek(resumeAt);
     } on ProcessException {
       if (mounted)
         ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
-            content: Text('FFmpeg is required to apply a playback boost.')));
+            content:
+                Text('FFmpeg is required to change playback processing.')));
     } on StateError catch (error) {
       if (mounted)
         ScaffoldMessenger.of(context)
             .showSnackBar(SnackBar(content: Text(error.message)));
     }
+  }
+
+  String _playbackProcessingLabel(
+      double decibels, PlaybackChannelMode channelMode) {
+    final parts = <String>[
+      if (channelMode != PlaybackChannelMode.stereo) channelMode.label,
+      if (decibels > 0) '+${decibels.toStringAsFixed(0)} dB',
+    ];
+    return parts.isEmpty ? 'original' : parts.join(', ');
   }
 
   Future<void> _refreshNotes(Recording recording) async {
@@ -706,7 +749,9 @@ class _LibraryScreenState extends State<LibraryScreen> {
                       ? _sectionStartMs
                       : null,
                   volumeBoostDb: _volumeBoostDb,
+                  channelMode: _channelMode,
                   onSetVolumeBoost: _setVolumeBoost,
+                  onSetChannelMode: _setChannelMode,
                   notes: _notes,
                   sections: _sections,
                   showPracticeReview: _showPracticeReview,
@@ -769,7 +814,9 @@ class _RecordingList extends StatelessWidget {
     required this.rangeStartMs,
     required this.sectionStartMs,
     required this.volumeBoostDb,
+    required this.channelMode,
     required this.onSetVolumeBoost,
+    required this.onSetChannelMode,
     required this.notes,
     required this.sections,
     required this.showPracticeReview,
@@ -794,7 +841,9 @@ class _RecordingList extends StatelessWidget {
   final int? rangeStartMs;
   final int? sectionStartMs;
   final double volumeBoostDb;
+  final PlaybackChannelMode channelMode;
   final ValueChanged<double> onSetVolumeBoost;
+  final ValueChanged<PlaybackChannelMode> onSetChannelMode;
   final List<PracticeAnnotation> notes;
   final List<SongSection> sections;
   final bool showPracticeReview;
@@ -922,7 +971,9 @@ class _RecordingList extends StatelessWidget {
           rangeStartMs: rangeStartMs,
           sectionStartMs: sectionStartMs,
           volumeBoostDb: volumeBoostDb,
+          channelMode: channelMode,
           onSetVolumeBoost: onSetVolumeBoost,
+          onSetChannelMode: onSetChannelMode,
           notes: notes,
           sections: sections,
         ),
@@ -962,7 +1013,9 @@ class _PlayerPanel extends StatefulWidget {
     required this.rangeStartMs,
     required this.sectionStartMs,
     required this.volumeBoostDb,
+    required this.channelMode,
     required this.onSetVolumeBoost,
+    required this.onSetChannelMode,
     required this.notes,
     required this.sections,
   });
@@ -975,7 +1028,9 @@ class _PlayerPanel extends StatefulWidget {
   final int? rangeStartMs;
   final int? sectionStartMs;
   final double volumeBoostDb;
+  final PlaybackChannelMode channelMode;
   final ValueChanged<double> onSetVolumeBoost;
+  final ValueChanged<PlaybackChannelMode> onSetChannelMode;
   final List<PracticeAnnotation> notes;
   final List<SongSection> sections;
 
@@ -999,7 +1054,9 @@ class _PlayerPanelState extends State<_PlayerPanel> {
     final rangeStartMs = widget.rangeStartMs;
     final sectionStartMs = widget.sectionStartMs;
     final volumeBoostDb = widget.volumeBoostDb;
+    final channelMode = widget.channelMode;
     final onSetVolumeBoost = widget.onSetVolumeBoost;
+    final onSetChannelMode = widget.onSetChannelMode;
     final notes = widget.notes;
     final sections = widget.sections;
     return AnimatedBuilder(
@@ -1213,6 +1270,33 @@ class _PlayerPanelState extends State<_PlayerPanel> {
                             const Icon(Icons.volume_up_outlined),
                             const SizedBox(width: 6),
                             Text(_volumeLabel(volumeBoostDb)),
+                          ]),
+                        ),
+                      ),
+                      PopupMenuButton<PlaybackChannelMode>(
+                        tooltip: 'Playback channel mode',
+                        onSelected: onSetChannelMode,
+                        itemBuilder: (context) => const [
+                          PopupMenuItem(
+                              value: PlaybackChannelMode.stereo,
+                              child: Text('Stereo / original channels')),
+                          PopupMenuItem(
+                              value: PlaybackChannelMode.muteLeft,
+                              child: Text('Mute left channel')),
+                          PopupMenuItem(
+                              value: PlaybackChannelMode.muteRight,
+                              child: Text('Mute right channel')),
+                          PopupMenuItem(
+                              value: PlaybackChannelMode.mono,
+                              child: Text('Make mono')),
+                        ],
+                        child: Padding(
+                          padding: const EdgeInsets.symmetric(
+                              horizontal: 8, vertical: 8),
+                          child: Row(mainAxisSize: MainAxisSize.min, children: [
+                            const Icon(Icons.surround_sound_outlined),
+                            const SizedBox(width: 6),
+                            Text(channelMode.label),
                           ]),
                         ),
                       ),
