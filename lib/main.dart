@@ -12,6 +12,7 @@ import 'app_preferences.dart';
 import 'audio_controller.dart';
 import 'domain.dart';
 import 'sections.dart';
+import 'sync.dart';
 import 'waveform.dart';
 import 'waveform_view.dart';
 
@@ -42,6 +43,7 @@ class _LibraryScreenState extends State<LibraryScreen> {
   final _repository = PracticeRepository();
   final _annotations = AnnotationRepository();
   final _sectionsRepository = SongSectionRepository();
+  final _syncRepository = PracticeSyncRepository();
   final _activity = ActivityQueue();
   final _audioProcessing = AudioProcessingRepository();
   late final AudioController _audio;
@@ -61,6 +63,9 @@ class _LibraryScreenState extends State<LibraryScreen> {
   int? _sectionStartMs;
   String? _sectionRecordingId;
   bool _showPracticeReview = false;
+  String? _reviewUserFilter;
+  String? _reviewRecordingFilter;
+  _ReviewSort _reviewSort = _ReviewSort.trackTime;
 
   @override
   void initState() {
@@ -85,6 +90,24 @@ class _LibraryScreenState extends State<LibraryScreen> {
       return;
     }
     await _openBandFolder(selection, remember: true);
+  }
+
+  Future<void> _chooseSyncFolder() async {
+    final selection = await FilePicker.platform
+        .getDirectoryPath(dialogTitle: 'Choose your Google Drive sync folder');
+    if (selection == null) return;
+    await _preferences.setSyncFolder(selection);
+  }
+
+  Future<Directory?> _requireSyncFolder() async {
+    final saved = _preferences.syncFolder;
+    if (saved != null && await Directory(saved).exists()) {
+      return Directory(saved);
+    }
+    await _chooseSyncFolder();
+    final selected = _preferences.syncFolder;
+    if (selected == null || !await Directory(selected).exists()) return null;
+    return Directory(selected);
   }
 
   Future<void> _restorePreferences() async {
@@ -146,6 +169,7 @@ class _LibraryScreenState extends State<LibraryScreen> {
       _rangeRecordingId = null;
       _sectionStartMs = null;
       _sectionRecordingId = null;
+      _reviewRecordingFilter = null;
     });
     _waveform.clear();
     await _refreshPracticeReview(practice);
@@ -285,6 +309,106 @@ class _LibraryScreenState extends State<LibraryScreen> {
     }
   }
 
+  Future<void> _uploadSelectedPractice() async {
+    final practice = _selected;
+    if (practice == null) return;
+    final syncFolder = await _requireSyncFolder();
+    if (syncFolder == null) return;
+    try {
+      final result = await _activity.run('Uploading practice', (update) async {
+        update(null, 'Copying ${practice.name} to sync folder…');
+        final copied = await _syncRepository.uploadPractice(
+            practiceFolder: practice.directory, syncRoot: syncFolder);
+        update(1, 'Upload complete');
+        return copied;
+      });
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+            content: Text(
+                'Uploaded ${result.copiedFiles} files for ${practice.name}.')));
+      }
+    } on FileSystemException catch (error) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(content: Text('Upload failed: ${error.message}')));
+      }
+    } on StateError catch (error) {
+      if (mounted) {
+        ScaffoldMessenger.of(context)
+            .showSnackBar(SnackBar(content: Text(error.message)));
+      }
+    }
+  }
+
+  Future<void> _downloadSelectedPractice() async {
+    final practice = _selected;
+    if (practice == null) return;
+    final syncFolder = await _requireSyncFolder();
+    if (syncFolder == null) return;
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: Text('Download ${practice.name}?'),
+        content: const Text(
+            'This copies files from the sync folder into the local practice folder. Existing files with the same names may be overwritten.'),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(context, false),
+              child: const Text('Cancel')),
+          FilledButton(
+              onPressed: () => Navigator.pop(context, true),
+              child: const Text('Download')),
+        ],
+      ),
+    );
+    if (confirmed != true) return;
+    try {
+      final updatedPractice =
+          await _activity.run('Downloading practice', (update) async {
+        update(null, 'Copying ${practice.name} from sync folder…');
+        final result = await _syncRepository.downloadPractice(
+            localPracticeFolder: practice.directory, syncRoot: syncFolder);
+        update(.85, 'Refreshing local practice…');
+        final refreshed = await _repository.openPractice(practice.directory);
+        update(1, 'Download complete');
+        return (result, refreshed);
+      });
+      if (!mounted) return;
+      final result = updatedPractice.$1;
+      final refreshed = updatedPractice.$2;
+      setState(() {
+        _selected = refreshed;
+        _practices = _practices
+            .map((item) => item.directory.path == refreshed.directory.path
+                ? refreshed
+                : item)
+            .toList(growable: false);
+      });
+      await _refreshPracticeReview(refreshed);
+      final currentRecording = _selectedRecording == null
+          ? null
+          : refreshed.recordings
+              .where((item) => item.id == _selectedRecording!.id)
+              .firstOrNull;
+      if (currentRecording != null) await _selectRecording(currentRecording);
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+            content: Text(
+                'Downloaded ${result.copiedFiles} files for ${practice.name}.')));
+      }
+    } on FileSystemException catch (error) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(content: Text('Download failed: ${error.message}')));
+      }
+    } on StateError catch (error) {
+      if (mounted) {
+        ScaffoldMessenger.of(context)
+            .showSnackBar(SnackBar(content: Text(error.message)));
+      }
+    }
+  }
+
   Future<void> _playReviewNote(UserAnnotation item) async {
     final practice = _selected;
     if (practice == null) return;
@@ -311,6 +435,17 @@ class _LibraryScreenState extends State<LibraryScreen> {
                 contentPadding: EdgeInsets.zero,
                 title: const Text('Remembered Band Folder'),
                 subtitle: Text(_preferences.bandFolder ?? 'None selected'),
+              ),
+              ListTile(
+                contentPadding: EdgeInsets.zero,
+                title: const Text('Google Drive sync folder'),
+                subtitle: Text(_preferences.syncFolder ?? 'None selected'),
+                trailing: TextButton(
+                    onPressed: () async {
+                      await _chooseSyncFolder();
+                      setDialogState(() {});
+                    },
+                    child: const Text('Choose')),
               ),
               SwitchListTile(
                 contentPadding: EdgeInsets.zero,
@@ -949,6 +1084,15 @@ class _LibraryScreenState extends State<LibraryScreen> {
                   icon: const Icon(Icons.folder_open),
                   label: const Text('Band Folder')),
               IconButton(
+                  tooltip: 'Upload selected practice to sync folder',
+                  onPressed: _selected == null ? null : _uploadSelectedPractice,
+                  icon: const Icon(Icons.cloud_upload_outlined)),
+              IconButton(
+                  tooltip: 'Download selected practice from sync folder',
+                  onPressed:
+                      _selected == null ? null : _downloadSelectedPractice,
+                  icon: const Icon(Icons.cloud_download_outlined)),
+              IconButton(
                   tooltip: 'Preferences',
                   onPressed: _showPreferences,
                   icon: const Icon(Icons.settings_outlined)),
@@ -1004,6 +1148,15 @@ class _LibraryScreenState extends State<LibraryScreen> {
                   showPracticeReview: _showPracticeReview,
                   onTogglePracticeReview: (value) =>
                       setState(() => _showPracticeReview = value),
+                  reviewUserFilter: _reviewUserFilter,
+                  reviewRecordingFilter: _reviewRecordingFilter,
+                  reviewSort: _reviewSort,
+                  onSetReviewUserFilter: (value) =>
+                      setState(() => _reviewUserFilter = value),
+                  onSetReviewRecordingFilter: (value) =>
+                      setState(() => _reviewRecordingFilter = value),
+                  onSetReviewSort: (value) =>
+                      setState(() => _reviewSort = value),
                   reviewNotes: _reviewNotes,
                   onPlayReviewNote: _playReviewNote,
                   audio: _audio,
@@ -1045,6 +1198,16 @@ class _PracticeList extends StatelessWidget {
       );
 }
 
+enum _ReviewSort {
+  trackTime('Track time'),
+  created('Created'),
+  user('User');
+
+  const _ReviewSort(this.label);
+
+  final String label;
+}
+
 class _RecordingList extends StatelessWidget {
   const _RecordingList({
     required this.practice,
@@ -1072,6 +1235,12 @@ class _RecordingList extends StatelessWidget {
     required this.sections,
     required this.showPracticeReview,
     required this.onTogglePracticeReview,
+    required this.reviewUserFilter,
+    required this.reviewRecordingFilter,
+    required this.reviewSort,
+    required this.onSetReviewUserFilter,
+    required this.onSetReviewRecordingFilter,
+    required this.onSetReviewSort,
     required this.reviewNotes,
     required this.onPlayReviewNote,
     required this.audio,
@@ -1105,6 +1274,12 @@ class _RecordingList extends StatelessWidget {
   final List<SongSection> sections;
   final bool showPracticeReview;
   final ValueChanged<bool> onTogglePracticeReview;
+  final String? reviewUserFilter;
+  final String? reviewRecordingFilter;
+  final _ReviewSort reviewSort;
+  final ValueChanged<String?> onSetReviewUserFilter;
+  final ValueChanged<String?> onSetReviewRecordingFilter;
+  final ValueChanged<_ReviewSort> onSetReviewSort;
   final List<UserAnnotation> reviewNotes;
   final ValueChanged<UserAnnotation> onPlayReviewNote;
   final AudioController audio;
@@ -1117,6 +1292,9 @@ class _RecordingList extends StatelessWidget {
           child: Text(bandFolder == null
               ? 'Start by choosing your Band Folder.'
               : 'No practice folders found.'));
+    final visibleReviewNotes = _visibleReviewNotes(practice!);
+    final reviewUsers = reviewNotes.map((item) => item.user).toSet().toList()
+      ..sort();
     return Column(
       children: [
         Expanded(
@@ -1148,19 +1326,63 @@ class _RecordingList extends StatelessWidget {
                 Text('All bandmate notes in this practice',
                     style: Theme.of(context).textTheme.titleMedium),
                 const SizedBox(height: 8),
-                if (reviewNotes.isEmpty)
+                Wrap(
+                  spacing: 12,
+                  runSpacing: 8,
+                  crossAxisAlignment: WrapCrossAlignment.center,
+                  children: [
+                    DropdownMenu<String?>(
+                      label: const Text('User'),
+                      initialSelection: reviewUserFilter,
+                      dropdownMenuEntries: [
+                        const DropdownMenuEntry<String?>(
+                            value: null, label: 'All users'),
+                        for (final user in reviewUsers)
+                          DropdownMenuEntry<String?>(value: user, label: user),
+                      ],
+                      onSelected: onSetReviewUserFilter,
+                    ),
+                    DropdownMenu<String?>(
+                      label: const Text('Take'),
+                      initialSelection: reviewRecordingFilter,
+                      dropdownMenuEntries: [
+                        const DropdownMenuEntry<String?>(
+                            value: null, label: 'All takes'),
+                        for (final recording in practice!.recordings)
+                          DropdownMenuEntry<String?>(
+                              value: recording.id,
+                              label: recording.title ?? recording.filename),
+                      ],
+                      onSelected: onSetReviewRecordingFilter,
+                    ),
+                    DropdownMenu<_ReviewSort>(
+                      label: const Text('Sort'),
+                      initialSelection: reviewSort,
+                      dropdownMenuEntries: [
+                        for (final sort in _ReviewSort.values)
+                          DropdownMenuEntry<_ReviewSort>(
+                              value: sort, label: sort.label),
+                      ],
+                      onSelected: (value) {
+                        if (value != null) onSetReviewSort(value);
+                      },
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 8),
+                if (visibleReviewNotes.isEmpty)
                   const ListTile(
                       title: Text(
-                          'No notes have been saved for this practice yet.')),
-                for (final item in reviewNotes)
+                          'No notes match the current practice review filters.')),
+                for (final item in visibleReviewNotes)
                   Card(
                       child: ListTile(
                     leading: Icon(item.annotation.isRange
                         ? Icons.compare_arrows
                         : Icons.bookmark_outline),
                     title: Text(item.annotation.text),
-                    subtitle:
-                        Text('${item.user} • ${_reviewTime(item.annotation)}'),
+                    subtitle: Text(
+                        '${_recordingLabel(practice!, item.annotation.recordingId)} • ${item.user} • ${_reviewTime(item.annotation)}'),
                     trailing: const Icon(Icons.play_arrow),
                     onTap: () => onPlayReviewNote(item),
                   )),
@@ -1252,6 +1474,44 @@ class _RecordingList extends StatelessWidget {
     } on FileSystemException {
       return 'File unavailable';
     }
+  }
+
+  List<UserAnnotation> _visibleReviewNotes(PracticeFolder practice) {
+    final filtered = reviewNotes.where((item) {
+      final matchesUser =
+          reviewUserFilter == null || item.user == reviewUserFilter;
+      final matchesRecording = reviewRecordingFilter == null ||
+          item.annotation.recordingId == reviewRecordingFilter;
+      return matchesUser && matchesRecording;
+    }).toList();
+    filtered.sort((a, b) {
+      switch (reviewSort) {
+        case _ReviewSort.created:
+          return a.annotation.createdAt.compareTo(b.annotation.createdAt);
+        case _ReviewSort.user:
+          final user = a.user.compareTo(b.user);
+          if (user != 0) return user;
+          return a.annotation.startMs.compareTo(b.annotation.startMs);
+        case _ReviewSort.trackTime:
+          final recording = _recordingIndex(practice, a.annotation.recordingId)
+              .compareTo(_recordingIndex(practice, b.annotation.recordingId));
+          if (recording != 0) return recording;
+          return a.annotation.startMs.compareTo(b.annotation.startMs);
+      }
+    });
+    return filtered;
+  }
+
+  int _recordingIndex(PracticeFolder practice, String recordingId) {
+    final index =
+        practice.recordings.indexWhere((item) => item.id == recordingId);
+    return index == -1 ? 999999 : index;
+  }
+
+  String _recordingLabel(PracticeFolder practice, String recordingId) {
+    final recording =
+        practice.recordings.where((item) => item.id == recordingId).firstOrNull;
+    return recording?.title ?? recording?.filename ?? 'Missing take';
   }
 
   String _reviewTime(PracticeAnnotation note) {

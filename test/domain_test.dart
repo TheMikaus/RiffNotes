@@ -5,6 +5,7 @@ import 'package:riffnotes/annotations.dart';
 import 'package:riffnotes/app_preferences.dart';
 import 'package:riffnotes/audio_processing.dart';
 import 'package:riffnotes/domain.dart';
+import 'package:riffnotes/sync.dart';
 import 'package:riffnotes/waveform.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
@@ -110,6 +111,38 @@ void main() {
     expect(notes, hasLength(2));
     expect(notes[0].isRange, isFalse);
     expect(notes[1].isRange, isTrue);
+  });
+
+  test('uploads practice files while skipping cache folders', () async {
+    final local = await Directory.systemTemp.createTemp('riffnotes-local-');
+    final sync = await Directory.systemTemp.createTemp('riffnotes-sync-');
+    addTearDown(() async {
+      if (await local.exists()) await local.delete(recursive: true);
+      if (await sync.exists()) await sync.delete(recursive: true);
+    });
+    final practice =
+        Directory('${local.path}${Platform.pathSeparator}Practice A');
+    await practice.create();
+    await File('${practice.path}${Platform.pathSeparator}take.mp3')
+        .writeAsBytes([1, 2, 3]);
+    await Directory('${practice.path}${Platform.pathSeparator}.riffnotes-cache')
+        .create();
+    await File(
+            '${practice.path}${Platform.pathSeparator}.riffnotes-cache${Platform.pathSeparator}take.waveform.json')
+        .writeAsString('{}');
+
+    final result = await PracticeSyncRepository()
+        .uploadPractice(practiceFolder: practice, syncRoot: sync);
+
+    expect(result.copiedFiles, 1);
+    expect(
+        File('${sync.path}${Platform.pathSeparator}Practice A${Platform.pathSeparator}take.mp3')
+            .existsSync(),
+        isTrue);
+    expect(
+        File('${sync.path}${Platform.pathSeparator}Practice A${Platform.pathSeparator}.riffnotes-cache${Platform.pathSeparator}take.waveform.json')
+            .existsSync(),
+        isFalse);
   });
 
   test('remembers the last selected recording separately per practice',

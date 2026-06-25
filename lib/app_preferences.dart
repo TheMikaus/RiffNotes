@@ -7,6 +7,7 @@ import 'audio_processing.dart';
 
 class AppPreferences extends ChangeNotifier {
   static const _bandFolderKey = 'band_folder';
+  static const _syncFolderKey = 'sync_folder';
   static const _autoPlayTakeKey = 'auto_play_on_take_selection';
   static const _autoPlayPracticeKey = 'auto_play_on_practice_selection';
   static const _displayNameKey = 'display_name';
@@ -17,6 +18,7 @@ class AppPreferences extends ChangeNotifier {
   static const _channelModesKey = 'playback_channel_modes';
 
   String? _bandFolder;
+  String? _syncFolder;
   bool _autoPlayOnTakeSelection = false;
   bool _autoPlayOnPracticeSelection = false;
   String _displayName = 'Bandmate';
@@ -28,6 +30,7 @@ class AppPreferences extends ChangeNotifier {
       <String, PlaybackChannelMode>{};
 
   String? get bandFolder => _bandFolder;
+  String? get syncFolder => _syncFolder;
   bool get autoPlayOnTakeSelection => _autoPlayOnTakeSelection;
   bool get autoPlayOnPracticeSelection => _autoPlayOnPracticeSelection;
   String get displayName => _displayName;
@@ -43,6 +46,7 @@ class AppPreferences extends ChangeNotifier {
   Future<void> load() async {
     final store = await SharedPreferences.getInstance();
     _bandFolder = store.getString(_bandFolderKey);
+    _syncFolder = store.getString(_syncFolderKey);
     _autoPlayOnTakeSelection = store.getBool(_autoPlayTakeKey) ?? false;
     _autoPlayOnPracticeSelection = store.getBool(_autoPlayPracticeKey) ?? false;
     _displayName = store.getString(_displayNameKey) ?? 'Bandmate';
@@ -119,6 +123,17 @@ class AppPreferences extends ChangeNotifier {
       await store.remove(_bandFolderKey);
     } else {
       await store.setString(_bandFolderKey, path);
+    }
+    notifyListeners();
+  }
+
+  Future<void> setSyncFolder(String? path) async {
+    _syncFolder = path;
+    final store = await SharedPreferences.getInstance();
+    if (path == null) {
+      await store.remove(_syncFolderKey);
+    } else {
+      await store.setString(_syncFolderKey, path);
     }
     notifyListeners();
   }
