@@ -8,17 +8,23 @@ class SectionTimeline extends StatelessWidget {
       required this.sections,
       required this.duration,
       this.onSectionTap,
+      this.onEmptyTapProgress,
+      this.onSectionResize,
       this.selectedSection});
 
   final List<SongSection> sections;
   final Duration duration;
   final ValueChanged<SongSection>? onSectionTap;
+  final ValueChanged<double>? onEmptyTapProgress;
+  final void Function(SongSection section, int startMs, int endMs)?
+      onSectionResize;
   final SongSection? selectedSection;
 
   @override
   Widget build(BuildContext context) {
-    if (sections.isEmpty || duration == Duration.zero)
+    if (duration == Duration.zero) {
       return const SizedBox.shrink();
+    }
     final colors = <Color>[
       Colors.blue,
       Colors.teal,
@@ -30,55 +36,105 @@ class SectionTimeline extends StatelessWidget {
     return SizedBox(
       height: 30,
       child: LayoutBuilder(
-        builder: (context, constraints) => ClipRRect(
-          borderRadius: const BorderRadius.vertical(top: Radius.circular(8)),
-          child: Stack(
-            fit: StackFit.expand,
-            children: [
-              ColoredBox(
-                  color: Theme.of(context).colorScheme.surfaceContainerHighest),
-              for (var index = 0; index < sections.length; index += 1)
-                Positioned(
-                  left: (sections[index].startMs /
-                          duration.inMilliseconds *
-                          constraints.maxWidth)
-                      .clamp(0, constraints.maxWidth),
-                  width: ((sections[index].endMs - sections[index].startMs) /
-                          duration.inMilliseconds *
-                          constraints.maxWidth)
-                      .clamp(1, constraints.maxWidth),
-                  top: 3,
-                  bottom: 3,
-                  child: Tooltip(
-                    message:
-                        '${sections[index].label}: ${_time(sections[index].startMs)} – ${_time(sections[index].endMs)}',
-                    child: InkWell(
-                        onTap: onSectionTap == null
-                            ? null
-                            : () => onSectionTap!(sections[index]),
-                        child: Container(
-                          padding: const EdgeInsets.symmetric(horizontal: 6),
-                          alignment: Alignment.centerLeft,
-                          decoration: BoxDecoration(
-                            color: colors[index % colors.length]
-                                .withValues(alpha: .72),
-                            border: Border.all(
-                                color: selectedSection == sections[index]
-                                    ? Colors.white
-                                    : colors[index % colors.length],
-                                width:
-                                    selectedSection == sections[index] ? 2 : 1),
-                            borderRadius: BorderRadius.circular(4),
-                          ),
-                          child: Text(sections[index].label,
-                              overflow: TextOverflow.ellipsis,
-                              maxLines: 1,
-                              style: const TextStyle(
-                                  fontSize: 12, fontWeight: FontWeight.w600)),
-                        )),
+        builder: (context, constraints) => GestureDetector(
+          behavior: HitTestBehavior.opaque,
+          onTapDown: onEmptyTapProgress == null
+              ? null
+              : (details) => onEmptyTapProgress!(
+                  (details.localPosition.dx / constraints.maxWidth)
+                      .clamp(0, 1)
+                      .toDouble()),
+          child: ClipRRect(
+            borderRadius: const BorderRadius.vertical(top: Radius.circular(8)),
+            child: Stack(
+              fit: StackFit.expand,
+              children: [
+                ColoredBox(
+                    color:
+                        Theme.of(context).colorScheme.surfaceContainerHighest),
+                if (sections.isEmpty)
+                  const Center(
+                    child: Text('Click here to add song sections',
+                        style: TextStyle(fontSize: 12)),
                   ),
-                ),
-            ],
+                for (var index = 0; index < sections.length; index += 1)
+                  Positioned(
+                    left: (sections[index].startMs /
+                            duration.inMilliseconds *
+                            constraints.maxWidth)
+                        .clamp(0, constraints.maxWidth),
+                    width: ((sections[index].endMs - sections[index].startMs) /
+                            duration.inMilliseconds *
+                            constraints.maxWidth)
+                        .clamp(12, constraints.maxWidth),
+                    top: 3,
+                    bottom: 3,
+                    child: Tooltip(
+                      message:
+                          '${sections[index].label}: ${_time(sections[index].startMs)} – ${_time(sections[index].endMs)}',
+                      child: GestureDetector(
+                          behavior: HitTestBehavior.opaque,
+                          onTap: onSectionTap == null
+                              ? null
+                              : () => onSectionTap!(sections[index]),
+                          child: Container(
+                            padding: const EdgeInsets.symmetric(horizontal: 8),
+                            alignment: Alignment.centerLeft,
+                            decoration: BoxDecoration(
+                              color: colors[index % colors.length]
+                                  .withValues(alpha: .72),
+                              border: Border.all(
+                                  color: selectedSection == sections[index]
+                                      ? Colors.white
+                                      : colors[index % colors.length],
+                                  width: selectedSection == sections[index]
+                                      ? 2
+                                      : 1),
+                              borderRadius: BorderRadius.circular(4),
+                            ),
+                            child: Stack(
+                              fit: StackFit.expand,
+                              children: [
+                                Align(
+                                  alignment: Alignment.centerLeft,
+                                  child: Text(sections[index].label,
+                                      overflow: TextOverflow.ellipsis,
+                                      maxLines: 1,
+                                      style: const TextStyle(
+                                          fontSize: 12,
+                                          fontWeight: FontWeight.w600)),
+                                ),
+                                if (onSectionResize != null) ...[
+                                  Align(
+                                    alignment: Alignment.centerLeft,
+                                    child: _SectionResizeHandle(
+                                      cursor: SystemMouseCursors.resizeColumn,
+                                      onDrag: (delta) => _resize(
+                                          sections[index],
+                                          delta,
+                                          constraints.maxWidth,
+                                          resizeStart: true),
+                                    ),
+                                  ),
+                                  Align(
+                                    alignment: Alignment.centerRight,
+                                    child: _SectionResizeHandle(
+                                      cursor: SystemMouseCursors.resizeColumn,
+                                      onDrag: (delta) => _resize(
+                                          sections[index],
+                                          delta,
+                                          constraints.maxWidth,
+                                          resizeStart: false),
+                                    ),
+                                  ),
+                                ],
+                              ],
+                            ),
+                          )),
+                    ),
+                  ),
+              ],
+            ),
           ),
         ),
       ),
@@ -89,6 +145,46 @@ class SectionTimeline extends StatelessWidget {
     final value = Duration(milliseconds: milliseconds);
     return '${value.inMinutes.remainder(60).toString().padLeft(2, '0')}:${value.inSeconds.remainder(60).toString().padLeft(2, '0')}';
   }
+
+  void _resize(SongSection section, double deltaDx, double width,
+      {required bool resizeStart}) {
+    if (onSectionResize == null || width <= 0) return;
+    final deltaMs = (deltaDx / width * duration.inMilliseconds).round();
+    final startMs = resizeStart
+        ? (section.startMs + deltaMs).clamp(0, section.endMs - 250).toInt()
+        : section.startMs;
+    final endMs = resizeStart
+        ? section.endMs
+        : (section.endMs + deltaMs)
+            .clamp(section.startMs + 250, duration.inMilliseconds)
+            .toInt();
+    onSectionResize!(section, startMs, endMs);
+  }
+}
+
+class _SectionResizeHandle extends StatelessWidget {
+  const _SectionResizeHandle({required this.cursor, required this.onDrag});
+
+  final MouseCursor cursor;
+  final ValueChanged<double> onDrag;
+
+  @override
+  Widget build(BuildContext context) => MouseRegion(
+        cursor: cursor,
+        child: GestureDetector(
+          behavior: HitTestBehavior.opaque,
+          onHorizontalDragUpdate: (details) => onDrag(details.delta.dx),
+          child: Container(
+            width: 10,
+            alignment: Alignment.center,
+            child: Container(
+              width: 2,
+              height: 18,
+              color: Colors.white.withValues(alpha: .8),
+            ),
+          ),
+        ),
+      );
 }
 
 class WaveformView extends StatelessWidget {

@@ -6,6 +6,7 @@ import 'package:riffnotes/app_preferences.dart';
 import 'package:riffnotes/audio_processing.dart';
 import 'package:riffnotes/domain.dart';
 import 'package:riffnotes/fingerprints.dart';
+import 'package:riffnotes/sections.dart';
 import 'package:riffnotes/sync.dart';
 import 'package:riffnotes/waveform.dart';
 import 'package:shared_preferences/shared_preferences.dart';
@@ -112,6 +113,33 @@ void main() {
     expect(notes, hasLength(2));
     expect(notes[0].isRange, isFalse);
     expect(notes[1].isRange, isTrue);
+  });
+
+  test('updates song sections even after their edge has moved', () async {
+    final folder = await Directory.systemTemp.createTemp('riffnotes-sections-');
+    addTearDown(() async {
+      if (await folder.exists()) await folder.delete(recursive: true);
+    });
+    final repository = SongSectionRepository();
+    const original = SongSection(
+        recordingId: 'take-1', startMs: 0, endMs: 10000, label: 'Intro');
+    await repository.add(folder.path, original);
+
+    await repository.replace(
+        folder.path,
+        original,
+        const SongSection(
+            recordingId: 'take-1', startMs: 0, endMs: 12000, label: 'Intro'));
+    await repository.replace(
+        folder.path,
+        original,
+        const SongSection(
+            recordingId: 'take-1', startMs: 500, endMs: 12000, label: 'Intro'));
+
+    final sections = await repository.load(folder.path, 'take-1');
+    expect(sections, hasLength(1));
+    expect(sections.single.startMs, 500);
+    expect(sections.single.endMs, 12000);
   });
 
   test('uploads practice files while skipping cache folders', () async {

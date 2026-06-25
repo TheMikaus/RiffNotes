@@ -48,6 +48,8 @@ class SongSectionRepository {
         ..sort((a, b) => a.startMs.compareTo(b.startMs));
     } on FormatException {
       return <SongSection>[];
+    } on TypeError {
+      return <SongSection>[];
     }
   }
 
@@ -60,7 +62,12 @@ class SongSectionRepository {
   Future<void> replace(
       String practiceFolder, SongSection original, SongSection updated) async {
     final sections = await load(practiceFolder, original.recordingId);
-    final index = sections.indexWhere((item) => _sameSection(item, original));
+    var index = sections.indexWhere((item) => _sameSection(item, original));
+    if (index == -1) {
+      index = sections.indexWhere((item) =>
+          item.recordingId == original.recordingId &&
+          item.label == original.label);
+    }
     if (index == -1) {
       throw StateError('Could not find the section to update.');
     }

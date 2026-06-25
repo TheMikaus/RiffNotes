@@ -3,6 +3,7 @@ import 'dart:io';
 
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:path/path.dart' as path;
 
 import 'activity.dart';
@@ -437,6 +438,45 @@ class _LibraryScreenState extends State<LibraryScreen> {
       if (mounted) {
         ScaffoldMessenger.of(context)
             .showSnackBar(SnackBar(content: Text(error.message)));
+      }
+    }
+  }
+
+  Future<void> _clearSelectedPracticeCache() async {
+    final practice = _selected;
+    if (practice == null) return;
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: Text('Clear cache for ${practice.name}?'),
+        content: const Text(
+            'Waveforms, fingerprints, and processed playback files will be regenerated when needed. Notes, sections, and audio files are not removed.'),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(context, false),
+              child: const Text('Cancel')),
+          FilledButton(
+              onPressed: () => Navigator.pop(context, true),
+              child: const Text('Clear cache')),
+        ],
+      ),
+    );
+    if (confirmed != true) return;
+    final cache =
+        Directory(path.join(practice.directory.path, '.riffnotes-cache'));
+    try {
+      await _activity.run('Clearing practice cache', (update) async {
+        update(null, 'Removing generated cache files…');
+        if (await cache.exists()) await cache.delete(recursive: true);
+        update(1, 'Cache cleared');
+      });
+      _waveform.clear();
+      final recording = _selectedRecording;
+      if (recording != null) unawaited(_waveform.load(practice, recording));
+    } on FileSystemException catch (error) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(content: Text('Cache clear failed: ${error.message}')));
       }
     }
   }
@@ -951,6 +991,51 @@ class _LibraryScreenState extends State<LibraryScreen> {
     label.dispose();
   }
 
+  Future<void> _addSectionFromLane(Recording recording, int clickedMs) async {
+    final previousEnd = _sections
+        .where((section) => section.endMs <= clickedMs)
+        .fold<int>(
+            0,
+            (latest, section) =>
+                section.endMs > latest ? section.endMs : latest);
+    final nextStart = _sections
+        .where((section) => section.startMs > clickedMs)
+        .fold<int?>(
+            null,
+            (earliest, section) =>
+                earliest == null || section.startMs < earliest
+                    ? section.startMs
+                    : earliest);
+    final startMs = previousEnd.clamp(0, clickedMs).toInt();
+    final endMs = (nextStart ?? clickedMs)
+        .clamp(startMs + 250, _audio.duration?.inMilliseconds ?? clickedMs)
+        .toInt();
+    await _addSection(recording, startMs, endMs);
+  }
+
+  Future<void> _resizeSection(
+      SongSection section, int startMs, int endMs) async {
+    final practice = _selected;
+    final recording = _selectedRecording;
+    if (practice == null || recording == null) return;
+    final updated = SongSection(
+        recordingId: section.recordingId,
+        startMs: startMs,
+        endMs: endMs,
+        label: section.label);
+    setState(() => _sections = _sections
+        .map((item) => item == section ? updated : item)
+        .toList(growable: false)
+      ..sort((a, b) => a.startMs.compareTo(b.startMs)));
+    try {
+      await _sectionsRepository.replace(
+          practice.directory.path, section, updated);
+    } on StateError {
+      await _sectionsRepository.add(practice.directory.path, updated);
+    }
+    await _refreshSections(recording);
+  }
+
   Future<void> _editSection(SongSection section) async {
     final practice = _selected;
     final recording = _selectedRecording;
@@ -1384,6 +1469,11 @@ class _LibraryScreenState extends State<LibraryScreen> {
                       : _reviewFingerprintMatches,
                   icon: const Icon(Icons.rule_folder_outlined)),
               IconButton(
+                  tooltip: 'Clear generated cache for selected practice',
+                  onPressed:
+                      _selected == null ? null : _clearSelectedPracticeCache,
+                  icon: const Icon(Icons.cleaning_services_outlined)),
+              IconButton(
                   tooltip: 'Preferences',
                   onPressed: _showPreferences,
                   icon: const Icon(Icons.settings_outlined)),
@@ -1419,6 +1509,8 @@ class _LibraryScreenState extends State<LibraryScreen> {
                   onAddAnnotation: _addAnnotation,
                   onStartRangeNote: _startRangeNote,
                   onStartSection: _startSection,
+                  onAddSectionFromLane: _addSectionFromLane,
+                  onResizeSection: _resizeSection,
                   onEditSection: _editSection,
                   onDeleteSection: _deleteSection,
                   onExportAudio: _exportAudio,
@@ -1514,6 +1606,8 @@ class _RecordingList extends StatelessWidget {
     required this.onAddAnnotation,
     required this.onStartRangeNote,
     required this.onStartSection,
+    required this.onAddSectionFromLane,
+    required this.onResizeSection,
     required this.onEditSection,
     required this.onDeleteSection,
     required this.onExportAudio,
@@ -1554,6 +1648,9 @@ class _RecordingList extends StatelessWidget {
   final ValueChanged<Recording> onAddAnnotation;
   final ValueChanged<Recording> onStartRangeNote;
   final ValueChanged<Recording> onStartSection;
+  final void Function(Recording recording, int clickedMs) onAddSectionFromLane;
+  final void Function(SongSection section, int startMs, int endMs)
+      onResizeSection;
   final ValueChanged<SongSection> onEditSection;
   final ValueChanged<SongSection> onDeleteSection;
   final Future<void> Function(
@@ -1750,6 +1847,8 @@ class _RecordingList extends StatelessWidget {
           onAddAnnotation: onAddAnnotation,
           onStartRangeNote: onStartRangeNote,
           onStartSection: onStartSection,
+          onAddSectionFromLane: onAddSectionFromLane,
+          onResizeSection: onResizeSection,
           onEditSection: onEditSection,
           onDeleteSection: onDeleteSection,
           onExportAudio: onExportAudio,
@@ -1854,6 +1953,8 @@ class _PlayerPanel extends StatefulWidget {
     required this.onAddAnnotation,
     required this.onStartRangeNote,
     required this.onStartSection,
+    required this.onAddSectionFromLane,
+    required this.onResizeSection,
     required this.onEditSection,
     required this.onDeleteSection,
     required this.onExportAudio,
@@ -1875,6 +1976,9 @@ class _PlayerPanel extends StatefulWidget {
   final ValueChanged<Recording> onAddAnnotation;
   final ValueChanged<Recording> onStartRangeNote;
   final ValueChanged<Recording> onStartSection;
+  final void Function(Recording recording, int clickedMs) onAddSectionFromLane;
+  final void Function(SongSection section, int startMs, int endMs)
+      onResizeSection;
   final ValueChanged<SongSection> onEditSection;
   final ValueChanged<SongSection> onDeleteSection;
   final Future<void> Function(
@@ -1906,9 +2010,38 @@ class _ExportChoice {
 }
 
 class _PlayerPanelState extends State<_PlayerPanel> {
+  final FocusNode _waveformFocus = FocusNode(debugLabel: 'Waveform controls');
   double? _hoverProgress;
   PracticeAnnotation? _hoveredNote;
   SongSection? _selectedSection;
+  double _waveformZoom = 1;
+  bool _collapsed = false;
+
+  @override
+  void dispose() {
+    _waveformFocus.dispose();
+    super.dispose();
+  }
+
+  KeyEventResult _handleWaveformKey(
+      KeyEvent event, AudioController controller) {
+    if (event is! KeyDownEvent) return KeyEventResult.ignored;
+    if (event.logicalKey == LogicalKeyboardKey.space) {
+      unawaited(controller.togglePlayback());
+      return KeyEventResult.handled;
+    }
+    if (event.logicalKey == LogicalKeyboardKey.arrowLeft) {
+      unawaited(
+          controller.seek(controller.position - const Duration(seconds: 5)));
+      return KeyEventResult.handled;
+    }
+    if (event.logicalKey == LogicalKeyboardKey.arrowRight) {
+      unawaited(
+          controller.seek(controller.position + const Duration(seconds: 5)));
+      return KeyEventResult.handled;
+    }
+    return KeyEventResult.ignored;
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -1916,7 +2049,8 @@ class _PlayerPanelState extends State<_PlayerPanel> {
     final waveform = widget.waveform;
     final onAddAnnotation = widget.onAddAnnotation;
     final onStartRangeNote = widget.onStartRangeNote;
-    final onStartSection = widget.onStartSection;
+    final onAddSectionFromLane = widget.onAddSectionFromLane;
+    final onResizeSection = widget.onResizeSection;
     final onEditSection = widget.onEditSection;
     final onDeleteSection = widget.onDeleteSection;
     final onExportAudio = widget.onExportAudio;
@@ -1951,6 +2085,16 @@ class _PlayerPanelState extends State<_PlayerPanel> {
               children: [
                 Text(controller.recording?.filename ?? 'No take selected',
                     style: Theme.of(context).textTheme.titleMedium),
+                Align(
+                  alignment: Alignment.centerRight,
+                  child: TextButton.icon(
+                    onPressed: () => setState(() => _collapsed = !_collapsed),
+                    icon: Icon(_collapsed
+                        ? Icons.keyboard_arrow_up
+                        : Icons.keyboard_arrow_down),
+                    label: Text(_collapsed ? 'Show player' : 'Collapse player'),
+                  ),
+                ),
                 if (controller.isLoading)
                   const Padding(
                     padding: EdgeInsets.only(top: 8),
@@ -1963,7 +2107,7 @@ class _PlayerPanelState extends State<_PlayerPanel> {
                         style: TextStyle(
                             color: Theme.of(context).colorScheme.error)),
                   ),
-                if (controller.recording != null) ...[
+                if (controller.recording != null && !_collapsed) ...[
                   const SizedBox(height: 8),
                   if (waveform.isLoading) const LinearProgressIndicator(),
                   if (waveform.isLoading)
@@ -1990,309 +2134,386 @@ class _PlayerPanelState extends State<_PlayerPanel> {
                             : 'Waveform generated and cached'),
                       ]),
                     ),
-                    Container(
-                      decoration: BoxDecoration(
-                        color:
-                            Theme.of(context).colorScheme.surfaceContainerHigh,
-                        borderRadius: BorderRadius.circular(8),
-                      ),
-                      child: Column(
-                        children: [
-                          SectionTimeline(
-                            sections: sections,
-                            duration: duration,
-                            selectedSection: _selectedSection,
-                            onSectionTap: (section) {
-                              setState(() => _selectedSection = section);
-                              unawaited(controller.seek(
-                                  Duration(milliseconds: section.startMs)));
-                            },
-                          ),
-                          WaveformView(
-                            peaks: data.peaks,
-                            progress: duration == Duration.zero
-                                ? 0
-                                : position.inMilliseconds /
-                                    duration.inMilliseconds,
-                            rangeStartProgress:
-                                (rangeStartMs ?? sectionStartMs) == null ||
-                                        duration == Duration.zero
-                                    ? null
-                                    : (rangeStartMs ?? sectionStartMs!) /
-                                        duration.inMilliseconds,
-                            hoverProgress: _hoverProgress,
-                            hoverTimeLabel: _hoverProgress == null ||
-                                    duration == Duration.zero
-                                ? null
-                                : _format(Duration(
-                                    milliseconds: (_hoverProgress! *
-                                            duration.inMilliseconds)
-                                        .round())),
-                            highlightStartProgress: _hoveredNote == null ||
-                                    duration == Duration.zero
-                                ? null
-                                : _hoveredNote!.startMs /
-                                    duration.inMilliseconds,
-                            highlightEndProgress: _hoveredNote == null ||
-                                    duration == Duration.zero
-                                ? null
-                                : (_hoveredNote!.endMs ??
-                                        _hoveredNote!.startMs) /
-                                    duration.inMilliseconds,
-                            onSeekProgress: onWaveformSeek,
-                            onHoverProgress: (progress) {
-                              if (_hoverProgress != progress)
-                                setState(() => _hoverProgress = progress);
-                            },
-                          ),
-                          Padding(
-                            padding: const EdgeInsets.fromLTRB(8, 0, 8, 4),
-                            child: Row(children: [
-                              IconButton(
-                                tooltip:
-                                    controller.isPlaying ? 'Pause' : 'Play',
-                                iconSize: 32,
-                                onPressed:
-                                    canPlay ? controller.togglePlayback : null,
-                                icon: Icon(controller.isPlaying
-                                    ? Icons.pause_circle
-                                    : Icons.play_circle),
-                              ),
-                              IconButton(
-                                tooltip: 'Stop',
-                                onPressed: canPlay ? controller.stop : null,
-                                icon: const Icon(Icons.stop_circle_outlined),
-                              ),
-                              if (_selectedSection != null)
-                                IconButton(
-                                  tooltip: controller.isLoopingRange
-                                      ? 'Stop looping ${_selectedSection!.label}'
-                                      : 'Loop ${_selectedSection!.label}',
-                                  onPressed: () {
-                                    if (controller.isLoopingRange) {
-                                      controller.stopRangeLoop();
-                                    } else {
-                                      unawaited(controller.playRange(
-                                        _selectedSection!.startMs,
-                                        endMs: _selectedSection!.endMs,
-                                        loop: true,
-                                      ));
-                                    }
-                                  },
-                                  icon: Icon(controller.isLoopingRange
-                                      ? Icons.repeat_one
-                                      : Icons.repeat),
+                    Focus(
+                      focusNode: _waveformFocus,
+                      onKeyEvent: (node, event) =>
+                          _handleWaveformKey(event, controller),
+                      child: Container(
+                        decoration: BoxDecoration(
+                          color: Theme.of(context)
+                              .colorScheme
+                              .surfaceContainerHigh,
+                          borderRadius: BorderRadius.circular(8),
+                        ),
+                        child: Column(
+                          children: [
+                            Padding(
+                              padding: const EdgeInsets.fromLTRB(8, 4, 8, 0),
+                              child: Row(children: [
+                                const Text('Waveform zoom'),
+                                const SizedBox(width: 8),
+                                SegmentedButton<double>(
+                                  segments: const [
+                                    ButtonSegment(value: 1, label: Text('1x')),
+                                    ButtonSegment(
+                                        value: 1.5, label: Text('1.5x')),
+                                    ButtonSegment(value: 2, label: Text('2x')),
+                                  ],
+                                  selected: {_waveformZoom},
+                                  onSelectionChanged: (value) => setState(
+                                      () => _waveformZoom = value.first),
                                 ),
-                              if (_selectedSection != null)
-                                IconButton(
-                                  tooltip: 'Edit ${_selectedSection!.label}',
-                                  onPressed: () {
-                                    final section = _selectedSection!;
-                                    setState(() => _selectedSection = null);
-                                    onEditSection(section);
-                                  },
-                                  icon: const Icon(Icons.edit_note_outlined),
+                                const Spacer(),
+                                Text(
+                                  _waveformFocus.hasFocus
+                                      ? '←/→ seek • Space play/pause'
+                                      : 'Click waveform for keyboard controls',
+                                  style: Theme.of(context).textTheme.bodySmall,
                                 ),
-                              if (_selectedSection != null)
-                                IconButton(
-                                  tooltip: 'Delete ${_selectedSection!.label}',
-                                  onPressed: () {
-                                    final section = _selectedSection!;
-                                    setState(() => _selectedSection = null);
-                                    onDeleteSection(section);
-                                  },
-                                  icon: const Icon(Icons.delete_outline),
-                                ),
-                              if (_selectedSection != null)
+                              ]),
+                            ),
+                            LayoutBuilder(
+                              builder: (context, constraints) {
+                                final contentWidth =
+                                    constraints.maxWidth * _waveformZoom;
+                                return SingleChildScrollView(
+                                  scrollDirection: Axis.horizontal,
+                                  child: SizedBox(
+                                    width: contentWidth,
+                                    child: Column(
+                                      children: [
+                                        SectionTimeline(
+                                          sections: sections,
+                                          duration: duration,
+                                          selectedSection: _selectedSection,
+                                          onSectionTap: (section) {
+                                            setState(() =>
+                                                _selectedSection = section);
+                                            unawaited(controller.seek(Duration(
+                                                milliseconds:
+                                                    section.startMs)));
+                                          },
+                                          onEmptyTapProgress: (progress) {
+                                            final recording =
+                                                controller.recording;
+                                            if (recording == null ||
+                                                duration == Duration.zero) {
+                                              return;
+                                            }
+                                            final clickedMs =
+                                                (duration.inMilliseconds *
+                                                        progress)
+                                                    .round();
+                                            onAddSectionFromLane(
+                                                recording, clickedMs);
+                                          },
+                                          onSectionResize: onResizeSection,
+                                        ),
+                                        WaveformView(
+                                          peaks: data.peaks,
+                                          progress: duration == Duration.zero
+                                              ? 0
+                                              : position.inMilliseconds /
+                                                  duration.inMilliseconds,
+                                          rangeStartProgress: (rangeStartMs ??
+                                                          sectionStartMs) ==
+                                                      null ||
+                                                  duration == Duration.zero
+                                              ? null
+                                              : (rangeStartMs ??
+                                                      sectionStartMs!) /
+                                                  duration.inMilliseconds,
+                                          hoverProgress: _hoverProgress,
+                                          hoverTimeLabel: _hoverProgress ==
+                                                      null ||
+                                                  duration == Duration.zero
+                                              ? null
+                                              : _format(Duration(
+                                                  milliseconds: (_hoverProgress! *
+                                                          duration
+                                                              .inMilliseconds)
+                                                      .round())),
+                                          highlightStartProgress:
+                                              _hoveredNote == null ||
+                                                      duration == Duration.zero
+                                                  ? null
+                                                  : _hoveredNote!.startMs /
+                                                      duration.inMilliseconds,
+                                          highlightEndProgress: _hoveredNote ==
+                                                      null ||
+                                                  duration == Duration.zero
+                                              ? null
+                                              : (_hoveredNote!.endMs ??
+                                                      _hoveredNote!.startMs) /
+                                                  duration.inMilliseconds,
+                                          onSeekProgress: (progress) {
+                                            _waveformFocus.requestFocus();
+                                            onWaveformSeek(progress);
+                                          },
+                                          onHoverProgress: (progress) {
+                                            if (_hoverProgress != progress) {
+                                              setState(() =>
+                                                  _hoverProgress = progress);
+                                            }
+                                          },
+                                        ),
+                                      ],
+                                    ),
+                                  ),
+                                );
+                              },
+                            ),
+                            Padding(
+                              padding: const EdgeInsets.fromLTRB(8, 0, 8, 4),
+                              child: Row(children: [
                                 IconButton(
                                   tooltip:
-                                      'Save ${_selectedSection!.label} as master clip',
-                                  onPressed: controller.recording == null
-                                      ? null
-                                      : () => onSaveSectionAsMaster(
-                                          controller.recording!,
-                                          _selectedSection!),
-                                  icon: const Icon(Icons.library_add_outlined),
+                                      controller.isPlaying ? 'Pause' : 'Play',
+                                  iconSize: 32,
+                                  onPressed: canPlay
+                                      ? controller.togglePlayback
+                                      : null,
+                                  icon: Icon(controller.isPlaying
+                                      ? Icons.pause_circle
+                                      : Icons.play_circle),
                                 ),
-                              const SizedBox(width: 8),
-                              Text(
-                                  '${_format(position)} / ${_format(duration)}'),
-                              const SizedBox(width: 12),
-                              const Expanded(
-                                  child: Text('Click waveform to seek')),
-                            ]),
-                          ),
-                        ],
+                                IconButton(
+                                  tooltip: 'Stop',
+                                  onPressed: canPlay ? controller.stop : null,
+                                  icon: const Icon(Icons.stop_circle_outlined),
+                                ),
+                                if (_selectedSection != null)
+                                  IconButton(
+                                    tooltip: controller.isLoopingRange
+                                        ? 'Stop looping ${_selectedSection!.label}'
+                                        : 'Loop ${_selectedSection!.label}',
+                                    onPressed: () {
+                                      if (controller.isLoopingRange) {
+                                        controller.stopRangeLoop();
+                                      } else {
+                                        unawaited(controller.playRange(
+                                          _selectedSection!.startMs,
+                                          endMs: _selectedSection!.endMs,
+                                          loop: true,
+                                        ));
+                                      }
+                                    },
+                                    icon: Icon(controller.isLoopingRange
+                                        ? Icons.repeat_one
+                                        : Icons.repeat),
+                                  ),
+                                if (_selectedSection != null)
+                                  IconButton(
+                                    tooltip: 'Edit ${_selectedSection!.label}',
+                                    onPressed: () {
+                                      final section = _selectedSection!;
+                                      setState(() => _selectedSection = null);
+                                      onEditSection(section);
+                                    },
+                                    icon: const Icon(Icons.edit_note_outlined),
+                                  ),
+                                if (_selectedSection != null)
+                                  IconButton(
+                                    tooltip:
+                                        'Delete ${_selectedSection!.label}',
+                                    onPressed: () {
+                                      final section = _selectedSection!;
+                                      setState(() => _selectedSection = null);
+                                      onDeleteSection(section);
+                                    },
+                                    icon: const Icon(Icons.delete_outline),
+                                  ),
+                                if (_selectedSection != null)
+                                  IconButton(
+                                    tooltip:
+                                        'Save ${_selectedSection!.label} as master clip',
+                                    onPressed: controller.recording == null
+                                        ? null
+                                        : () => onSaveSectionAsMaster(
+                                            controller.recording!,
+                                            _selectedSection!),
+                                    icon:
+                                        const Icon(Icons.library_add_outlined),
+                                  ),
+                                const SizedBox(width: 8),
+                                Text(
+                                    '${_format(position)} / ${_format(duration)}'),
+                                const SizedBox(width: 12),
+                                const Expanded(
+                                    child: Text('Click waveform to seek')),
+                              ]),
+                            ),
+                          ],
+                        ),
                       ),
                     ),
                   ],
-                ],
-                if (controller.recording != null)
-                  Wrap(
-                    alignment: WrapAlignment.end,
-                    spacing: 8,
-                    children: [
-                      TextButton.icon(
-                        onPressed: () => onAddAnnotation(controller.recording!),
-                        icon: const Icon(Icons.add_comment_outlined),
-                        label: const Text('Add point note'),
-                      ),
-                      TextButton.icon(
-                        onPressed: canPlay
-                            ? () => onStartSection(controller.recording!)
-                            : null,
-                        icon: const Icon(Icons.view_timeline_outlined),
-                        label: Text(sectionStartMs == null
-                            ? 'Start song section here'
-                            : 'Click waveform to end section'),
-                      ),
-                      TextButton.icon(
-                        onPressed: canPlay
-                            ? () => onStartRangeNote(controller.recording!)
-                            : null,
-                        icon: const Icon(Icons.select_all_outlined),
-                        label: Text(rangeStartMs == null
-                            ? 'Start range note here'
-                            : 'Click waveform to end range'),
-                      ),
-                      PopupMenuButton<double>(
-                        tooltip: 'Playback volume boost',
-                        onSelected: onSetVolumeBoost,
-                        itemBuilder: (context) => const [
-                          PopupMenuItem(
-                              value: 0, child: Text('Original level (0 dB)')),
-                          PopupMenuItem(value: 3, child: Text('Boost +3 dB')),
-                          PopupMenuItem(value: 6, child: Text('Boost +6 dB')),
-                          PopupMenuItem(value: 9, child: Text('Boost +9 dB')),
-                          PopupMenuItem(value: 12, child: Text('Boost +12 dB')),
-                          PopupMenuItem(value: 15, child: Text('Boost +15 dB')),
-                        ],
-                        child: Padding(
-                          padding: const EdgeInsets.symmetric(
-                              horizontal: 8, vertical: 8),
-                          child: Row(mainAxisSize: MainAxisSize.min, children: [
-                            const Icon(Icons.volume_up_outlined),
-                            const SizedBox(width: 6),
-                            Text(_volumeLabel(volumeBoostDb)),
-                          ]),
-                        ),
-                      ),
-                      PopupMenuButton<PlaybackChannelMode>(
-                        tooltip: 'Playback channel mode',
-                        onSelected: onSetChannelMode,
-                        itemBuilder: (context) => const [
-                          PopupMenuItem(
-                              value: PlaybackChannelMode.stereo,
-                              child: Text('Stereo / original channels')),
-                          PopupMenuItem(
-                              value: PlaybackChannelMode.muteLeft,
-                              child: Text('Mute left channel')),
-                          PopupMenuItem(
-                              value: PlaybackChannelMode.muteRight,
-                              child: Text('Mute right channel')),
-                          PopupMenuItem(
-                              value: PlaybackChannelMode.mono,
-                              child: Text('Make mono')),
-                        ],
-                        child: Padding(
-                          padding: const EdgeInsets.symmetric(
-                              horizontal: 8, vertical: 8),
-                          child: Row(mainAxisSize: MainAxisSize.min, children: [
-                            const Icon(Icons.surround_sound_outlined),
-                            const SizedBox(width: 6),
-                            Text(channelMode.label),
-                          ]),
-                        ),
-                      ),
-                      PopupMenuButton<_ExportChoice>(
-                        tooltip: 'Export audio',
-                        onSelected: (choice) {
-                          final recording = controller.recording!;
-                          final section =
-                              choice.sectionOnly ? _selectedSection : null;
-                          unawaited(onExportAudio(
-                              recording, section, choice.extension));
-                        },
-                        itemBuilder: (context) => [
-                          const PopupMenuItem(
-                              value: _ExportChoice('wav', false),
-                              child: Text('Export track as WAV')),
-                          const PopupMenuItem(
-                              value: _ExportChoice('mp3', false),
-                              child: Text('Export track as MP3')),
-                          if (_selectedSection != null) ...const [
-                            PopupMenuDivider(),
-                            PopupMenuItem(
-                                value: _ExportChoice('wav', true),
-                                child: Text('Export selected section as WAV')),
-                            PopupMenuItem(
-                                value: _ExportChoice('mp3', true),
-                                child: Text('Export selected section as MP3')),
-                          ],
-                        ],
-                        child: const Padding(
-                          padding:
-                              EdgeInsets.symmetric(horizontal: 8, vertical: 8),
-                          child: Row(mainAxisSize: MainAxisSize.min, children: [
-                            Icon(Icons.ios_share_outlined),
-                            SizedBox(width: 6),
-                            Text('Export'),
-                          ]),
-                        ),
-                      ),
-                      if (controller.recording!.extension == '.wav' ||
-                          controller.recording!.extension == '.wave')
+                  if (controller.recording != null)
+                    Wrap(
+                      alignment: WrapAlignment.end,
+                      spacing: 8,
+                      children: [
                         TextButton.icon(
                           onPressed: () =>
-                              onConvertToMp3(controller.recording!),
-                          icon: const Icon(Icons.audio_file_outlined),
-                          label: const Text('Convert to MP3'),
+                              onAddAnnotation(controller.recording!),
+                          icon: const Icon(Icons.add_comment_outlined),
+                          label: const Text('Add point note'),
                         ),
-                      TextButton.icon(
-                        onPressed: () =>
-                            onSaveRecordingAsMaster(controller.recording!),
-                        icon: const Icon(Icons.library_music_outlined),
-                        label: const Text('Save as master'),
-                      ),
-                    ],
-                  ),
-                if (controller.recording != null)
-                  ExpansionTile(
-                    tilePadding: EdgeInsets.zero,
-                    title: Text('Notes (${notes.length})'),
-                    children: notes.isEmpty
-                        ? const [
-                            ListTile(
-                                dense: true,
-                                title: Text('No notes for this take yet.'))
-                          ]
-                        : notes
-                            .map((note) => MouseRegion(
-                                  onEnter: (_) =>
-                                      setState(() => _hoveredNote = note),
-                                  onExit: (_) {
-                                    if (_hoveredNote?.id == note.id)
-                                      setState(() => _hoveredNote = null);
-                                  },
-                                  child: ListTile(
-                                    dense: true,
-                                    leading: Icon(note.isRange
-                                        ? Icons.compare_arrows
-                                        : Icons.bookmark_outline),
-                                    title: Text(note.isRange
-                                        ? 'Range note • ${note.text}'
-                                        : 'Point note • ${note.text}'),
-                                    subtitle: Text(note.isRange
-                                        ? '${_format(Duration(milliseconds: note.startMs))} – ${_format(Duration(milliseconds: note.endMs!))}'
-                                        : _format(Duration(
-                                            milliseconds: note.startMs))),
-                                    onTap: () => controller.playFromNote(
-                                        note.startMs,
-                                        endMs: note.endMs),
-                                  ),
-                                ))
-                            .toList(),
-                  ),
+                        TextButton.icon(
+                          onPressed: canPlay
+                              ? () => onStartRangeNote(controller.recording!)
+                              : null,
+                          icon: const Icon(Icons.select_all_outlined),
+                          label: Text(rangeStartMs == null
+                              ? 'Start range note here'
+                              : 'Click waveform to end range'),
+                        ),
+                        PopupMenuButton<double>(
+                          tooltip: 'Playback volume boost',
+                          onSelected: onSetVolumeBoost,
+                          itemBuilder: (context) => const [
+                            PopupMenuItem(
+                                value: 0, child: Text('Original level (0 dB)')),
+                            PopupMenuItem(value: 3, child: Text('Boost +3 dB')),
+                            PopupMenuItem(value: 6, child: Text('Boost +6 dB')),
+                            PopupMenuItem(value: 9, child: Text('Boost +9 dB')),
+                            PopupMenuItem(
+                                value: 12, child: Text('Boost +12 dB')),
+                            PopupMenuItem(
+                                value: 15, child: Text('Boost +15 dB')),
+                          ],
+                          child: Padding(
+                            padding: const EdgeInsets.symmetric(
+                                horizontal: 8, vertical: 8),
+                            child:
+                                Row(mainAxisSize: MainAxisSize.min, children: [
+                              const Icon(Icons.volume_up_outlined),
+                              const SizedBox(width: 6),
+                              Text(_volumeLabel(volumeBoostDb)),
+                            ]),
+                          ),
+                        ),
+                        PopupMenuButton<PlaybackChannelMode>(
+                          tooltip: 'Playback channel mode',
+                          onSelected: onSetChannelMode,
+                          itemBuilder: (context) => const [
+                            PopupMenuItem(
+                                value: PlaybackChannelMode.stereo,
+                                child: Text('Stereo / original channels')),
+                            PopupMenuItem(
+                                value: PlaybackChannelMode.muteLeft,
+                                child: Text('Mute left channel')),
+                            PopupMenuItem(
+                                value: PlaybackChannelMode.muteRight,
+                                child: Text('Mute right channel')),
+                            PopupMenuItem(
+                                value: PlaybackChannelMode.mono,
+                                child: Text('Make mono')),
+                          ],
+                          child: Padding(
+                            padding: const EdgeInsets.symmetric(
+                                horizontal: 8, vertical: 8),
+                            child:
+                                Row(mainAxisSize: MainAxisSize.min, children: [
+                              const Icon(Icons.surround_sound_outlined),
+                              const SizedBox(width: 6),
+                              Text(channelMode.label),
+                            ]),
+                          ),
+                        ),
+                        PopupMenuButton<_ExportChoice>(
+                          tooltip: 'Export audio',
+                          onSelected: (choice) {
+                            final recording = controller.recording!;
+                            final section =
+                                choice.sectionOnly ? _selectedSection : null;
+                            unawaited(onExportAudio(
+                                recording, section, choice.extension));
+                          },
+                          itemBuilder: (context) => [
+                            const PopupMenuItem(
+                                value: _ExportChoice('wav', false),
+                                child: Text('Export track as WAV')),
+                            const PopupMenuItem(
+                                value: _ExportChoice('mp3', false),
+                                child: Text('Export track as MP3')),
+                            if (_selectedSection != null) ...const [
+                              PopupMenuDivider(),
+                              PopupMenuItem(
+                                  value: _ExportChoice('wav', true),
+                                  child:
+                                      Text('Export selected section as WAV')),
+                              PopupMenuItem(
+                                  value: _ExportChoice('mp3', true),
+                                  child:
+                                      Text('Export selected section as MP3')),
+                            ],
+                          ],
+                          child: const Padding(
+                            padding: EdgeInsets.symmetric(
+                                horizontal: 8, vertical: 8),
+                            child:
+                                Row(mainAxisSize: MainAxisSize.min, children: [
+                              Icon(Icons.ios_share_outlined),
+                              SizedBox(width: 6),
+                              Text('Export'),
+                            ]),
+                          ),
+                        ),
+                        if (controller.recording!.extension == '.wav' ||
+                            controller.recording!.extension == '.wave')
+                          TextButton.icon(
+                            onPressed: () =>
+                                onConvertToMp3(controller.recording!),
+                            icon: const Icon(Icons.audio_file_outlined),
+                            label: const Text('Convert to MP3'),
+                          ),
+                        TextButton.icon(
+                          onPressed: () =>
+                              onSaveRecordingAsMaster(controller.recording!),
+                          icon: const Icon(Icons.library_music_outlined),
+                          label: const Text('Save as master'),
+                        ),
+                      ],
+                    ),
+                  if (controller.recording != null)
+                    ExpansionTile(
+                      tilePadding: EdgeInsets.zero,
+                      title: Text('Notes (${notes.length})'),
+                      children: notes.isEmpty
+                          ? const [
+                              ListTile(
+                                  dense: true,
+                                  title: Text('No notes for this take yet.'))
+                            ]
+                          : notes
+                              .map((note) => MouseRegion(
+                                    onEnter: (_) =>
+                                        setState(() => _hoveredNote = note),
+                                    onExit: (_) {
+                                      if (_hoveredNote?.id == note.id)
+                                        setState(() => _hoveredNote = null);
+                                    },
+                                    child: ListTile(
+                                      dense: true,
+                                      leading: Icon(note.isRange
+                                          ? Icons.compare_arrows
+                                          : Icons.bookmark_outline),
+                                      title: Text(note.isRange
+                                          ? 'Range note • ${note.text}'
+                                          : 'Point note • ${note.text}'),
+                                      subtitle: Text(note.isRange
+                                          ? '${_format(Duration(milliseconds: note.startMs))} – ${_format(Duration(milliseconds: note.endMs!))}'
+                                          : _format(Duration(
+                                              milliseconds: note.startMs))),
+                                      onTap: () => controller.playFromNote(
+                                          note.startMs,
+                                          endMs: note.endMs),
+                                    ),
+                                  ))
+                              .toList(),
+                    ),
+                ],
               ],
             ),
           ),
