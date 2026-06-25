@@ -11,6 +11,7 @@ import 'audio_processing.dart';
 import 'app_preferences.dart';
 import 'audio_controller.dart';
 import 'domain.dart';
+import 'fingerprints.dart';
 import 'sections.dart';
 import 'sync.dart';
 import 'waveform.dart';
@@ -46,6 +47,7 @@ class _LibraryScreenState extends State<LibraryScreen> {
   final _syncRepository = PracticeSyncRepository();
   final _activity = ActivityQueue();
   final _audioProcessing = AudioProcessingRepository();
+  final _fingerprints = FingerprintRepository();
   late final AudioController _audio;
   late final WaveformController _waveform;
   late final AppPreferences _preferences;
@@ -55,6 +57,7 @@ class _LibraryScreenState extends State<LibraryScreen> {
   List<PracticeAnnotation> _notes = const [];
   List<UserAnnotation> _reviewNotes = const [];
   List<SongSection> _sections = const [];
+  List<FingerprintMatch> _fingerprintMatches = const [];
   String? _bandFolder;
   double _volumeBoostDb = 0;
   PlaybackChannelMode _channelMode = PlaybackChannelMode.stereo;
@@ -97,6 +100,24 @@ class _LibraryScreenState extends State<LibraryScreen> {
         .getDirectoryPath(dialogTitle: 'Choose your Google Drive sync folder');
     if (selection == null) return;
     await _preferences.setSyncFolder(selection);
+  }
+
+  Future<void> _chooseMastersFolder() async {
+    final selection = await FilePicker.platform
+        .getDirectoryPath(dialogTitle: 'Choose your Masters Folder');
+    if (selection == null) return;
+    await _preferences.setMastersFolder(selection);
+  }
+
+  Future<Directory?> _requireMastersFolder() async {
+    final saved = _preferences.mastersFolder;
+    if (saved != null && await Directory(saved).exists()) {
+      return Directory(saved);
+    }
+    await _chooseMastersFolder();
+    final selected = _preferences.mastersFolder;
+    if (selected == null || !await Directory(selected).exists()) return null;
+    return Directory(selected);
   }
 
   Future<Directory?> _requireSyncFolder() async {
@@ -409,6 +430,112 @@ class _LibraryScreenState extends State<LibraryScreen> {
     }
   }
 
+  Future<void> _matchSelectedPracticeFingerprints() async {
+    final practice = _selected;
+    if (practice == null) return;
+    final mastersFolder = await _requireMastersFolder();
+    if (mastersFolder == null) return;
+    try {
+      final matches =
+          await _activity.run('Matching fingerprints', (update) async {
+        update(null, 'Fingerprinting masters and ${practice.name}…');
+        final result = await _fingerprints.matchPractice(
+          practice: practice,
+          mastersFolder: mastersFolder,
+        );
+        update(1, 'Fingerprint matching complete');
+        return result;
+      });
+      if (!mounted) return;
+      setState(() => _fingerprintMatches = matches);
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+          content: Text(matches.isEmpty
+              ? 'No confident fingerprint matches found.'
+              : 'Found ${matches.length} fingerprint match suggestions.')));
+    } on ProcessException {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+            content: Text('FFmpeg is required for fingerprint matching.')));
+      }
+    } on StateError catch (error) {
+      if (mounted) {
+        ScaffoldMessenger.of(context)
+            .showSnackBar(SnackBar(content: Text(error.message)));
+      }
+    }
+  }
+
+  Future<void> _saveRecordingAsMaster(Recording recording) async {
+    final mastersFolder = await _requireMastersFolder();
+    if (mastersFolder == null) return;
+    final title =
+        recording.title ?? path.basenameWithoutExtension(recording.filename);
+    final target = File(path.join(
+        mastersFolder.path, '${_filenameSafe(title)}${recording.extension}'));
+    if (await target.exists()) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+            content: Text('${path.basename(target.path)} already exists.')));
+      }
+      return;
+    }
+    await _activity.run('Saving master', (update) async {
+      update(null, 'Copying ${recording.filename} to Masters…');
+      await target.parent.create(recursive: true);
+      await recording.file.copy(target.path);
+      update(1, 'Master saved');
+    });
+    if (mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+          content: Text('Saved ${path.basename(target.path)} to Masters.')));
+    }
+  }
+
+  Future<void> _saveSectionAsMaster(
+      Recording recording, SongSection section) async {
+    final mastersFolder = await _requireMastersFolder();
+    if (mastersFolder == null) return;
+    final title =
+        recording.title ?? path.basenameWithoutExtension(recording.filename);
+    final target = File(path.join(mastersFolder.path,
+        '${_filenameSafe('${title}_${section.label}')}.wav'));
+    if (await target.exists()) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+            content: Text('${path.basename(target.path)} already exists.')));
+      }
+      return;
+    }
+    try {
+      await _activity.run('Saving section master', (update) async {
+        update(null, 'Exporting ${section.label} to Masters…');
+        await _audioProcessing.exportAudio(
+          recording: recording,
+          output: target,
+          decibels: 0,
+          channelMode: PlaybackChannelMode.stereo,
+          startMs: section.startMs,
+          endMs: section.endMs,
+        );
+        update(1, 'Section master saved');
+      });
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+            content: Text('Saved ${path.basename(target.path)} to Masters.')));
+      }
+    } on ProcessException {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+            content: Text('FFmpeg is required to save a section as master.')));
+      }
+    } on StateError catch (error) {
+      if (mounted) {
+        ScaffoldMessenger.of(context)
+            .showSnackBar(SnackBar(content: Text(error.message)));
+      }
+    }
+  }
+
   Future<void> _playReviewNote(UserAnnotation item) async {
     final practice = _selected;
     if (practice == null) return;
@@ -443,6 +570,17 @@ class _LibraryScreenState extends State<LibraryScreen> {
                 trailing: TextButton(
                     onPressed: () async {
                       await _chooseSyncFolder();
+                      setDialogState(() {});
+                    },
+                    child: const Text('Choose')),
+              ),
+              ListTile(
+                contentPadding: EdgeInsets.zero,
+                title: const Text('Masters Folder'),
+                subtitle: Text(_preferences.mastersFolder ?? 'None selected'),
+                trailing: TextButton(
+                    onPressed: () async {
+                      await _chooseMastersFolder();
                       setDialogState(() {});
                     },
                     child: const Text('Choose')),
@@ -975,6 +1113,16 @@ class _LibraryScreenState extends State<LibraryScreen> {
     return sanitized.isEmpty ? 'RiffNotes_Export' : sanitized;
   }
 
+  String _filenameSafe(String value) {
+    final sanitized = value
+        .replaceAll(RegExp(r'[<>:"/\\|?*\x00-\x1F]'), '')
+        .trim()
+        .replaceAll(RegExp(r'\s+'), '_')
+        .replaceAll(RegExp(r'_+'), '_')
+        .replaceAll(RegExp(r'[. ]+$'), '');
+    return sanitized.isEmpty ? 'Untitled' : sanitized;
+  }
+
   Future<void> _previewAndApplyRename() async {
     final practice = _selected;
     if (practice == null) {
@@ -1093,6 +1241,12 @@ class _LibraryScreenState extends State<LibraryScreen> {
                       _selected == null ? null : _downloadSelectedPractice,
                   icon: const Icon(Icons.cloud_download_outlined)),
               IconButton(
+                  tooltip: 'Match selected practice against Masters',
+                  onPressed: _selected == null
+                      ? null
+                      : _matchSelectedPracticeFingerprints,
+                  icon: const Icon(Icons.fingerprint)),
+              IconButton(
                   tooltip: 'Preferences',
                   onPressed: _showPreferences,
                   icon: const Icon(Icons.settings_outlined)),
@@ -1132,6 +1286,8 @@ class _LibraryScreenState extends State<LibraryScreen> {
                   onDeleteSection: _deleteSection,
                   onExportAudio: _exportAudio,
                   onConvertToMp3: _convertSelectedWavToMp3,
+                  onSaveRecordingAsMaster: _saveRecordingAsMaster,
+                  onSaveSectionAsMaster: _saveSectionAsMaster,
                   onWaveformSeek: _onWaveformSeek,
                   rangeStartMs: _rangeRecordingId == _selectedRecording?.id
                       ? _rangeStartMs
@@ -1158,6 +1314,7 @@ class _LibraryScreenState extends State<LibraryScreen> {
                   onSetReviewSort: (value) =>
                       setState(() => _reviewSort = value),
                   reviewNotes: _reviewNotes,
+                  fingerprintMatches: _fingerprintMatches,
                   onPlayReviewNote: _playReviewNote,
                   audio: _audio,
                   waveform: _waveform,
@@ -1224,6 +1381,8 @@ class _RecordingList extends StatelessWidget {
     required this.onDeleteSection,
     required this.onExportAudio,
     required this.onConvertToMp3,
+    required this.onSaveRecordingAsMaster,
+    required this.onSaveSectionAsMaster,
     required this.onWaveformSeek,
     required this.rangeStartMs,
     required this.sectionStartMs,
@@ -1242,6 +1401,7 @@ class _RecordingList extends StatelessWidget {
     required this.onSetReviewRecordingFilter,
     required this.onSetReviewSort,
     required this.reviewNotes,
+    required this.fingerprintMatches,
     required this.onPlayReviewNote,
     required this.audio,
     required this.waveform,
@@ -1263,6 +1423,9 @@ class _RecordingList extends StatelessWidget {
           Recording recording, SongSection? section, String extension)
       onExportAudio;
   final ValueChanged<Recording> onConvertToMp3;
+  final ValueChanged<Recording> onSaveRecordingAsMaster;
+  final void Function(Recording recording, SongSection section)
+      onSaveSectionAsMaster;
   final ValueChanged<double> onWaveformSeek;
   final int? rangeStartMs;
   final int? sectionStartMs;
@@ -1281,6 +1444,7 @@ class _RecordingList extends StatelessWidget {
   final ValueChanged<String?> onSetReviewRecordingFilter;
   final ValueChanged<_ReviewSort> onSetReviewSort;
   final List<UserAnnotation> reviewNotes;
+  final List<FingerprintMatch> fingerprintMatches;
   final ValueChanged<UserAnnotation> onPlayReviewNote;
   final AudioController audio;
   final WaveformController waveform;
@@ -1406,9 +1570,7 @@ class _RecordingList extends StatelessWidget {
                         color: recording.isBestTake ? Colors.amber : null),
                     title: Text(recording.title ?? recording.filename),
                     subtitle: Text(
-                      recording.title == null
-                          ? _fileDetails(recording)
-                          : '${recording.filename} • ${_fileDetails(recording)}',
+                      _recordingSubtitle(recording),
                     ),
                     trailing: Row(
                       mainAxisSize: MainAxisSize.min,
@@ -1428,6 +1590,11 @@ class _RecordingList extends StatelessWidget {
                           tooltip: 'Title this take',
                           icon: const Icon(Icons.edit_outlined),
                           onPressed: () => onEditTitle(recording),
+                        ),
+                        IconButton(
+                          tooltip: 'Save take as new master',
+                          icon: const Icon(Icons.library_music_outlined),
+                          onPressed: () => onSaveRecordingAsMaster(recording),
                         ),
                         Text(recording.extension
                             .replaceFirst('.', '')
@@ -1450,6 +1617,8 @@ class _RecordingList extends StatelessWidget {
           onDeleteSection: onDeleteSection,
           onExportAudio: onExportAudio,
           onConvertToMp3: onConvertToMp3,
+          onSaveRecordingAsMaster: onSaveRecordingAsMaster,
+          onSaveSectionAsMaster: onSaveSectionAsMaster,
           onWaveformSeek: onWaveformSeek,
           rangeStartMs: rangeStartMs,
           sectionStartMs: sectionStartMs,
@@ -1474,6 +1643,24 @@ class _RecordingList extends StatelessWidget {
     } on FileSystemException {
       return 'File unavailable';
     }
+  }
+
+  String _recordingSubtitle(Recording recording) {
+    final pieces = <String>[
+      if (recording.title != null) recording.filename,
+      _fileDetails(recording),
+      if (_bestFingerprintMatch(recording) case final match?)
+        'Match: ${match.displayName} (${(match.confidence * 100).round()}%)',
+    ];
+    return pieces.join(' • ');
+  }
+
+  FingerprintMatch? _bestFingerprintMatch(Recording recording) {
+    final matches = fingerprintMatches
+        .where((item) => item.recordingId == recording.id)
+        .toList()
+      ..sort((a, b) => b.confidence.compareTo(a.confidence));
+    return matches.isEmpty ? null : matches.first;
   }
 
   List<UserAnnotation> _visibleReviewNotes(PracticeFolder practice) {
@@ -1534,6 +1721,8 @@ class _PlayerPanel extends StatefulWidget {
     required this.onDeleteSection,
     required this.onExportAudio,
     required this.onConvertToMp3,
+    required this.onSaveRecordingAsMaster,
+    required this.onSaveSectionAsMaster,
     required this.onWaveformSeek,
     required this.rangeStartMs,
     required this.sectionStartMs,
@@ -1555,6 +1744,9 @@ class _PlayerPanel extends StatefulWidget {
           Recording recording, SongSection? section, String extension)
       onExportAudio;
   final ValueChanged<Recording> onConvertToMp3;
+  final ValueChanged<Recording> onSaveRecordingAsMaster;
+  final void Function(Recording recording, SongSection section)
+      onSaveSectionAsMaster;
   final ValueChanged<double> onWaveformSeek;
   final int? rangeStartMs;
   final int? sectionStartMs;
@@ -1592,6 +1784,8 @@ class _PlayerPanelState extends State<_PlayerPanel> {
     final onDeleteSection = widget.onDeleteSection;
     final onExportAudio = widget.onExportAudio;
     final onConvertToMp3 = widget.onConvertToMp3;
+    final onSaveRecordingAsMaster = widget.onSaveRecordingAsMaster;
+    final onSaveSectionAsMaster = widget.onSaveSectionAsMaster;
     final onWaveformSeek = widget.onWaveformSeek;
     final rangeStartMs = widget.rangeStartMs;
     final sectionStartMs = widget.sectionStartMs;
@@ -1772,6 +1966,17 @@ class _PlayerPanelState extends State<_PlayerPanel> {
                                   },
                                   icon: const Icon(Icons.delete_outline),
                                 ),
+                              if (_selectedSection != null)
+                                IconButton(
+                                  tooltip:
+                                      'Save ${_selectedSection!.label} as master clip',
+                                  onPressed: controller.recording == null
+                                      ? null
+                                      : () => onSaveSectionAsMaster(
+                                          controller.recording!,
+                                          _selectedSection!),
+                                  icon: const Icon(Icons.library_add_outlined),
+                                ),
                               const SizedBox(width: 8),
                               Text(
                                   '${_format(position)} / ${_format(duration)}'),
@@ -1906,6 +2111,12 @@ class _PlayerPanelState extends State<_PlayerPanel> {
                           icon: const Icon(Icons.audio_file_outlined),
                           label: const Text('Convert to MP3'),
                         ),
+                      TextButton.icon(
+                        onPressed: () =>
+                            onSaveRecordingAsMaster(controller.recording!),
+                        icon: const Icon(Icons.library_music_outlined),
+                        label: const Text('Save as master'),
+                      ),
                     ],
                   ),
                 if (controller.recording != null)

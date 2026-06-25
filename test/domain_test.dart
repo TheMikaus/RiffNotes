@@ -5,6 +5,7 @@ import 'package:riffnotes/annotations.dart';
 import 'package:riffnotes/app_preferences.dart';
 import 'package:riffnotes/audio_processing.dart';
 import 'package:riffnotes/domain.dart';
+import 'package:riffnotes/fingerprints.dart';
 import 'package:riffnotes/sync.dart';
 import 'package:riffnotes/waveform.dart';
 import 'package:shared_preferences/shared_preferences.dart';
@@ -184,5 +185,22 @@ void main() {
     expect(peaks, hasLength(2));
     expect(peaks[0], closeTo(1, 0.001));
     expect(peaks[1], closeTo(1, 0.001));
+  });
+
+  test('calculates normalized audio fingerprints from PCM samples', () {
+    final pcm = <int>[];
+    for (var i = 0; i < 1600; i += 1) {
+      final value = i.isEven ? 12000 : -12000;
+      pcm
+        ..add(value & 0xff)
+        ..add((value >> 8) & 0xff);
+    }
+
+    final fingerprint =
+        FingerprintRepository.calculateFingerprint(pcm, windowSamples: 800);
+
+    expect(fingerprint, hasLength(2));
+    expect(fingerprint.every((value) => value >= 0 && value <= 1), isTrue);
+    expect(fingerprint.reduce((a, b) => a > b ? a : b), closeTo(1, .001));
   });
 }
