@@ -6,15 +6,29 @@ This project was generated and iterated with AI assistance from Codex, based on 
 
 ## Current milestone
 
-The repository contains an early but usable Windows-focused vertical slice:
+The repository contains an early but usable Windows-focused practice-review application:
 
 - Select and remember a band folder.
-- Discover practice folders and WAV/MP3 recordings.
-- Play, pause, seek, and view cached waveforms.
+- Discover practice folders and WAV/MP3 recordings while excluding cache/backup folders.
+- Remember the last selected practice and the last selected track per practice, with safe fallbacks.
+- Play, pause, seek, scrub with keyboard shortcuts, and view cached waveforms.
+- Zoom the waveform from 1x to 4x in 0.5x steps from the playback controls.
 - Add point notes, ranged notes, and named song sections.
+- Click notes, ranges, and sections to jump playback to the relevant time.
+- Loop the selected song section.
+- Show sections as a colored lane on the waveform timeline.
+- Drag section starts/stops and add adjacent sections from the section lane.
 - View notes for the selected track or the whole practice.
 - Mark multiple recordings as Best Take.
 - Apply remembered playback boosts up to +15 dB using cached processed audio.
+- Mute the left channel, mute the right channel, or fold playback down to mono; processed playback is cached and remembered per recording.
+- Select the Windows playback output device.
+- Export processed tracks or selected clips as WAV or MP3.
+- Convert WAV/WAVE recordings to MP3, replacing the source recording after a successful conversion.
+- Choose a Masters folder, mark tracks/clips as masters, section masters, and run fuzzy fingerprint suggestions against practice folders.
+- Review fingerprint suggestions before applying song titles/sections or ignoring a match.
+- Manually sync a selected practice folder to/from a local Google Drive-style sync folder while excluding regenerable cache.
+- Clear the waveform/processed-audio cache for a specific practice.
 - Preserve portable metadata in the practice folder.
 - Keep long-running work visible so the app does not appear frozen.
 
@@ -89,6 +103,16 @@ flutter build apk
 
 Kindle Fire installation/testing depends on your local Android device setup and developer-mode configuration.
 
+## Basic workflow
+
+1. Choose the band folder. RiffNotes lists each direct subfolder as a practice, except generated cache/backup folders.
+2. Open a practice. The app lists supported recordings and restores the last selected track for that practice when possible.
+3. Listen first. Use the waveform transport to play, seek, zoom, boost volume, select output, or switch channel mode.
+4. Add structure. Use the section lane to create named sections, drag edges into place, and loop a selected section while reviewing.
+5. Add notes. Point notes mark a single time; range notes describe a span of the performance.
+6. Review the practice. The practice review view collects notes across all tracks and can jump directly to the referenced clip.
+7. Apply housekeeping. Rename, mark Best Takes, convert WAV to MP3, export processed audio, sync, or run fingerprint matching when ready.
+
 ## Practice folder data
 
 RiffNotes stores portable metadata beside the audio so a practice folder can be copied or synced as a unit.
@@ -97,6 +121,7 @@ RiffNotes stores portable metadata beside the audio so a practice folder can be 
 - `.riffnotes.<recording-id>.sections.json` stores song sections for one track.
 - `library.riffnotes.json` stores the practice recording catalogue and take metadata.
 - `.riffnotes-cache\` stores regenerable waveform and processed-audio cache files.
+- `Masters\` can live inside the band/practice area and contain reference recordings for fingerprint matching.
 
 Cache folders are safe to exclude from backups and cloud sync.
 
@@ -106,16 +131,16 @@ Cache folders are safe to exclude from backups and cloud sync.
 - WAV and MP3 are supported.
 - A recording has a stable ID, so renaming or WAV-to-MP3 replacement never detaches notes or sections.
 - Per-user annotations use `.riffnotes.<user>.bandnotes` JSON files in the practice folder.
-- Google Drive sync is manual per practice folder. Regenerable cache is excluded.
+- Google Drive-style sync is manual per practice folder. Regenerable cache is excluded.
 - Lengthy work is queued in background operations with progress and cancellation where safe.
+- Heavy processing is Windows-first; the Android/Kindle path is intended to focus on playback, notes, sections, and sync.
 
 See [docs/product-spec.md](docs/product-spec.md) for the current, prioritized specification.
 
 ## Notable planned work
 
-- Safer bulk rename flow after playback-based review.
-- Export selected sections/ranges as WAV or MP3.
-- Left/right mute and mono fold-down.
-- Windows audio-output selection.
-- Fuzzy fingerprint matching for takes and song sections.
-- Manual Google Drive upload/download for selected practice folders.
+- Continue refining section editing and waveform ergonomics.
+- Improve bulk rename around the listen-first workflow.
+- Harden fingerprint confidence scoring and review UX.
+- Package a friendlier Windows installer/release bundle.
+- Flesh out the Android/Kindle playback and note-review experience.
