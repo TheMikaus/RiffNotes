@@ -10,6 +10,7 @@ class AppPreferences extends ChangeNotifier {
   static const _displayNameKey = 'display_name';
   static const _lastPracticeKey = 'last_practice';
   static const _lastRecordingKey = 'last_recording';
+  static const _lastRecordingsByPracticeKey = 'last_recordings_by_practice';
   static const _boostsKey = 'playback_boosts';
 
   String? _bandFolder;
@@ -18,6 +19,7 @@ class AppPreferences extends ChangeNotifier {
   String _displayName = 'Bandmate';
   String? _lastPractice;
   String? _lastRecording;
+  Map<String, String> _lastRecordingsByPractice = <String, String>{};
   Map<String, double> _boostsByRecording = <String, double>{};
 
   String? get bandFolder => _bandFolder;
@@ -26,6 +28,9 @@ class AppPreferences extends ChangeNotifier {
   String get displayName => _displayName;
   String? get lastPractice => _lastPractice;
   String? get lastRecording => _lastRecording;
+  String? lastRecordingForPractice(String practice) =>
+      _lastRecordingsByPractice[practice] ??
+      (practice == _lastPractice ? _lastRecording : null);
   double boostFor(String recordingId) => _boostsByRecording[recordingId] ?? 0;
 
   Future<void> load() async {
@@ -36,11 +41,26 @@ class AppPreferences extends ChangeNotifier {
     _displayName = store.getString(_displayNameKey) ?? 'Bandmate';
     _lastPractice = store.getString(_lastPracticeKey);
     _lastRecording = store.getString(_lastRecordingKey);
+    final lastRecordingsByPractice =
+        store.getString(_lastRecordingsByPracticeKey);
+    if (lastRecordingsByPractice != null) {
+      try {
+        final decoded =
+            jsonDecode(lastRecordingsByPractice) as Map<String, dynamic>;
+        _lastRecordingsByPractice =
+            decoded.map((key, value) => MapEntry(key, value as String));
+      } on FormatException {
+        _lastRecordingsByPractice = <String, String>{};
+      } on TypeError {
+        _lastRecordingsByPractice = <String, String>{};
+      }
+    }
     final boosts = store.getString(_boostsKey);
     if (boosts != null) {
       try {
         final decoded = jsonDecode(boosts) as Map<String, dynamic>;
-        _boostsByRecording = decoded.map((key, value) => MapEntry(key, (value as num).toDouble()));
+        _boostsByRecording = decoded
+            .map((key, value) => MapEntry(key, (value as num).toDouble()));
       } on FormatException {
         _boostsByRecording = <String, double>{};
       }
@@ -48,12 +68,29 @@ class AppPreferences extends ChangeNotifier {
     notifyListeners();
   }
 
+  Future<void> rememberPractice(String practice) async {
+    _lastPractice = practice;
+    final store = await SharedPreferences.getInstance();
+    await store.setString(_lastPracticeKey, practice);
+  }
+
   Future<void> rememberSelection(String practice, String? recording) async {
     _lastPractice = practice;
     _lastRecording = recording;
+    if (recording == null) {
+      _lastRecordingsByPractice.remove(practice);
+    } else {
+      _lastRecordingsByPractice[practice] = recording;
+    }
     final store = await SharedPreferences.getInstance();
     await store.setString(_lastPracticeKey, practice);
-    if (recording == null) await store.remove(_lastRecordingKey); else await store.setString(_lastRecordingKey, recording);
+    if (recording == null) {
+      await store.remove(_lastRecordingKey);
+    } else {
+      await store.setString(_lastRecordingKey, recording);
+    }
+    await store.setString(
+        _lastRecordingsByPracticeKey, jsonEncode(_lastRecordingsByPractice));
   }
 
   Future<void> setBandFolder(String? path) async {

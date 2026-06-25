@@ -124,7 +124,8 @@ class _LibraryScreenState extends State<LibraryScreen> {
       if (_selected != null) await _refreshPracticeReview(_selected!);
       final selected = _selected;
       final remembered = selected?.recordings
-          .where((item) => item.id == _preferences.lastRecording)
+          .where((item) =>
+              item.id == _preferences.lastRecordingForPractice(selected.name))
           .firstOrNull;
       if (remembered != null) {
         await _selectRecording(remembered);
@@ -147,8 +148,14 @@ class _LibraryScreenState extends State<LibraryScreen> {
     });
     _waveform.clear();
     await _refreshPracticeReview(practice);
-    await _preferences.rememberSelection(practice.name, null);
-    if (_preferences.autoPlayOnPracticeSelection &&
+    await _preferences.rememberPractice(practice.name);
+    final remembered = practice.recordings
+        .where((item) =>
+            item.id == _preferences.lastRecordingForPractice(practice.name))
+        .firstOrNull;
+    if (remembered != null) {
+      await _selectRecording(remembered);
+    } else if (_preferences.autoPlayOnPracticeSelection &&
         practice.recordings.isNotEmpty) {
       await _selectRecording(practice.recordings.first, autoPlay: true);
     }
@@ -238,10 +245,14 @@ class _LibraryScreenState extends State<LibraryScreen> {
   Future<void> _playReviewNote(UserAnnotation item) async {
     final practice = _selected;
     if (practice == null) return;
-    final recording = practice.recordings.where((take) => take.id == item.annotation.recordingId).firstOrNull;
+    final recording = practice.recordings
+        .where((take) => take.id == item.annotation.recordingId)
+        .firstOrNull;
     if (recording == null) return;
-    if (_selectedRecording?.id != recording.id) await _selectRecording(recording);
-    await _audio.playFromNote(item.annotation.startMs, endMs: item.annotation.endMs);
+    if (_selectedRecording?.id != recording.id)
+      await _selectRecording(recording);
+    await _audio.playFromNote(item.annotation.startMs,
+        endMs: item.annotation.endMs);
   }
 
   Future<void> _showPreferences() async {
@@ -455,22 +466,32 @@ class _LibraryScreenState extends State<LibraryScreen> {
     final accepted = await showDialog<bool>(
       context: context,
       builder: (context) => AlertDialog(
-        title: Text('Song section: ${_formatMilliseconds(startMs)} – ${_formatMilliseconds(endMs)}'),
+        title: Text(
+            'Song section: ${_formatMilliseconds(startMs)} – ${_formatMilliseconds(endMs)}'),
         content: TextField(
           controller: label,
           autofocus: true,
-          decoration: const InputDecoration(labelText: 'Section name (Verse, Chorus, Bridge…)'),
+          decoration: const InputDecoration(
+              labelText: 'Section name (Verse, Chorus, Bridge…)'),
         ),
         actions: [
-          TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('Cancel')),
-          FilledButton(onPressed: () => Navigator.pop(context, true), child: const Text('Save section')),
+          TextButton(
+              onPressed: () => Navigator.pop(context, false),
+              child: const Text('Cancel')),
+          FilledButton(
+              onPressed: () => Navigator.pop(context, true),
+              child: const Text('Save section')),
         ],
       ),
     );
     if (accepted == true && label.text.trim().isNotEmpty) {
       await _sectionsRepository.add(
         practice.directory.path,
-        SongSection(recordingId: recording.id, startMs: startMs, endMs: endMs, label: label.text.trim()),
+        SongSection(
+            recordingId: recording.id,
+            startMs: startMs,
+            endMs: endMs,
+            label: label.text.trim()),
       );
       await _refreshSections(recording);
     }
@@ -511,8 +532,8 @@ class _LibraryScreenState extends State<LibraryScreen> {
         endMs: endMs,
         text: text.text.trim(),
       );
-    await _refreshNotes(recording);
-    await _refreshSections(recording);
+      await _refreshNotes(recording);
+      await _refreshSections(recording);
     }
     text.dispose();
   }
@@ -520,9 +541,12 @@ class _LibraryScreenState extends State<LibraryScreen> {
   Future<void> _refreshSections(Recording recording) async {
     final practice = _selected;
     if (practice == null) return;
-    final sections = await _sectionsRepository.load(practice.directory.path, recording.id);
+    final sections =
+        await _sectionsRepository.load(practice.directory.path, recording.id);
     if (mounted && _selectedRecording?.id == recording.id) {
-      setState(() => _sections = sections.where((section) => section.recordingId == recording.id).toList());
+      setState(() => _sections = sections
+          .where((section) => section.recordingId == recording.id)
+          .toList());
     }
   }
 
@@ -679,13 +703,16 @@ class _LibraryScreenState extends State<LibraryScreen> {
                   rangeStartMs: _rangeRecordingId == _selectedRecording?.id
                       ? _rangeStartMs
                       : null,
-                  sectionStartMs: _sectionRecordingId == _selectedRecording?.id ? _sectionStartMs : null,
+                  sectionStartMs: _sectionRecordingId == _selectedRecording?.id
+                      ? _sectionStartMs
+                      : null,
                   volumeBoostDb: _volumeBoostDb,
                   onSetVolumeBoost: _setVolumeBoost,
                   notes: _notes,
                   sections: _sections,
                   showPracticeReview: _showPracticeReview,
-                  onTogglePracticeReview: (value) => setState(() => _showPracticeReview = value),
+                  onTogglePracticeReview: (value) =>
+                      setState(() => _showPracticeReview = value),
                   reviewNotes: _reviewNotes,
                   onPlayReviewNote: _playReviewNote,
                   audio: _audio,
@@ -792,79 +819,96 @@ class _RecordingList extends StatelessWidget {
             padding: const EdgeInsets.all(24),
             children: [
               Row(children: [
-                Expanded(child: Text(practice!.name, style: Theme.of(context).textTheme.headlineMedium)),
+                Expanded(
+                    child: Text(practice!.name,
+                        style: Theme.of(context).textTheme.headlineMedium)),
                 SegmentedButton<bool>(
                   segments: const [
-                    ButtonSegment(value: false, label: Text('Takes'), icon: Icon(Icons.queue_music)),
-                    ButtonSegment(value: true, label: Text('Practice review'), icon: Icon(Icons.rate_review_outlined)),
+                    ButtonSegment(
+                        value: false,
+                        label: Text('Takes'),
+                        icon: Icon(Icons.queue_music)),
+                    ButtonSegment(
+                        value: true,
+                        label: Text('Practice review'),
+                        icon: Icon(Icons.rate_review_outlined)),
                   ],
                   selected: {showPracticeReview},
-                  onSelectionChanged: (value) => onTogglePracticeReview(value.first),
+                  onSelectionChanged: (value) =>
+                      onTogglePracticeReview(value.first),
                 ),
               ]),
               if (showPracticeReview) ...[
                 const SizedBox(height: 12),
-                Text('All bandmate notes in this practice', style: Theme.of(context).textTheme.titleMedium),
+                Text('All bandmate notes in this practice',
+                    style: Theme.of(context).textTheme.titleMedium),
                 const SizedBox(height: 8),
-                if (reviewNotes.isEmpty) const ListTile(title: Text('No notes have been saved for this practice yet.')),
+                if (reviewNotes.isEmpty)
+                  const ListTile(
+                      title: Text(
+                          'No notes have been saved for this practice yet.')),
                 for (final item in reviewNotes)
-                  Card(child: ListTile(
-                    leading: Icon(item.annotation.isRange ? Icons.compare_arrows : Icons.bookmark_outline),
+                  Card(
+                      child: ListTile(
+                    leading: Icon(item.annotation.isRange
+                        ? Icons.compare_arrows
+                        : Icons.bookmark_outline),
                     title: Text(item.annotation.text),
-                    subtitle: Text('${item.user} • ${_reviewTime(item.annotation)}'),
+                    subtitle:
+                        Text('${item.user} • ${_reviewTime(item.annotation)}'),
                     trailing: const Icon(Icons.play_arrow),
                     onTap: () => onPlayReviewNote(item),
                   )),
               ] else ...[
-              Row(children: [
-                const Expanded(
-                    child: Text('Select a take to load it into the player.')),
-                FilledButton.icon(
-                  onPressed: onBatchRename,
-                  icon: const Icon(Icons.drive_file_rename_outline),
-                  label: const Text('Batch rename'),
-                ),
-              ]),
-              const SizedBox(height: 18),
-              for (final recording in practice!.recordings)
-                Card(
-                    child: ListTile(
-                  selected: selected?.id == recording.id,
-                  leading: Icon(
-                      recording.isBestTake ? Icons.star : Icons.audiotrack,
-                      color: recording.isBestTake ? Colors.amber : null),
-                  title: Text(recording.title ?? recording.filename),
-                  subtitle: Text(
-                    recording.title == null
-                        ? _fileDetails(recording)
-                        : '${recording.filename} • ${_fileDetails(recording)}',
+                Row(children: [
+                  const Expanded(
+                      child: Text('Select a take to load it into the player.')),
+                  FilledButton.icon(
+                    onPressed: onBatchRename,
+                    icon: const Icon(Icons.drive_file_rename_outline),
+                    label: const Text('Batch rename'),
                   ),
-                  trailing: Row(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      IconButton(
-                        tooltip: recording.isBestTake
-                            ? 'Remove Best Take'
-                            : 'Mark Best Take',
-                        icon: Icon(recording.isBestTake
-                            ? Icons.star
-                            : Icons.star_border),
-                        color: recording.isBestTake ? Colors.amber : null,
-                        onPressed: () =>
-                            onToggleBest(recording, !recording.isBestTake),
-                      ),
-                      IconButton(
-                        tooltip: 'Title this take',
-                        icon: const Icon(Icons.edit_outlined),
-                        onPressed: () => onEditTitle(recording),
-                      ),
-                      Text(recording.extension
-                          .replaceFirst('.', '')
-                          .toUpperCase()),
-                    ],
-                  ),
-                  onTap: () => onSelect(recording),
-                )),
+                ]),
+                const SizedBox(height: 18),
+                for (final recording in practice!.recordings)
+                  Card(
+                      child: ListTile(
+                    selected: selected?.id == recording.id,
+                    leading: Icon(
+                        recording.isBestTake ? Icons.star : Icons.audiotrack,
+                        color: recording.isBestTake ? Colors.amber : null),
+                    title: Text(recording.title ?? recording.filename),
+                    subtitle: Text(
+                      recording.title == null
+                          ? _fileDetails(recording)
+                          : '${recording.filename} • ${_fileDetails(recording)}',
+                    ),
+                    trailing: Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        IconButton(
+                          tooltip: recording.isBestTake
+                              ? 'Remove Best Take'
+                              : 'Mark Best Take',
+                          icon: Icon(recording.isBestTake
+                              ? Icons.star
+                              : Icons.star_border),
+                          color: recording.isBestTake ? Colors.amber : null,
+                          onPressed: () =>
+                              onToggleBest(recording, !recording.isBestTake),
+                        ),
+                        IconButton(
+                          tooltip: 'Title this take',
+                          icon: const Icon(Icons.edit_outlined),
+                          onPressed: () => onEditTitle(recording),
+                        ),
+                        Text(recording.extension
+                            .replaceFirst('.', '')
+                            .toUpperCase()),
+                      ],
+                    ),
+                    onTap: () => onSelect(recording),
+                  )),
               ],
             ],
           ),
@@ -900,8 +944,11 @@ class _RecordingList extends StatelessWidget {
   }
 
   String _reviewTime(PracticeAnnotation note) {
-    String stamp(int ms) => '${(ms ~/ 60000).toString().padLeft(2, '0')}:${((ms ~/ 1000) % 60).toString().padLeft(2, '0')}';
-    return note.isRange ? '${stamp(note.startMs)} – ${stamp(note.endMs!)}' : stamp(note.startMs);
+    String stamp(int ms) =>
+        '${(ms ~/ 60000).toString().padLeft(2, '0')}:${((ms ~/ 1000) % 60).toString().padLeft(2, '0')}';
+    return note.isRange
+        ? '${stamp(note.startMs)} – ${stamp(note.endMs!)}'
+        : stamp(note.startMs);
   }
 }
 
@@ -1028,7 +1075,8 @@ class _PlayerPanelState extends State<_PlayerPanel> {
                             selectedSection: _selectedSection,
                             onSectionTap: (section) {
                               setState(() => _selectedSection = section);
-                              unawaited(controller.seek(Duration(milliseconds: section.startMs)));
+                              unawaited(controller.seek(
+                                  Duration(milliseconds: section.startMs)));
                             },
                           ),
                           WaveformView(
@@ -1037,10 +1085,12 @@ class _PlayerPanelState extends State<_PlayerPanel> {
                                 ? 0
                                 : position.inMilliseconds /
                                     duration.inMilliseconds,
-                            rangeStartProgress: (rangeStartMs ?? sectionStartMs) == null ||
-                                    duration == Duration.zero
-                                ? null
-                                : (rangeStartMs ?? sectionStartMs!) / duration.inMilliseconds,
+                            rangeStartProgress:
+                                (rangeStartMs ?? sectionStartMs) == null ||
+                                        duration == Duration.zero
+                                    ? null
+                                    : (rangeStartMs ?? sectionStartMs!) /
+                                        duration.inMilliseconds,
                             hoverProgress: _hoverProgress,
                             hoverTimeLabel: _hoverProgress == null ||
                                     duration == Duration.zero
@@ -1100,7 +1150,9 @@ class _PlayerPanelState extends State<_PlayerPanel> {
                                       ));
                                     }
                                   },
-                                  icon: Icon(controller.isLoopingRange ? Icons.repeat_one : Icons.repeat),
+                                  icon: Icon(controller.isLoopingRange
+                                      ? Icons.repeat_one
+                                      : Icons.repeat),
                                 ),
                               const SizedBox(width: 8),
                               Text(
@@ -1126,7 +1178,9 @@ class _PlayerPanelState extends State<_PlayerPanel> {
                         label: const Text('Add point note'),
                       ),
                       TextButton.icon(
-                        onPressed: canPlay ? () => onStartSection(controller.recording!) : null,
+                        onPressed: canPlay
+                            ? () => onStartSection(controller.recording!)
+                            : null,
                         icon: const Icon(Icons.view_timeline_outlined),
                         label: Text(sectionStartMs == null
                             ? 'Start song section here'
