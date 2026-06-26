@@ -18,6 +18,11 @@ class AppPreferences extends ChangeNotifier {
   static const _boostsKey = 'playback_boosts';
   static const _channelModesKey = 'playback_channel_modes';
   static const _audioOutputDeviceKey = 'audio_output_device';
+  static const _googleClientIdKey = 'google_client_id';
+  static const _googleClientSecretKey = 'google_client_secret';
+  static const _googleDriveCredentialsKey = 'google_drive_credentials';
+  static const _googleDriveRootFolderIdKey = 'google_drive_root_folder_id';
+  static const _googleDriveRootFolderNameKey = 'google_drive_root_folder_name';
 
   String? _bandFolder;
   String? _syncFolder;
@@ -32,6 +37,11 @@ class AppPreferences extends ChangeNotifier {
   Map<String, PlaybackChannelMode> _channelModesByRecording =
       <String, PlaybackChannelMode>{};
   String? _audioOutputDevice;
+  String? _googleClientId;
+  String? _googleClientSecret;
+  String? _googleDriveCredentials;
+  String? _googleDriveRootFolderId;
+  String? _googleDriveRootFolderName;
 
   String? get bandFolder => _bandFolder;
   String? get syncFolder => _syncFolder;
@@ -48,6 +58,16 @@ class AppPreferences extends ChangeNotifier {
   PlaybackChannelMode channelModeFor(String recordingId) =>
       _channelModesByRecording[recordingId] ?? PlaybackChannelMode.stereo;
   String? get audioOutputDevice => _audioOutputDevice;
+  String? get googleClientId => _googleClientId;
+  String? get googleClientSecret => _googleClientSecret;
+  String? get googleDriveCredentials => _googleDriveCredentials;
+  String? get googleDriveRootFolderId => _googleDriveRootFolderId;
+  String? get googleDriveRootFolderName => _googleDriveRootFolderName;
+  bool get hasGoogleClientConfig =>
+      (_googleClientId?.trim().isNotEmpty ?? false) &&
+      (_googleClientSecret?.trim().isNotEmpty ?? false);
+  bool get hasGoogleDriveConnection =>
+      _googleDriveCredentials != null && _googleDriveRootFolderId != null;
 
   Future<void> load() async {
     final store = await SharedPreferences.getInstance();
@@ -58,6 +78,11 @@ class AppPreferences extends ChangeNotifier {
     _autoPlayOnPracticeSelection = store.getBool(_autoPlayPracticeKey) ?? false;
     _displayName = store.getString(_displayNameKey) ?? 'Bandmate';
     _audioOutputDevice = store.getString(_audioOutputDeviceKey);
+    _googleClientId = store.getString(_googleClientIdKey);
+    _googleClientSecret = store.getString(_googleClientSecretKey);
+    _googleDriveCredentials = store.getString(_googleDriveCredentialsKey);
+    _googleDriveRootFolderId = store.getString(_googleDriveRootFolderIdKey);
+    _googleDriveRootFolderName = store.getString(_googleDriveRootFolderNameKey);
     _lastPractice = store.getString(_lastPracticeKey);
     _lastRecording = store.getString(_lastRecordingKey);
     final lastRecordingsByPractice =
@@ -187,6 +212,67 @@ class AppPreferences extends ChangeNotifier {
     } else {
       await store.setString(_audioOutputDeviceKey, value);
     }
+    notifyListeners();
+  }
+
+  Future<void> setGoogleClientConfig({
+    required String clientId,
+    required String clientSecret,
+  }) async {
+    _googleClientId = clientId.trim();
+    _googleClientSecret = clientSecret.trim();
+    final store = await SharedPreferences.getInstance();
+    if (_googleClientId!.isEmpty || _googleClientSecret!.isEmpty) {
+      _googleClientId = null;
+      _googleClientSecret = null;
+      await store.remove(_googleClientIdKey);
+      await store.remove(_googleClientSecretKey);
+    } else {
+      await store.setString(_googleClientIdKey, _googleClientId!);
+      await store.setString(_googleClientSecretKey, _googleClientSecret!);
+    }
+    notifyListeners();
+  }
+
+  Future<void> setGoogleDriveCredentials(String? credentialsJson) async {
+    _googleDriveCredentials = credentialsJson;
+    final store = await SharedPreferences.getInstance();
+    if (credentialsJson == null) {
+      await store.remove(_googleDriveCredentialsKey);
+    } else {
+      await store.setString(_googleDriveCredentialsKey, credentialsJson);
+    }
+    notifyListeners();
+  }
+
+  Future<void> setGoogleDriveRootFolder({
+    required String? id,
+    required String? name,
+  }) async {
+    _googleDriveRootFolderId = id;
+    _googleDriveRootFolderName = name;
+    final store = await SharedPreferences.getInstance();
+    if (id == null) {
+      await store.remove(_googleDriveRootFolderIdKey);
+    } else {
+      await store.setString(_googleDriveRootFolderIdKey, id);
+    }
+    if (name == null) {
+      await store.remove(_googleDriveRootFolderNameKey);
+    } else {
+      await store.setString(_googleDriveRootFolderNameKey, name);
+    }
+    notifyListeners();
+  }
+
+  Future<void> clearGoogleDriveConnection() async {
+    _googleDriveCredentials = null;
+    _googleDriveRootFolderId = null;
+    _googleDriveRootFolderName = null;
+    final store = await SharedPreferences.getInstance();
+    await store.remove(_googleDriveCredentialsKey);
+    await store.remove(_googleDriveRootFolderIdKey);
+    await store.remove(_googleDriveRootFolderNameKey);
     notifyListeners();
   }
 

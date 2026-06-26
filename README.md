@@ -28,6 +28,7 @@ The repository contains an early but usable Windows-focused practice-review appl
 - Choose a Masters folder, mark tracks/clips as masters, section masters, and run fuzzy fingerprint suggestions against practice folders.
 - Review fingerprint suggestions before applying song titles/sections or ignoring a match.
 - Manually sync a selected practice folder to/from a local Google Drive-style sync folder while excluding regenerable cache.
+- Connect to a Google Drive account, browse top-level Drive folders, and remember a remote sync root. Direct Drive upload/download is in progress.
 - Clear the waveform/processed-audio cache for a specific practice.
 - Preserve portable metadata in the practice folder.
 - Keep long-running work visible so the app does not appear frozen.
@@ -131,7 +132,8 @@ Cache folders are safe to exclude from backups and cloud sync.
 - WAV and MP3 are supported.
 - A recording has a stable ID, so renaming or WAV-to-MP3 replacement never detaches notes or sections.
 - Per-user annotations use `.riffnotes.<user>.bandnotes` JSON files in the practice folder.
-- Google Drive-style sync is manual per practice folder. Regenerable cache is excluded.
+- Google Drive-style local-folder sync is manual per practice folder. Regenerable cache is excluded.
+- Direct Google Drive account sync is being added in slices. See [docs/google-drive-setup.md](docs/google-drive-setup.md).
 - Lengthy work is queued in background operations with progress and cancellation where safe.
 - Heavy processing is Windows-first; the Android/Kindle path is intended to focus on playback, notes, sections, and sync.
 

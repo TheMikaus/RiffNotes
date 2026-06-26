@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:convert';
 import 'dart:io';
 
 import 'package:file_picker/file_picker.dart';
@@ -14,6 +15,7 @@ import 'app_preferences.dart';
 import 'audio_controller.dart';
 import 'domain.dart';
 import 'fingerprints.dart';
+import 'google_drive_sync.dart';
 import 'sections.dart';
 import 'sync.dart';
 import 'waveform.dart';
@@ -55,6 +57,7 @@ class _LibraryScreenState extends State<LibraryScreen> {
   final _annotations = AnnotationRepository();
   final _sectionsRepository = SongSectionRepository();
   final _syncRepository = PracticeSyncRepository();
+  final _googleDriveSync = GoogleDriveSyncRepository();
   final _activity = ActivityQueue();
   final _audioProcessing = AudioProcessingRepository();
   final _fingerprints = FingerprintRepository();
@@ -70,6 +73,8 @@ class _LibraryScreenState extends State<LibraryScreen> {
   List<SongSection> _sections = const [];
   List<FingerprintMatch> _fingerprintMatches = const [];
   FingerprintDecisions _fingerprintDecisionState = const FingerprintDecisions();
+  GoogleDriveConnection? _googleDriveConnection;
+  StreamSubscription? _googleDriveCredentialSubscription;
   String? _bandFolder;
   double _volumeBoostDb = 0;
   PlaybackChannelMode _channelMode = PlaybackChannelMode.stereo;
@@ -97,6 +102,8 @@ class _LibraryScreenState extends State<LibraryScreen> {
   @override
   void dispose() {
     _audio.removeListener(_applyPreferredAudioOutputIfPossible);
+    unawaited(_googleDriveCredentialSubscription?.cancel());
+    _googleDriveConnection?.close();
     _audio.dispose();
     _waveform.dispose();
     super.dispose();
@@ -176,6 +183,191 @@ class _LibraryScreenState extends State<LibraryScreen> {
     final selected = _preferences.syncFolder;
     if (selected == null || !await Directory(selected).exists()) return null;
     return Directory(selected);
+  }
+
+  Future<GoogleDriveConnection> _requireGoogleDriveConnection() async {
+    final existing = _googleDriveConnection;
+    if (existing != null) return existing;
+    final clientId = _preferences.googleClientId;
+    final clientSecret = _preferences.googleClientSecret;
+    if (clientId == null ||
+        clientId.trim().isEmpty ||
+        clientSecret == null ||
+        clientSecret.trim().isEmpty) {
+      throw StateError(
+          'Add a Google OAuth desktop client ID and secret in Preferences first.');
+    }
+    final connection =
+        await _activity.run('Connecting Google Drive', (update) async {
+      update(null, 'Opening Google sign-in…');
+      final result = await _googleDriveSync.connect(
+        clientId: clientId,
+        clientSecret: clientSecret,
+        savedCredentialsJson: _preferences.googleDriveCredentials,
+      );
+      update(1, 'Google Drive connected');
+      return result;
+    });
+    await _googleDriveCredentialSubscription?.cancel();
+    _googleDriveCredentialSubscription =
+        connection.credentialUpdates.listen((credentials) {
+      unawaited(_preferences
+          .setGoogleDriveCredentials(jsonEncode(credentials.toJson())));
+    });
+    await _preferences.setGoogleDriveCredentials(connection.credentialsJson);
+    _googleDriveConnection = connection;
+    return connection;
+  }
+
+  Future<void> _editGoogleClientConfig() async {
+    final clientIdController =
+        TextEditingController(text: _preferences.googleClientId ?? '');
+    final clientSecretController =
+        TextEditingController(text: _preferences.googleClientSecret ?? '');
+    final saved = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Google Drive OAuth client'),
+        content: SizedBox(
+          width: 560,
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              const Text(
+                  'Use a Google Cloud OAuth 2.0 Desktop client. RiffNotes uses it to ask for Drive access in your browser.'),
+              const SizedBox(height: 12),
+              TextField(
+                controller: clientIdController,
+                decoration: const InputDecoration(labelText: 'Client ID'),
+              ),
+              const SizedBox(height: 8),
+              TextField(
+                controller: clientSecretController,
+                decoration: const InputDecoration(labelText: 'Client secret'),
+                obscureText: true,
+              ),
+            ],
+          ),
+        ),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(context, false),
+              child: const Text('Cancel')),
+          FilledButton(
+              onPressed: () => Navigator.pop(context, true),
+              child: const Text('Save')),
+        ],
+      ),
+    );
+    if (saved == true) {
+      await _preferences.setGoogleClientConfig(
+        clientId: clientIdController.text,
+        clientSecret: clientSecretController.text,
+      );
+      await _preferences.clearGoogleDriveConnection();
+      await _googleDriveCredentialSubscription?.cancel();
+      _googleDriveCredentialSubscription = null;
+      _googleDriveConnection?.close();
+      _googleDriveConnection = null;
+    }
+    clientIdController.dispose();
+    clientSecretController.dispose();
+  }
+
+  Future<void> _connectGoogleDrive() async {
+    try {
+      await _requireGoogleDriveConnection();
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(content: Text('Google Drive connected.')));
+      }
+    } on StateError catch (error) {
+      if (mounted) {
+        ScaffoldMessenger.of(context)
+            .showSnackBar(SnackBar(content: Text(error.message)));
+      }
+    } catch (error) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(content: Text('Google Drive connection failed: $error')));
+      }
+    }
+  }
+
+  Future<void> _disconnectGoogleDrive() async {
+    await _googleDriveCredentialSubscription?.cancel();
+    _googleDriveCredentialSubscription = null;
+    _googleDriveConnection?.close();
+    _googleDriveConnection = null;
+    await _preferences.clearGoogleDriveConnection();
+  }
+
+  Future<void> _chooseGoogleDriveRootFolder() async {
+    try {
+      final connection = await _requireGoogleDriveConnection();
+      final folders =
+          await _activity.run('Loading Google Drive folders', (update) async {
+        update(null, 'Reading Drive folders…');
+        final result = await connection.listFolders();
+        update(1, 'Drive folders ready');
+        return result;
+      });
+      if (!mounted) return;
+      final selected = await showDialog<GoogleDriveFolder>(
+        context: context,
+        builder: (context) => AlertDialog(
+          title: const Text('Choose Google Drive folder'),
+          content: SizedBox(
+            width: 520,
+            height: 420,
+            child: folders.isEmpty
+                ? const Center(child: Text('No folders found in My Drive.'))
+                : ListView.builder(
+                    itemCount: folders.length,
+                    itemBuilder: (context, index) {
+                      final folder = folders[index];
+                      return ListTile(
+                        leading: const Icon(Icons.folder_outlined),
+                        title: Text(folder.name),
+                        subtitle: Text(folder.id),
+                        onTap: () => Navigator.pop(context, folder),
+                      );
+                    },
+                  ),
+          ),
+          actions: [
+            TextButton(
+                onPressed: () => Navigator.pop(context),
+                child: const Text('Cancel')),
+            FilledButton.icon(
+              onPressed: () async {
+                final created = await connection.createFolder(
+                  name: 'RiffNotes',
+                );
+                if (context.mounted) Navigator.pop(context, created);
+              },
+              icon: const Icon(Icons.create_new_folder_outlined),
+              label: const Text('Create RiffNotes'),
+            ),
+          ],
+        ),
+      );
+      if (selected == null) return;
+      await _preferences.setGoogleDriveRootFolder(
+        id: selected.id,
+        name: selected.name,
+      );
+    } on StateError catch (error) {
+      if (mounted) {
+        ScaffoldMessenger.of(context)
+            .showSnackBar(SnackBar(content: Text(error.message)));
+      }
+    } catch (error) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(content: Text('Could not browse Google Drive: $error')));
+      }
+    }
   }
 
   Future<void> _restorePreferences() async {
@@ -399,6 +591,23 @@ class _LibraryScreenState extends State<LibraryScreen> {
       return '${resolved.path} (default)';
     }
     return path.isAbsolute(saved) ? saved : '$saved → ${resolved.path}';
+  }
+
+  String _googleDriveStatusLabel() {
+    if (!_preferences.hasGoogleClientConfig) {
+      return 'Add an OAuth desktop client before connecting.';
+    }
+    if (_preferences.googleDriveCredentials == null) {
+      return 'OAuth client saved. Not connected yet.';
+    }
+    return 'Connected. Direct Drive upload/download is the next slice.';
+  }
+
+  String _googleDriveRootLabel() {
+    final name = _preferences.googleDriveRootFolderName;
+    final id = _preferences.googleDriveRootFolderId;
+    if (name == null || id == null) return 'No Drive folder selected.';
+    return '$name ($id)';
   }
 
   Future<void> _refreshNotes(Recording recording) async {
@@ -839,6 +1048,64 @@ class _LibraryScreenState extends State<LibraryScreen> {
                       setDialogState(() {});
                     },
                     child: const Text('Choose')),
+              ),
+              ListTile(
+                contentPadding: EdgeInsets.zero,
+                leading: const Icon(Icons.cloud_outlined),
+                title: const Text('Google Drive account'),
+                subtitle: Text(_googleDriveStatusLabel()),
+                trailing: Wrap(
+                  spacing: 8,
+                  children: [
+                    TextButton(
+                      onPressed: () async {
+                        await _editGoogleClientConfig();
+                        setDialogState(() {});
+                      },
+                      child: Text(_preferences.hasGoogleClientConfig
+                          ? 'Edit OAuth'
+                          : 'Add OAuth'),
+                    ),
+                    TextButton(
+                      onPressed: _preferences.hasGoogleClientConfig
+                          ? () async {
+                              await _connectGoogleDrive();
+                              setDialogState(() {});
+                            }
+                          : null,
+                      child: const Text('Connect'),
+                    ),
+                  ],
+                ),
+              ),
+              ListTile(
+                contentPadding: EdgeInsets.zero,
+                leading: const Icon(Icons.folder_shared_outlined),
+                title: const Text('Google Drive remote root'),
+                subtitle: Text(_googleDriveRootLabel()),
+                trailing: Wrap(
+                  spacing: 8,
+                  children: [
+                    TextButton(
+                      onPressed: _preferences.hasGoogleClientConfig
+                          ? () async {
+                              await _chooseGoogleDriveRootFolder();
+                              setDialogState(() {});
+                            }
+                          : null,
+                      child: const Text('Browse'),
+                    ),
+                    TextButton(
+                      onPressed: _preferences.googleDriveCredentials == null
+                          ? null
+                          : () async {
+                              await _disconnectGoogleDrive();
+                              setDialogState(() {});
+                            },
+                      child: const Text('Disconnect'),
+                    ),
+                  ],
+                ),
               ),
               ListTile(
                 contentPadding: EdgeInsets.zero,
