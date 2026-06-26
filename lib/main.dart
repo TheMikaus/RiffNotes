@@ -87,6 +87,7 @@ class _LibraryScreenState extends State<LibraryScreen> {
   String? _reviewUserFilter;
   String? _reviewRecordingFilter;
   _ReviewSort _reviewSort = _ReviewSort.trackTime;
+  bool _playerPanelCollapsed = false;
   bool _applyingAudioOutput = false;
   String? _appliedAudioOutputDevice;
 
@@ -337,6 +338,9 @@ class _LibraryScreenState extends State<LibraryScreen> {
   Future<void> _restorePreferences() async {
     await _preferences.load();
     _bundledGoogleOAuthConfig = await GoogleDriveOAuthConfig.loadBundled();
+    if (mounted) {
+      setState(() => _playerPanelCollapsed = _preferences.playerPanelCollapsed);
+    }
     _applyPreferredAudioOutputIfPossible();
     final savedFolder = _preferences.bandFolder;
     if (savedFolder != null && await Directory(savedFolder).exists()) {
@@ -386,6 +390,11 @@ class _LibraryScreenState extends State<LibraryScreen> {
             autoPlay: _preferences.autoPlayOnPracticeSelection);
       }
     }
+  }
+
+  Future<void> _setPlayerPanelCollapsed(bool value) async {
+    setState(() => _playerPanelCollapsed = value);
+    await _preferences.setPlayerPanelCollapsed(value);
   }
 
   Future<void> _selectPractice(PracticeFolder practice) async {
@@ -1941,6 +1950,8 @@ class _LibraryScreenState extends State<LibraryScreen> {
                   onPlayReviewNote: _playReviewNote,
                   audio: _audio,
                   waveform: _waveform,
+                  playerPanelCollapsed: _playerPanelCollapsed,
+                  onPlayerPanelCollapsedChanged: _setPlayerPanelCollapsed,
                 ),
               ),
             ])),
@@ -2030,6 +2041,8 @@ class _RecordingList extends StatelessWidget {
     required this.onPlayReviewNote,
     required this.audio,
     required this.waveform,
+    required this.playerPanelCollapsed,
+    required this.onPlayerPanelCollapsedChanged,
   });
   final PracticeFolder? practice;
   final String? bandFolder;
@@ -2076,6 +2089,8 @@ class _RecordingList extends StatelessWidget {
   final ValueChanged<UserAnnotation> onPlayReviewNote;
   final AudioController audio;
   final WaveformController waveform;
+  final bool playerPanelCollapsed;
+  final ValueChanged<bool> onPlayerPanelCollapsedChanged;
 
   @override
   Widget build(BuildContext context) {
@@ -2258,6 +2273,8 @@ class _RecordingList extends StatelessWidget {
           onSetChannelMode: onSetChannelMode,
           notes: notes,
           sections: sections,
+          collapsed: playerPanelCollapsed,
+          onCollapsedChanged: onPlayerPanelCollapsedChanged,
         ),
       ],
     );
@@ -2364,6 +2381,8 @@ class _PlayerPanel extends StatefulWidget {
     required this.onSetChannelMode,
     required this.notes,
     required this.sections,
+    required this.collapsed,
+    required this.onCollapsedChanged,
   });
   final AudioController controller;
   final WaveformController waveform;
@@ -2391,6 +2410,8 @@ class _PlayerPanel extends StatefulWidget {
   final ValueChanged<PlaybackChannelMode> onSetChannelMode;
   final List<PracticeAnnotation> notes;
   final List<SongSection> sections;
+  final bool collapsed;
+  final ValueChanged<bool> onCollapsedChanged;
 
   @override
   State<_PlayerPanel> createState() => _PlayerPanelState();
@@ -2409,7 +2430,6 @@ class _PlayerPanelState extends State<_PlayerPanel> {
   PracticeAnnotation? _hoveredNote;
   SongSection? _selectedSection;
   double _waveformZoom = 1;
-  bool _collapsed = false;
 
   @override
   void dispose() {
@@ -2460,6 +2480,8 @@ class _PlayerPanelState extends State<_PlayerPanel> {
     final onSetChannelMode = widget.onSetChannelMode;
     final notes = widget.notes;
     final sections = widget.sections;
+    final collapsed = widget.collapsed;
+    final onCollapsedChanged = widget.onCollapsedChanged;
     return AnimatedBuilder(
       animation: Listenable.merge([controller, waveform]),
       builder: (context, _) {
@@ -2482,11 +2504,11 @@ class _PlayerPanelState extends State<_PlayerPanel> {
                 Align(
                   alignment: Alignment.centerRight,
                   child: TextButton.icon(
-                    onPressed: () => setState(() => _collapsed = !_collapsed),
-                    icon: Icon(_collapsed
+                    onPressed: () => onCollapsedChanged(!collapsed),
+                    icon: Icon(collapsed
                         ? Icons.keyboard_arrow_up
                         : Icons.keyboard_arrow_down),
-                    label: Text(_collapsed ? 'Show player' : 'Collapse player'),
+                    label: Text(collapsed ? 'Show player' : 'Collapse player'),
                   ),
                 ),
                 if (controller.isLoading)
@@ -2501,7 +2523,7 @@ class _PlayerPanelState extends State<_PlayerPanel> {
                         style: TextStyle(
                             color: Theme.of(context).colorScheme.error)),
                   ),
-                if (controller.recording != null && !_collapsed) ...[
+                if (controller.recording != null && !collapsed) ...[
                   const SizedBox(height: 8),
                   if (waveform.isLoading) const LinearProgressIndicator(),
                   if (waveform.isLoading)

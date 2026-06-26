@@ -23,6 +23,7 @@ class AppPreferences extends ChangeNotifier {
   static const _googleDriveCredentialsKey = 'google_drive_credentials';
   static const _googleDriveRootFolderIdKey = 'google_drive_root_folder_id';
   static const _googleDriveRootFolderNameKey = 'google_drive_root_folder_name';
+  static const _playerPanelCollapsedKey = 'player_panel_collapsed';
 
   String? _bandFolder;
   String? _syncFolder;
@@ -42,6 +43,7 @@ class AppPreferences extends ChangeNotifier {
   String? _googleDriveCredentials;
   String? _googleDriveRootFolderId;
   String? _googleDriveRootFolderName;
+  bool _playerPanelCollapsed = false;
 
   String? get bandFolder => _bandFolder;
   String? get syncFolder => _syncFolder;
@@ -63,6 +65,7 @@ class AppPreferences extends ChangeNotifier {
   String? get googleDriveCredentials => _googleDriveCredentials;
   String? get googleDriveRootFolderId => _googleDriveRootFolderId;
   String? get googleDriveRootFolderName => _googleDriveRootFolderName;
+  bool get playerPanelCollapsed => _playerPanelCollapsed;
   bool get hasGoogleClientConfig =>
       (_googleClientId?.trim().isNotEmpty ?? false) &&
       (_googleClientSecret?.trim().isNotEmpty ?? false);
@@ -83,6 +86,7 @@ class AppPreferences extends ChangeNotifier {
     _googleDriveCredentials = store.getString(_googleDriveCredentialsKey);
     _googleDriveRootFolderId = store.getString(_googleDriveRootFolderIdKey);
     _googleDriveRootFolderName = store.getString(_googleDriveRootFolderNameKey);
+    _playerPanelCollapsed = store.getBool(_playerPanelCollapsedKey) ?? false;
     _lastPractice = store.getString(_lastPracticeKey);
     _lastRecording = store.getString(_lastRecordingKey);
     final lastRecordingsByPractice =
@@ -273,6 +277,13 @@ class AppPreferences extends ChangeNotifier {
     await store.remove(_googleDriveCredentialsKey);
     await store.remove(_googleDriveRootFolderIdKey);
     await store.remove(_googleDriveRootFolderNameKey);
+    notifyListeners();
+  }
+
+  Future<void> setPlayerPanelCollapsed(bool value) async {
+    _playerPanelCollapsed = value;
+    final store = await SharedPreferences.getInstance();
+    await store.setBool(_playerPanelCollapsedKey, value);
     notifyListeners();
   }
 

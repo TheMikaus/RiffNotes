@@ -203,6 +203,20 @@ void main() {
     expect(preferences.channelModeFor('take-b'), PlaybackChannelMode.stereo);
   });
 
+  test('remembers whether the player panel is collapsed', () async {
+    SharedPreferences.setMockInitialValues({});
+    final preferences = AppPreferences();
+    await preferences.load();
+
+    expect(preferences.playerPanelCollapsed, isFalse);
+
+    await preferences.setPlayerPanelCollapsed(true);
+
+    final reloaded = AppPreferences();
+    await reloaded.load();
+    expect(reloaded.playerPanelCollapsed, isTrue);
+  });
+
   test('reduces signed PCM samples to normalized waveform peaks', () {
     final peaks = WaveformRepository.calculatePeaks(<int>[
       0, 0, // silence
