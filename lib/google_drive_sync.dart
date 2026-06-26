@@ -1,8 +1,11 @@
+import 'dart:async';
 import 'dart:convert';
+import 'dart:io';
 
 import 'package:flutter/services.dart';
 import 'package:googleapis/drive/v3.dart' as drive;
 import 'package:googleapis_auth/auth_io.dart';
+import 'package:googleapis_auth/src/oauth2_flows/auth_code.dart';
 import 'package:http/http.dart' as http;
 import 'package:url_launcher/url_launcher.dart';
 
@@ -30,22 +33,109 @@ class GoogleDriveSyncRepository {
         _baseClient,
       );
     } else {
-      authClient = await clientViaUserConsent(
+      authClient = await _clientViaRiffNotesBrowserFlow(
         googleClientId,
-        scopes,
-        (url) async {
-          final uri = Uri.parse(url);
-          if (!await launchUrl(uri, mode: LaunchMode.externalApplication)) {
-            throw StateError('Could not open Google sign-in in a browser.');
-          }
-        },
-        baseClient: _baseClient,
-        customPostAuthPage:
-            '<html><body><h1>RiffNotes is connected.</h1><p>You can close this tab and return to the app.</p></body></html>',
+        scopes: scopes,
       );
     }
     return GoogleDriveConnection(authClient);
   }
+
+  Future<AutoRefreshingAuthClient> _clientViaRiffNotesBrowserFlow(
+    ClientId clientId, {
+    required List<String> scopes,
+  }) async {
+    final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+    final redirectUri = 'http://127.0.0.1:${server.port}/';
+    final state = randomState();
+    final codeVerifier = createCodeVerifier();
+    final authUri = createAuthenticationUri(
+      redirectUri: redirectUri,
+      clientId: clientId.identifier,
+      scopes: scopes,
+      codeVerifier: codeVerifier,
+      state: state,
+      offline: true,
+    );
+    final uri = authUri.replace(queryParameters: {
+      ...authUri.queryParameters,
+      'prompt': 'consent',
+    });
+
+    if (!await launchUrl(uri, mode: LaunchMode.externalApplication)) {
+      await server.close(force: true);
+      throw StateError('Could not open Google sign-in in a browser.');
+    }
+
+    try {
+      final request = await server.first.timeout(const Duration(minutes: 5));
+      try {
+        final callbackUri = request.uri;
+        if (request.method != 'GET') {
+          throw StateError('Google sign-in returned an unexpected response.');
+        }
+        final returnedState = callbackUri.queryParameters['state'];
+        if (returnedState != state) {
+          throw StateError('Google sign-in state did not match.');
+        }
+        final error = callbackUri.queryParameters['error'];
+        if (error != null) {
+          throw StateError('Google sign-in failed: $error');
+        }
+        final code = callbackUri.queryParameters['code'];
+        if (code == null || code.isEmpty) {
+          throw StateError('Google sign-in did not return an auth code.');
+        }
+        final credentials = await obtainAccessCredentialsViaCodeExchange(
+          _baseClient,
+          clientId,
+          code,
+          redirectUrl: redirectUri,
+          codeVerifier: codeVerifier,
+        );
+        request.response
+          ..statusCode = 200
+          ..headers.set('content-type', 'text/html; charset=UTF-8')
+          ..write(_successPage);
+        await request.response.close();
+        return autoRefreshingClient(clientId, credentials, _baseClient);
+      } catch (error) {
+        request.response
+          ..statusCode = 500
+          ..headers.set('content-type', 'text/html; charset=UTF-8')
+          ..write(_errorPage(error));
+        await request.response.close().catchError((_) {});
+        rethrow;
+      }
+    } on TimeoutException {
+      throw StateError('Google sign-in timed out.');
+    } finally {
+      await server.close(force: true);
+    }
+  }
+
+  static const _successPage = '''
+<!DOCTYPE html>
+<html>
+  <head><meta charset="utf-8"><title>RiffNotes connected</title></head>
+  <body style="font-family: sans-serif; margin: 3rem;">
+    <h1>RiffNotes is connected.</h1>
+    <p>You can close this tab and return to the app.</p>
+  </body>
+</html>
+''';
+
+  static String _errorPage(Object error) => '''
+<!DOCTYPE html>
+<html>
+  <head><meta charset="utf-8"><title>RiffNotes connection failed</title></head>
+  <body style="font-family: sans-serif; margin: 3rem;">
+    <h1>RiffNotes could not finish Google sign-in.</h1>
+    <p>$error</p>
+    <p>Return to RiffNotes and try Connect again.</p>
+  </body>
+</html>
+''';
 }
 
 class GoogleDriveOAuthConfig {
