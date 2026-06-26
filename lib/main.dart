@@ -283,13 +283,11 @@ class _LibraryScreenState extends State<LibraryScreen> {
       }
     } on StateError catch (error) {
       if (mounted) {
-        ScaffoldMessenger.of(context)
-            .showSnackBar(SnackBar(content: Text(error.message)));
+        _showCopyableError(error.message);
       }
     } catch (error) {
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(content: Text('Google Drive connection failed: $error')));
+        _showCopyableError('Google Drive connection failed: $error');
       }
     }
   }
@@ -317,15 +315,23 @@ class _LibraryScreenState extends State<LibraryScreen> {
       );
     } on StateError catch (error) {
       if (mounted) {
-        ScaffoldMessenger.of(context)
-            .showSnackBar(SnackBar(content: Text(error.message)));
+        _showCopyableError(error.message);
       }
     } catch (error) {
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(content: Text('Could not browse Google Drive: $error')));
+        _showCopyableError('Could not browse Google Drive: $error');
       }
     }
+  }
+
+  void _showCopyableError(String message) {
+    ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+      content: Text(message),
+      action: SnackBarAction(
+        label: 'Copy',
+        onPressed: () => Clipboard.setData(ClipboardData(text: message)),
+      ),
+    ));
   }
 
   Future<void> _restorePreferences() async {
@@ -3044,11 +3050,7 @@ class _GoogleDriveFolderBrowserState extends State<_GoogleDriveFolderBrowser> {
               if (_error != null)
                 Padding(
                   padding: const EdgeInsets.only(bottom: 8),
-                  child: Text(
-                    _error!,
-                    style:
-                        TextStyle(color: Theme.of(context).colorScheme.error),
-                  ),
+                  child: _CopyableErrorMessage(message: _error!),
                 ),
               Expanded(
                 child: _loading
@@ -3088,6 +3090,50 @@ class _GoogleDriveFolderBrowserState extends State<_GoogleDriveFolderBrowser> {
             label: const Text('Use this folder'),
           ),
         ],
+      );
+}
+
+class _CopyableErrorMessage extends StatelessWidget {
+  const _CopyableErrorMessage({required this.message});
+
+  final String message;
+
+  @override
+  Widget build(BuildContext context) => Container(
+        padding: const EdgeInsets.all(8),
+        decoration: BoxDecoration(
+          color: Theme.of(context).colorScheme.errorContainer.withOpacity(.18),
+          borderRadius: BorderRadius.circular(8),
+          border: Border.all(
+              color: Theme.of(context).colorScheme.error.withOpacity(.35)),
+        ),
+        child: Row(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Icon(Icons.error_outline,
+                size: 18, color: Theme.of(context).colorScheme.error),
+            const SizedBox(width: 8),
+            Expanded(
+              child: SelectableText(
+                message,
+                style: TextStyle(color: Theme.of(context).colorScheme.error),
+              ),
+            ),
+            const SizedBox(width: 8),
+            IconButton(
+              tooltip: 'Copy error',
+              onPressed: () async {
+                await Clipboard.setData(ClipboardData(text: message));
+                if (context.mounted) {
+                  ScaffoldMessenger.of(context).showSnackBar(
+                    const SnackBar(content: Text('Error copied to clipboard')),
+                  );
+                }
+              },
+              icon: const Icon(Icons.copy_outlined),
+            ),
+          ],
+        ),
       );
 }
 
