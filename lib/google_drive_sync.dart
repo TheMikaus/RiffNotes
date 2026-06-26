@@ -101,7 +101,7 @@ class GoogleDriveSyncRepository {
         return autoRefreshingClient(clientId, credentials, _baseClient);
       } catch (error) {
         request.response
-          ..statusCode = 500
+          ..statusCode = 200
           ..headers.set('content-type', 'text/html; charset=UTF-8')
           ..write(_errorPage(error));
         await request.response.close().catchError((_) {});
