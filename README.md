@@ -28,7 +28,7 @@ The repository contains an early but usable Windows-focused practice-review appl
 - Choose a Masters folder, mark tracks/clips as masters, section masters, and run fuzzy fingerprint suggestions against practice folders.
 - Review fingerprint suggestions before applying song titles/sections or ignoring a match.
 - Manually sync a selected practice folder to/from a local Google Drive-style sync folder while excluding regenerable cache.
-- Connect to a Google Drive account, browse top-level Drive folders, and remember a remote sync root. Direct Drive upload/download is in progress.
+- Connect to a Google Drive account using a bundled app OAuth client, browse top-level Drive folders, and remember a remote sync root. Direct Drive upload/download is in progress.
 - Clear the waveform/processed-audio cache for a specific practice.
 - Preserve portable metadata in the practice folder.
 - Keep long-running work visible so the app does not appear frozen.

@@ -73,6 +73,7 @@ class _LibraryScreenState extends State<LibraryScreen> {
   List<SongSection> _sections = const [];
   List<FingerprintMatch> _fingerprintMatches = const [];
   FingerprintDecisions _fingerprintDecisionState = const FingerprintDecisions();
+  GoogleDriveOAuthConfig? _bundledGoogleOAuthConfig;
   GoogleDriveConnection? _googleDriveConnection;
   StreamSubscription? _googleDriveCredentialSubscription;
   String? _bandFolder;
@@ -188,14 +189,13 @@ class _LibraryScreenState extends State<LibraryScreen> {
   Future<GoogleDriveConnection> _requireGoogleDriveConnection() async {
     final existing = _googleDriveConnection;
     if (existing != null) return existing;
-    final clientId = _preferences.googleClientId;
-    final clientSecret = _preferences.googleClientSecret;
-    if (clientId == null ||
-        clientId.trim().isEmpty ||
-        clientSecret == null ||
-        clientSecret.trim().isEmpty) {
+    final bundledConfig = _bundledGoogleOAuthConfig;
+    final clientId = bundledConfig?.clientId ?? _preferences.googleClientId;
+    final clientSecret =
+        bundledConfig?.clientSecret ?? _preferences.googleClientSecret;
+    if (clientId == null || clientId.trim().isEmpty) {
       throw StateError(
-          'Add a Google OAuth desktop client ID and secret in Preferences first.');
+          'This build does not include a Google OAuth client yet. Add one in Preferences for testing, or ship assets/google_oauth.json with the app.');
     }
     final connection =
         await _activity.run('Connecting Google Drive', (update) async {
@@ -372,6 +372,7 @@ class _LibraryScreenState extends State<LibraryScreen> {
 
   Future<void> _restorePreferences() async {
     await _preferences.load();
+    _bundledGoogleOAuthConfig = await GoogleDriveOAuthConfig.loadBundled();
     _applyPreferredAudioOutputIfPossible();
     final savedFolder = _preferences.bandFolder;
     if (savedFolder != null && await Directory(savedFolder).exists()) {
@@ -594,14 +595,20 @@ class _LibraryScreenState extends State<LibraryScreen> {
   }
 
   String _googleDriveStatusLabel() {
-    if (!_preferences.hasGoogleClientConfig) {
-      return 'Add an OAuth desktop client before connecting.';
+    if (!_hasGoogleOAuthConfig) {
+      return 'This build does not include Google Drive sign-in yet.';
     }
     if (_preferences.googleDriveCredentials == null) {
-      return 'OAuth client saved. Not connected yet.';
+      return _bundledGoogleOAuthConfig?.isConfigured == true
+          ? 'Ready to connect with the bundled RiffNotes OAuth client.'
+          : 'Developer OAuth override saved. Not connected yet.';
     }
     return 'Connected. Direct Drive upload/download is the next slice.';
   }
+
+  bool get _hasGoogleOAuthConfig =>
+      _bundledGoogleOAuthConfig?.isConfigured == true ||
+      _preferences.hasGoogleClientConfig;
 
   String _googleDriveRootLabel() {
     final name = _preferences.googleDriveRootFolderName;
@@ -1067,7 +1074,7 @@ class _LibraryScreenState extends State<LibraryScreen> {
                           : 'Add OAuth'),
                     ),
                     TextButton(
-                      onPressed: _preferences.hasGoogleClientConfig
+                      onPressed: _hasGoogleOAuthConfig
                           ? () async {
                               await _connectGoogleDrive();
                               setDialogState(() {});
@@ -1087,7 +1094,7 @@ class _LibraryScreenState extends State<LibraryScreen> {
                   spacing: 8,
                   children: [
                     TextButton(
-                      onPressed: _preferences.hasGoogleClientConfig
+                      onPressed: _hasGoogleOAuthConfig
                           ? () async {
                               await _chooseGoogleDriveRootFolder();
                               setDialogState(() {});

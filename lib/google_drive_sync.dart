@@ -1,5 +1,6 @@
 import 'dart:convert';
 
+import 'package:flutter/services.dart';
 import 'package:googleapis/drive/v3.dart' as drive;
 import 'package:googleapis_auth/auth_io.dart';
 import 'package:http/http.dart' as http;
@@ -15,7 +16,7 @@ class GoogleDriveSyncRepository {
 
   Future<GoogleDriveConnection> connect({
     required String clientId,
-    required String clientSecret,
+    String? clientSecret,
     String? savedCredentialsJson,
   }) async {
     final googleClientId = ClientId(clientId, clientSecret);
@@ -44,6 +45,31 @@ class GoogleDriveSyncRepository {
       );
     }
     return GoogleDriveConnection(authClient);
+  }
+}
+
+class GoogleDriveOAuthConfig {
+  const GoogleDriveOAuthConfig({required this.clientId, this.clientSecret});
+
+  final String clientId;
+  final String? clientSecret;
+
+  bool get isConfigured => clientId.trim().isNotEmpty;
+
+  static Future<GoogleDriveOAuthConfig?> loadBundled() async {
+    try {
+      final content = await rootBundle.loadString('assets/google_oauth.json');
+      final json = jsonDecode(content) as Map<String, dynamic>;
+      final clientId = (json['client_id'] as String? ?? '').trim();
+      final clientSecret = (json['client_secret'] as String? ?? '').trim();
+      if (clientId.isEmpty) return null;
+      return GoogleDriveOAuthConfig(
+        clientId: clientId,
+        clientSecret: clientSecret.isEmpty ? null : clientSecret,
+      );
+    } catch (_) {
+      return null;
+    }
   }
 }
 
