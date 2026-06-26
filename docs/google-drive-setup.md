@@ -63,6 +63,8 @@ For development builds without a bundled OAuth client, use `Add OAuth` in Prefer
 
 If the browser ends on a raw `localhost` or `127.0.0.1` URL instead of a friendly RiffNotes success page, the local callback was not captured. Return to RiffNotes and click `Connect` again; authorization codes in those URLs are short-lived and should not be shared.
 
+Current builds use `127.0.0.1` for the callback. If the browser shows a `localhost` callback page, close RiffNotes and make sure you launched the newest build.
+
 ## Security note
 
 This development slice stores OAuth settings and refresh credentials in app preferences. That is acceptable for early testing, but V1 should move refresh credentials into OS-protected credential storage.
