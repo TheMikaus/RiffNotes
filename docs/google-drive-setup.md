@@ -8,7 +8,7 @@ RiffNotes should not ask every bandmate to create a Google Cloud OAuth client. T
 2. The app build bundles that client configuration.
 3. Each user only clicks `Connect` and signs into Google in the system browser.
 
-Google does not allow the OAuth consent flow to run inside a normal embedded webview/user-agent. Desktop apps should open the system browser and receive the result through a local redirect.
+Google does not allow the OAuth consent flow to run inside a normal embedded webview/user-agent. Desktop apps should open the system browser and receive the result through a local loopback redirect.
 
 ## Current status
 
@@ -60,6 +60,8 @@ Installed desktop apps cannot truly keep a client secret secret, so the app stil
 6. Choose an existing folder or click `Create RiffNotes`.
 
 For development builds without a bundled OAuth client, use `Add OAuth` in Preferences to paste a temporary desktop client ID/secret.
+
+If the browser ends on a raw `localhost` or `127.0.0.1` URL instead of a friendly RiffNotes success page, the local callback was not captured. Return to RiffNotes and click `Connect` again; authorization codes in those URLs are short-lived and should not be shared.
 
 ## Security note
 
