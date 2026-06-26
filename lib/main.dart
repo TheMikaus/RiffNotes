@@ -305,52 +305,10 @@ class _LibraryScreenState extends State<LibraryScreen> {
   Future<void> _chooseGoogleDriveRootFolder() async {
     try {
       final connection = await _requireGoogleDriveConnection();
-      final folders =
-          await _activity.run('Loading Google Drive folders', (update) async {
-        update(null, 'Reading Drive folders…');
-        final result = await connection.listFolders();
-        update(1, 'Drive folders ready');
-        return result;
-      });
       if (!mounted) return;
       final selected = await showDialog<GoogleDriveFolder>(
         context: context,
-        builder: (context) => AlertDialog(
-          title: const Text('Choose Google Drive folder'),
-          content: SizedBox(
-            width: 520,
-            height: 420,
-            child: folders.isEmpty
-                ? const Center(child: Text('No folders found in My Drive.'))
-                : ListView.builder(
-                    itemCount: folders.length,
-                    itemBuilder: (context, index) {
-                      final folder = folders[index];
-                      return ListTile(
-                        leading: const Icon(Icons.folder_outlined),
-                        title: Text(folder.name),
-                        subtitle: Text(folder.id),
-                        onTap: () => Navigator.pop(context, folder),
-                      );
-                    },
-                  ),
-          ),
-          actions: [
-            TextButton(
-                onPressed: () => Navigator.pop(context),
-                child: const Text('Cancel')),
-            FilledButton.icon(
-              onPressed: () async {
-                final created = await connection.createFolder(
-                  name: 'RiffNotes',
-                );
-                if (context.mounted) Navigator.pop(context, created);
-              },
-              icon: const Icon(Icons.create_new_folder_outlined),
-              label: const Text('Create RiffNotes'),
-            ),
-          ],
-        ),
+        builder: (context) => _GoogleDriveFolderBrowser(connection: connection),
       );
       if (selected == null) return;
       await _preferences.setGoogleDriveRootFolder(
@@ -1023,158 +981,167 @@ class _LibraryScreenState extends State<LibraryScreen> {
     await showDialog<void>(
       context: context,
       builder: (context) => StatefulBuilder(
-        builder: (context, setDialogState) => AlertDialog(
-          title: const Text('Preferences'),
-          content: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              ListTile(
-                contentPadding: EdgeInsets.zero,
-                title: const Text('Remembered Band Folder'),
-                subtitle: Text(_preferences.bandFolder ?? 'None selected'),
-              ),
-              ListTile(
-                contentPadding: EdgeInsets.zero,
-                leading: const Icon(Icons.person_outline),
-                title: const Text('Display name'),
-                subtitle: Text(_preferences.displayName),
-                trailing: TextButton(
-                    onPressed: () async {
-                      await _editDisplayName();
+        builder: (context, setDialogState) {
+          final driveConnected = _preferences.googleDriveCredentials != null;
+          return AlertDialog(
+            title: const Text('Preferences'),
+            content: SizedBox(
+              width: 760,
+              child: SingleChildScrollView(
+                child: Column(mainAxisSize: MainAxisSize.min, children: [
+                  ListTile(
+                    contentPadding: EdgeInsets.zero,
+                    title: const Text('Remembered Band Folder'),
+                    subtitle: Text(_preferences.bandFolder ?? 'None selected'),
+                  ),
+                  ListTile(
+                    contentPadding: EdgeInsets.zero,
+                    leading: const Icon(Icons.person_outline),
+                    title: const Text('Display name'),
+                    subtitle: Text(_preferences.displayName),
+                    trailing: TextButton(
+                        onPressed: () async {
+                          await _editDisplayName();
+                          setDialogState(() {});
+                        },
+                        child: const Text('Edit')),
+                  ),
+                  ListTile(
+                    contentPadding: EdgeInsets.zero,
+                    title: const Text('Google Drive sync folder'),
+                    subtitle: Text(_preferences.syncFolder ?? 'None selected'),
+                    trailing: TextButton(
+                        onPressed: () async {
+                          await _chooseSyncFolder();
+                          setDialogState(() {});
+                        },
+                        child: const Text('Choose')),
+                  ),
+                  ListTile(
+                    contentPadding: EdgeInsets.zero,
+                    leading: const Icon(Icons.cloud_outlined),
+                    title: const Text('Google Drive account'),
+                    subtitle: Text(_googleDriveStatusLabel()),
+                    trailing: Wrap(
+                      spacing: 8,
+                      children: [
+                        TextButton(
+                          onPressed: () async {
+                            await _editGoogleClientConfig();
+                            setDialogState(() {});
+                          },
+                          child: Text(_preferences.hasGoogleClientConfig
+                              ? 'Edit OAuth'
+                              : 'Add OAuth'),
+                        ),
+                        TextButton(
+                          onPressed: _hasGoogleOAuthConfig && !driveConnected
+                              ? () async {
+                                  await _connectGoogleDrive();
+                                  setDialogState(() {});
+                                }
+                              : null,
+                          child: const Text('Connect'),
+                        ),
+                      ],
+                    ),
+                  ),
+                  ListTile(
+                    enabled: driveConnected,
+                    contentPadding: EdgeInsets.zero,
+                    leading: const Icon(Icons.folder_shared_outlined),
+                    title: const Text('Google Drive remote root'),
+                    subtitle: Text(driveConnected
+                        ? _googleDriveRootLabel()
+                        : 'Connect Google Drive before choosing a remote folder.'),
+                    trailing: Wrap(
+                      spacing: 8,
+                      children: [
+                        TextButton(
+                          onPressed: driveConnected
+                              ? () async {
+                                  await _chooseGoogleDriveRootFolder();
+                                  setDialogState(() {});
+                                }
+                              : null,
+                          child: const Text('Browse'),
+                        ),
+                        TextButton(
+                          onPressed: _preferences.googleDriveCredentials == null
+                              ? null
+                              : () async {
+                                  await _disconnectGoogleDrive();
+                                  setDialogState(() {});
+                                },
+                          child: const Text('Disconnect'),
+                        ),
+                      ],
+                    ),
+                  ),
+                  ListTile(
+                    contentPadding: EdgeInsets.zero,
+                    title: const Text('Masters Folder'),
+                    subtitle: Text(_mastersFolderLabel()),
+                    trailing: TextButton(
+                        onPressed: () async {
+                          await _chooseMastersFolder();
+                          setDialogState(() {});
+                        },
+                        child: const Text('Choose')),
+                  ),
+                  SwitchListTile(
+                    contentPadding: EdgeInsets.zero,
+                    title: const Text('Play when I select a take'),
+                    value: _preferences.autoPlayOnTakeSelection,
+                    onChanged: (value) async {
+                      await _preferences.setAutoPlayOnTakeSelection(value);
                       setDialogState(() {});
                     },
-                    child: const Text('Edit')),
-              ),
-              ListTile(
-                contentPadding: EdgeInsets.zero,
-                title: const Text('Google Drive sync folder'),
-                subtitle: Text(_preferences.syncFolder ?? 'None selected'),
-                trailing: TextButton(
-                    onPressed: () async {
-                      await _chooseSyncFolder();
+                  ),
+                  SwitchListTile(
+                    contentPadding: EdgeInsets.zero,
+                    title: const Text('Play first take when I open a practice'),
+                    value: _preferences.autoPlayOnPracticeSelection,
+                    onChanged: (value) async {
+                      await _preferences.setAutoPlayOnPracticeSelection(value);
                       setDialogState(() {});
                     },
-                    child: const Text('Choose')),
-              ),
-              ListTile(
-                contentPadding: EdgeInsets.zero,
-                leading: const Icon(Icons.cloud_outlined),
-                title: const Text('Google Drive account'),
-                subtitle: Text(_googleDriveStatusLabel()),
-                trailing: Wrap(
-                  spacing: 8,
-                  children: [
-                    TextButton(
-                      onPressed: () async {
-                        await _editGoogleClientConfig();
+                  ),
+                  ListTile(
+                    contentPadding: EdgeInsets.zero,
+                    leading: const Icon(Icons.speaker_outlined),
+                    title: const Text('Audio output device'),
+                    subtitle: Text(_audioOutputSubtitle()),
+                    trailing: PopupMenuButton<AudioDevice>(
+                      tooltip: 'Choose output device',
+                      onSelected: (device) async {
+                        await _setAudioOutputDevice(device);
                         setDialogState(() {});
                       },
-                      child: Text(_preferences.hasGoogleClientConfig
-                          ? 'Edit OAuth'
-                          : 'Add OAuth'),
-                    ),
-                    TextButton(
-                      onPressed: _hasGoogleOAuthConfig
-                          ? () async {
-                              await _connectGoogleDrive();
-                              setDialogState(() {});
-                            }
-                          : null,
-                      child: const Text('Connect'),
-                    ),
-                  ],
-                ),
-              ),
-              ListTile(
-                contentPadding: EdgeInsets.zero,
-                leading: const Icon(Icons.folder_shared_outlined),
-                title: const Text('Google Drive remote root'),
-                subtitle: Text(_googleDriveRootLabel()),
-                trailing: Wrap(
-                  spacing: 8,
-                  children: [
-                    TextButton(
-                      onPressed: _hasGoogleOAuthConfig
-                          ? () async {
-                              await _chooseGoogleDriveRootFolder();
-                              setDialogState(() {});
-                            }
-                          : null,
-                      child: const Text('Browse'),
-                    ),
-                    TextButton(
-                      onPressed: _preferences.googleDriveCredentials == null
-                          ? null
-                          : () async {
-                              await _disconnectGoogleDrive();
-                              setDialogState(() {});
-                            },
-                      child: const Text('Disconnect'),
-                    ),
-                  ],
-                ),
-              ),
-              ListTile(
-                contentPadding: EdgeInsets.zero,
-                title: const Text('Masters Folder'),
-                subtitle: Text(_mastersFolderLabel()),
-                trailing: TextButton(
-                    onPressed: () async {
-                      await _chooseMastersFolder();
-                      setDialogState(() {});
-                    },
-                    child: const Text('Choose')),
-              ),
-              SwitchListTile(
-                contentPadding: EdgeInsets.zero,
-                title: const Text('Play when I select a take'),
-                value: _preferences.autoPlayOnTakeSelection,
-                onChanged: (value) async {
-                  await _preferences.setAutoPlayOnTakeSelection(value);
-                  setDialogState(() {});
-                },
-              ),
-              SwitchListTile(
-                contentPadding: EdgeInsets.zero,
-                title: const Text('Play first take when I open a practice'),
-                value: _preferences.autoPlayOnPracticeSelection,
-                onChanged: (value) async {
-                  await _preferences.setAutoPlayOnPracticeSelection(value);
-                  setDialogState(() {});
-                },
-              ),
-              ListTile(
-                contentPadding: EdgeInsets.zero,
-                leading: const Icon(Icons.speaker_outlined),
-                title: const Text('Audio output device'),
-                subtitle: Text(_audioOutputSubtitle()),
-                trailing: PopupMenuButton<AudioDevice>(
-                  tooltip: 'Choose output device',
-                  onSelected: (device) async {
-                    await _setAudioOutputDevice(device);
-                    setDialogState(() {});
-                  },
-                  itemBuilder: (context) => [
-                    for (final device in _audio.audioDevices)
-                      PopupMenuItem(
-                        value: device,
-                        child: Text(_audioDeviceLabel(device)),
+                      itemBuilder: (context) => [
+                        for (final device in _audio.audioDevices)
+                          PopupMenuItem(
+                            value: device,
+                            child: Text(_audioDeviceLabel(device)),
+                          ),
+                      ],
+                      child: const Padding(
+                        padding:
+                            EdgeInsets.symmetric(horizontal: 8, vertical: 6),
+                        child: Text('Choose'),
                       ),
-                  ],
-                  child: const Padding(
-                    padding: EdgeInsets.symmetric(horizontal: 8, vertical: 6),
-                    child: Text('Choose'),
+                    ),
                   ),
-                ),
+                ]),
               ),
+            ),
+            actions: [
+              FilledButton(
+                  onPressed: () => Navigator.pop(context),
+                  child: const Text('Done'))
             ],
-          ),
-          actions: [
-            TextButton(
-                onPressed: () => Navigator.pop(context),
-                child: const Text('Done'))
-          ],
-        ),
+          );
+        },
       ),
     );
   }
@@ -2965,6 +2932,163 @@ class _PlayerPanelState extends State<_PlayerPanel> {
 
   String _zoomLabel(double zoom) =>
       '${zoom == zoom.roundToDouble() ? zoom.toStringAsFixed(0) : zoom.toStringAsFixed(1)}x';
+}
+
+class _GoogleDriveFolderBrowser extends StatefulWidget {
+  const _GoogleDriveFolderBrowser({required this.connection});
+
+  final GoogleDriveConnection connection;
+
+  @override
+  State<_GoogleDriveFolderBrowser> createState() =>
+      _GoogleDriveFolderBrowserState();
+}
+
+class _GoogleDriveFolderBrowserState extends State<_GoogleDriveFolderBrowser> {
+  GoogleDriveFolder _current =
+      const GoogleDriveFolder(id: 'root', name: 'My Drive');
+  final List<GoogleDriveFolder> _backStack = [];
+  List<GoogleDriveFolder> _folders = const [];
+  bool _loading = true;
+  String? _error;
+
+  @override
+  void initState() {
+    super.initState();
+    _loadCurrentFolder();
+  }
+
+  Future<void> _loadCurrentFolder() async {
+    setState(() {
+      _loading = true;
+      _error = null;
+    });
+    try {
+      final folders =
+          await widget.connection.listFolders(parentId: _current.id);
+      if (!mounted) return;
+      setState(() {
+        _folders = folders;
+        _loading = false;
+      });
+    } catch (error) {
+      if (!mounted) return;
+      setState(() {
+        _folders = const [];
+        _error = error.toString();
+        _loading = false;
+      });
+    }
+  }
+
+  Future<void> _openFolder(GoogleDriveFolder folder) async {
+    _backStack.add(_current);
+    _current = folder;
+    await _loadCurrentFolder();
+  }
+
+  Future<void> _goBack() async {
+    if (_backStack.isEmpty) return;
+    _current = _backStack.removeLast();
+    await _loadCurrentFolder();
+  }
+
+  Future<void> _createRiffNotesFolder() async {
+    setState(() {
+      _loading = true;
+      _error = null;
+    });
+    try {
+      final created = await widget.connection.createFolder(
+        name: 'RiffNotes',
+        parentId: _current.id,
+      );
+      if (!mounted) return;
+      Navigator.pop(context, created);
+    } catch (error) {
+      if (!mounted) return;
+      setState(() {
+        _loading = false;
+        _error = error.toString();
+      });
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) => AlertDialog(
+        title: const Text('Choose Google Drive folder'),
+        content: SizedBox(
+          width: 640,
+          height: 480,
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              Row(children: [
+                IconButton(
+                  tooltip: 'Back',
+                  onPressed: _backStack.isEmpty || _loading ? null : _goBack,
+                  icon: const Icon(Icons.arrow_back),
+                ),
+                const SizedBox(width: 8),
+                const Icon(Icons.folder_open_outlined),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: Text(
+                    _current.name,
+                    style: Theme.of(context).textTheme.titleMedium,
+                    overflow: TextOverflow.ellipsis,
+                  ),
+                ),
+              ]),
+              const Divider(),
+              if (_error != null)
+                Padding(
+                  padding: const EdgeInsets.only(bottom: 8),
+                  child: Text(
+                    _error!,
+                    style:
+                        TextStyle(color: Theme.of(context).colorScheme.error),
+                  ),
+                ),
+              Expanded(
+                child: _loading
+                    ? const Center(child: CircularProgressIndicator())
+                    : _folders.isEmpty
+                        ? const Center(
+                            child: Text('No folders inside this folder.'))
+                        : ListView.builder(
+                            itemCount: _folders.length,
+                            itemBuilder: (context, index) {
+                              final folder = _folders[index];
+                              return ListTile(
+                                leading: const Icon(Icons.folder_outlined),
+                                title: Text(folder.name),
+                                subtitle: Text(folder.id),
+                                onTap: () => _openFolder(folder),
+                                trailing: const Icon(Icons.chevron_right),
+                              );
+                            },
+                          ),
+              ),
+            ],
+          ),
+        ),
+        actions: [
+          TextButton(
+              onPressed: _loading ? null : () => Navigator.pop(context),
+              child: const Text('Cancel')),
+          TextButton.icon(
+            onPressed: _loading ? null : _createRiffNotesFolder,
+            icon: const Icon(Icons.create_new_folder_outlined),
+            label: const Text('Create RiffNotes here'),
+          ),
+          FilledButton.icon(
+            onPressed: _loading ? null : () => Navigator.pop(context, _current),
+            icon: const Icon(Icons.check),
+            label: const Text('Use this folder'),
+          ),
+        ],
+      );
 }
 
 class _ActivityStrip extends StatelessWidget {
