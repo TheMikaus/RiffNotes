@@ -66,7 +66,9 @@ class _LibraryScreenState extends State<LibraryScreen> {
   late final WaveformController _waveform;
   late final AppPreferences _preferences;
   List<PracticeFolder> _practices = const [];
+  PracticeFolder? _mastersPractice;
   PracticeFolder? _selected;
+  bool _selectedIsMasters = false;
   Recording? _selectedRecording;
   List<PracticeAnnotation> _notes = const [];
   List<UserAnnotation> _reviewNotes = const [];
@@ -364,9 +366,12 @@ class _LibraryScreenState extends State<LibraryScreen> {
       update(1, '${found.length} practices ready');
       return found;
     });
+    final mastersPractice = await _loadMastersPractice();
     if (mounted) {
       setState(() {
         _practices = practices;
+        _mastersPractice = mastersPractice;
+        _selectedIsMasters = false;
         _selected = practices
                 .where((item) => item.name == _preferences.lastPractice)
                 .firstOrNull ??
@@ -400,6 +405,7 @@ class _LibraryScreenState extends State<LibraryScreen> {
   Future<void> _selectPractice(PracticeFolder practice) async {
     setState(() {
       _selected = practice;
+      _selectedIsMasters = false;
       _selectedRecording = null;
       _rangeStartMs = null;
       _rangeRecordingId = null;
@@ -419,6 +425,48 @@ class _LibraryScreenState extends State<LibraryScreen> {
       await _selectRecording(remembered);
     } else if (practice.recordings.isNotEmpty) {
       await _selectRecording(practice.recordings.first,
+          autoPlay: _preferences.autoPlayOnPracticeSelection);
+    }
+  }
+
+  Future<PracticeFolder?> _loadMastersPractice({bool create = false}) async {
+    final directory = _resolvedMastersFolder;
+    if (directory == null) return null;
+    if (!await directory.exists()) {
+      if (!create) {
+        return PracticeFolder(directory: directory, recordings: const []);
+      }
+      await directory.create(recursive: true);
+    }
+    return _repository.openPractice(directory);
+  }
+
+  Future<void> _selectMastersLibrary() async {
+    final masters = await _activity.run('Opening Masters', (update) async {
+      update(null, 'Loading master recordings…');
+      final result = await _loadMastersPractice(create: true);
+      update(1, 'Masters ready');
+      return result;
+    });
+    if (!mounted || masters == null) return;
+    setState(() {
+      _mastersPractice = masters;
+      _selected = masters;
+      _selectedIsMasters = true;
+      _selectedRecording = null;
+      _rangeStartMs = null;
+      _rangeRecordingId = null;
+      _sectionStartMs = null;
+      _sectionRecordingId = null;
+      _reviewRecordingFilter = null;
+      _showPracticeReview = false;
+      _fingerprintMatches = const [];
+      _fingerprintDecisionState = const FingerprintDecisions();
+      _reviewNotes = const [];
+    });
+    _waveform.clear();
+    if (masters.recordings.isNotEmpty) {
+      await _selectRecording(masters.recordings.first,
           autoPlay: _preferences.autoPlayOnPracticeSelection);
     }
   }
@@ -459,6 +507,19 @@ class _LibraryScreenState extends State<LibraryScreen> {
     if (_selected != null)
       await _preferences.rememberSelection(_selected!.name, recording.id);
     await _refreshNotes(recording);
+  }
+
+  void _replaceSelectedPractice(PracticeFolder updatedPractice) {
+    _selected = updatedPractice;
+    if (_selectedIsMasters) {
+      _mastersPractice = updatedPractice;
+    } else {
+      _practices = _practices
+          .map((item) => item.directory.path == updatedPractice.directory.path
+              ? updatedPractice
+              : item)
+          .toList(growable: false);
+    }
   }
 
   Future<void> _setVolumeBoost(double decibels) async {
@@ -928,6 +989,7 @@ class _LibraryScreenState extends State<LibraryScreen> {
       await recording.file.copy(target.path);
       update(1, 'Master saved');
     });
+    await _refreshMastersList();
     if (mounted) {
       ScaffoldMessenger.of(context).showSnackBar(SnackBar(
           content: Text('Saved ${path.basename(target.path)} to Masters.')));
@@ -962,6 +1024,7 @@ class _LibraryScreenState extends State<LibraryScreen> {
         );
         update(1, 'Section master saved');
       });
+      await _refreshMastersList();
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(SnackBar(
             content: Text('Saved ${path.basename(target.path)} to Masters.')));
@@ -977,6 +1040,22 @@ class _LibraryScreenState extends State<LibraryScreen> {
             .showSnackBar(SnackBar(content: Text(error.message)));
       }
     }
+  }
+
+  Future<void> _refreshMastersList() async {
+    final masters = await _loadMastersPractice();
+    if (!mounted || masters == null) return;
+    setState(() {
+      _mastersPractice = masters;
+      if (_selectedIsMasters) {
+        _selected = masters;
+        if (_selectedRecording != null) {
+          _selectedRecording = masters.recordings
+              .where((item) => item.id == _selectedRecording!.id)
+              .firstOrNull;
+        }
+      }
+    });
   }
 
   Future<void> _playReviewNote(UserAnnotation item) async {
@@ -1218,12 +1297,7 @@ class _LibraryScreenState extends State<LibraryScreen> {
     });
     if (mounted) {
       setState(() {
-        _selected = updatedPractice;
-        _practices = _practices
-            .map((item) => item.directory.path == updatedPractice.directory.path
-                ? updatedPractice
-                : item)
-            .toList(growable: false);
+        _replaceSelectedPractice(updatedPractice);
         _selectedRecording = updatedPractice.recordings
             .where((item) => item.id == recording.id)
             .firstOrNull;
@@ -1689,12 +1763,7 @@ class _LibraryScreenState extends State<LibraryScreen> {
           .where((item) => item.id == recording.id)
           .firstOrNull;
       setState(() {
-        _selected = updatedPractice;
-        _practices = _practices
-            .map((item) => item.directory.path == updatedPractice.directory.path
-                ? updatedPractice
-                : item)
-            .toList(growable: false);
+        _replaceSelectedPractice(updatedPractice);
       });
       if (converted != null) {
         await _selectRecording(converted);
@@ -1815,14 +1884,8 @@ class _LibraryScreenState extends State<LibraryScreen> {
       });
       if (mounted) {
         setState(() {
-          _selected = updatedPractice;
+          _replaceSelectedPractice(updatedPractice);
           _selectedRecording = null;
-          _practices = _practices
-              .map((item) =>
-                  item.directory.path == updatedPractice.directory.path
-                      ? updatedPractice
-                      : item)
-              .toList(growable: false);
         });
       }
     } on StateError catch (error) {
@@ -1851,23 +1914,28 @@ class _LibraryScreenState extends State<LibraryScreen> {
                   label: const Text('Band Folder')),
               IconButton(
                   tooltip: 'Upload selected practice to sync folder',
-                  onPressed: _selected == null ? null : _uploadSelectedPractice,
+                  onPressed: _selected == null || _selectedIsMasters
+                      ? null
+                      : _uploadSelectedPractice,
                   icon: const Icon(Icons.cloud_upload_outlined)),
               IconButton(
                   tooltip: 'Download selected practice from sync folder',
-                  onPressed:
-                      _selected == null ? null : _downloadSelectedPractice,
+                  onPressed: _selected == null || _selectedIsMasters
+                      ? null
+                      : _downloadSelectedPractice,
                   icon: const Icon(Icons.cloud_download_outlined)),
               IconButton(
                   tooltip: 'Match selected practice against Masters',
-                  onPressed: _selected == null
+                  onPressed: _selected == null || _selectedIsMasters
                       ? null
                       : _matchSelectedPracticeFingerprints,
                   icon: const Icon(Icons.fingerprint)),
               IconButton(
                   tooltip:
                       'Review ${_fingerprintMatches.length} fingerprint match suggestions; ${_fingerprintDecisionState.accepted.length} accepted',
-                  onPressed: _selected == null || _fingerprintMatches.isEmpty
+                  onPressed: _selected == null ||
+                          _selectedIsMasters ||
+                          _fingerprintMatches.isEmpty
                       ? null
                       : _reviewFingerprintMatches,
                   icon: const Icon(Icons.rule_folder_outlined)),
@@ -1890,13 +1958,17 @@ class _LibraryScreenState extends State<LibraryScreen> {
                   width: 260,
                   child: _PracticeList(
                       practices: _practices,
+                      masters: _mastersPractice,
                       selected: _selected,
+                      selectedIsMasters: _selectedIsMasters,
+                      onSelectMasters: _selectMastersLibrary,
                       onSelect: _selectPractice)),
               const VerticalDivider(width: 1),
               Expanded(
                 child: _RecordingList(
                   practice: _selected,
                   bandFolder: _bandFolder,
+                  isMasters: _selectedIsMasters,
                   selected: _selectedRecording,
                   onSelect: (recording) => _selectRecording(
                     recording,
@@ -1961,12 +2033,19 @@ class _LibraryScreenState extends State<LibraryScreen> {
 }
 
 class _PracticeList extends StatelessWidget {
-  const _PracticeList(
-      {required this.practices,
-      required this.selected,
-      required this.onSelect});
+  const _PracticeList({
+    required this.practices,
+    required this.masters,
+    required this.selected,
+    required this.selectedIsMasters,
+    required this.onSelectMasters,
+    required this.onSelect,
+  });
   final List<PracticeFolder> practices;
+  final PracticeFolder? masters;
   final PracticeFolder? selected;
+  final bool selectedIsMasters;
+  final VoidCallback onSelectMasters;
   final ValueChanged<PracticeFolder> onSelect;
 
   @override
@@ -1975,7 +2054,18 @@ class _PracticeList extends StatelessWidget {
         children: [
           Text('PRACTICES', style: Theme.of(context).textTheme.labelLarge),
           const SizedBox(height: 8),
-          if (practices.isEmpty)
+          if (masters != null) ...[
+            ListTile(
+              selected: selectedIsMasters,
+              leading: const Icon(Icons.library_music_outlined),
+              title: const Text('Masters'),
+              subtitle:
+                  Text('${masters!.recordings.length} reference recordings'),
+              onTap: onSelectMasters,
+            ),
+            const Divider(),
+          ],
+          if (practices.isEmpty && masters == null)
             const ListTile(title: Text('Choose a Band Folder to begin.')),
           for (final practice in practices)
             ListTile(
@@ -2003,6 +2093,7 @@ class _RecordingList extends StatelessWidget {
   const _RecordingList({
     required this.practice,
     required this.bandFolder,
+    required this.isMasters,
     required this.selected,
     required this.onSelect,
     required this.onEditTitle,
@@ -2046,6 +2137,7 @@ class _RecordingList extends StatelessWidget {
   });
   final PracticeFolder? practice;
   final String? bandFolder;
+  final bool isMasters;
   final Recording? selected;
   final ValueChanged<Recording> onSelect;
   final ValueChanged<Recording> onEditTitle;
@@ -2110,25 +2202,36 @@ class _RecordingList extends StatelessWidget {
             children: [
               Row(children: [
                 Expanded(
-                    child: Text(practice!.name,
-                        style: Theme.of(context).textTheme.headlineMedium)),
-                SegmentedButton<bool>(
-                  segments: const [
-                    ButtonSegment(
-                        value: false,
-                        label: Text('Takes'),
-                        icon: Icon(Icons.queue_music)),
-                    ButtonSegment(
-                        value: true,
-                        label: Text('Practice review'),
-                        icon: Icon(Icons.rate_review_outlined)),
+                    child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(isMasters ? 'Masters' : practice!.name,
+                        style: Theme.of(context).textTheme.headlineMedium),
+                    if (isMasters)
+                      Text(
+                        'Reference recordings for song and section matching',
+                        style: Theme.of(context).textTheme.bodyMedium,
+                      ),
                   ],
-                  selected: {showPracticeReview},
-                  onSelectionChanged: (value) =>
-                      onTogglePracticeReview(value.first),
-                ),
+                )),
+                if (!isMasters)
+                  SegmentedButton<bool>(
+                    segments: const [
+                      ButtonSegment(
+                          value: false,
+                          label: Text('Takes'),
+                          icon: Icon(Icons.queue_music)),
+                      ButtonSegment(
+                          value: true,
+                          label: Text('Practice review'),
+                          icon: Icon(Icons.rate_review_outlined)),
+                    ],
+                    selected: {showPracticeReview},
+                    onSelectionChanged: (value) =>
+                        onTogglePracticeReview(value.first),
+                  ),
               ]),
-              if (showPracticeReview) ...[
+              if (!isMasters && showPracticeReview) ...[
                 const SizedBox(height: 12),
                 Text('All bandmate notes in this practice',
                     style: Theme.of(context).textTheme.titleMedium),
@@ -2195,22 +2298,40 @@ class _RecordingList extends StatelessWidget {
                   )),
               ] else ...[
                 Row(children: [
-                  const Expanded(
-                      child: Text('Select a take to load it into the player.')),
-                  FilledButton.icon(
-                    onPressed: onBatchRename,
-                    icon: const Icon(Icons.drive_file_rename_outline),
-                    label: const Text('Batch rename'),
-                  ),
+                  Expanded(
+                      child: Text(isMasters
+                          ? 'Select a master to play it and mark song sections.'
+                          : 'Select a take to load it into the player.')),
+                  if (!isMasters)
+                    FilledButton.icon(
+                      onPressed: onBatchRename,
+                      icon: const Icon(Icons.drive_file_rename_outline),
+                      label: const Text('Batch rename'),
+                    ),
                 ]),
                 const SizedBox(height: 18),
+                if (isMasters && practice!.recordings.isEmpty)
+                  const Card(
+                    child: ListTile(
+                      leading: Icon(Icons.library_music_outlined),
+                      title: Text('No master recordings yet.'),
+                      subtitle: Text(
+                          'Copy songs into the Masters folder, or save a practice take as a master.'),
+                    ),
+                  ),
                 for (final recording in practice!.recordings)
                   Card(
                       child: ListTile(
                     selected: selected?.id == recording.id,
                     leading: Icon(
-                        recording.isBestTake ? Icons.star : Icons.audiotrack,
-                        color: recording.isBestTake ? Colors.amber : null),
+                        isMasters
+                            ? Icons.library_music_outlined
+                            : recording.isBestTake
+                                ? Icons.star
+                                : Icons.audiotrack,
+                        color: !isMasters && recording.isBestTake
+                            ? Colors.amber
+                            : null),
                     title: Text(recording.title ?? recording.filename),
                     subtitle: Text(
                       _recordingSubtitle(recording),
@@ -2218,27 +2339,31 @@ class _RecordingList extends StatelessWidget {
                     trailing: Row(
                       mainAxisSize: MainAxisSize.min,
                       children: [
+                        if (!isMasters)
+                          IconButton(
+                            tooltip: recording.isBestTake
+                                ? 'Remove Best Take'
+                                : 'Mark Best Take',
+                            icon: Icon(recording.isBestTake
+                                ? Icons.star
+                                : Icons.star_border),
+                            color: recording.isBestTake ? Colors.amber : null,
+                            onPressed: () =>
+                                onToggleBest(recording, !recording.isBestTake),
+                          ),
                         IconButton(
-                          tooltip: recording.isBestTake
-                              ? 'Remove Best Take'
-                              : 'Mark Best Take',
-                          icon: Icon(recording.isBestTake
-                              ? Icons.star
-                              : Icons.star_border),
-                          color: recording.isBestTake ? Colors.amber : null,
-                          onPressed: () =>
-                              onToggleBest(recording, !recording.isBestTake),
-                        ),
-                        IconButton(
-                          tooltip: 'Title this take',
+                          tooltip: isMasters
+                              ? 'Title this master'
+                              : 'Title this take',
                           icon: const Icon(Icons.edit_outlined),
                           onPressed: () => onEditTitle(recording),
                         ),
-                        IconButton(
-                          tooltip: 'Save take as new master',
-                          icon: const Icon(Icons.library_music_outlined),
-                          onPressed: () => onSaveRecordingAsMaster(recording),
-                        ),
+                        if (!isMasters)
+                          IconButton(
+                            tooltip: 'Save take as new master',
+                            icon: const Icon(Icons.library_music_outlined),
+                            onPressed: () => onSaveRecordingAsMaster(recording),
+                          ),
                         Text(recording.extension
                             .replaceFirst('.', '')
                             .toUpperCase()),
