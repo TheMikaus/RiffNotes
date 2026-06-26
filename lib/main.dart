@@ -3111,8 +3111,32 @@ class _ActivityStrip extends StatelessWidget {
             child: CircularProgressIndicator(strokeWidth: 2)),
         title: Text(item.label),
         subtitle: Text(item.detail),
-        trailing: SizedBox(
-            width: 180, child: LinearProgressIndicator(value: item.progress)),
+        trailing: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            SizedBox(
+                width: 160,
+                child: LinearProgressIndicator(value: item.progress)),
+            const SizedBox(width: 8),
+            IconButton(
+              tooltip: item.detail.trim().isEmpty
+                  ? 'Nothing to copy yet'
+                  : 'Copy message',
+              onPressed: item.detail.trim().isEmpty
+                  ? null
+                  : () async {
+                      await Clipboard.setData(ClipboardData(text: item.detail));
+                      if (context.mounted) {
+                        ScaffoldMessenger.of(context).showSnackBar(
+                          const SnackBar(
+                              content: Text('Message copied to clipboard')),
+                        );
+                      }
+                    },
+              icon: const Icon(Icons.copy_outlined),
+            ),
+          ],
+        ),
       ),
     );
   }
