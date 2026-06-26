@@ -23,6 +23,7 @@ void main() {
     expect(
         isPracticeDirectory(Directory(r'C:\Band\.riffnotes-cache')), isFalse);
     expect(isPracticeDirectory(Directory(r'C:\Band\cache')), isFalse);
+    expect(isPracticeDirectory(Directory(r'C:\Band\Masters')), isFalse);
     expect(
         isPracticeDirectory(Directory(r'C:\Band\2026-06-21 Practice')), isTrue);
   });

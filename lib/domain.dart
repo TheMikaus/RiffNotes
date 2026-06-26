@@ -10,6 +10,7 @@ const ignoredPracticeFolderNames = {
   '.cache',
   '.riffnotes-cache',
   'cache',
+  'masters',
 };
 
 bool isPracticeDirectory(Directory directory) {

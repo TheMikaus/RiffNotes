@@ -4,6 +4,7 @@ import 'dart:io';
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:media_kit/media_kit.dart';
 import 'package:path/path.dart' as path;
 
 import 'activity.dart';
@@ -18,10 +19,16 @@ import 'sync.dart';
 import 'waveform.dart';
 import 'waveform_view.dart';
 
-void main() => runApp(const RiffNotesApp());
+void main() {
+  WidgetsFlutterBinding.ensureInitialized();
+  MediaKit.ensureInitialized();
+  runApp(const RiffNotesApp());
+}
 
 class RiffNotesApp extends StatelessWidget {
-  const RiffNotesApp({super.key});
+  const RiffNotesApp({super.key, this.disableAudio = false});
+
+  final bool disableAudio;
 
   @override
   Widget build(BuildContext context) => MaterialApp(
@@ -30,12 +37,14 @@ class RiffNotesApp extends StatelessWidget {
             colorSchemeSeed: Colors.deepPurple,
             brightness: Brightness.dark,
             useMaterial3: true),
-        home: const LibraryScreen(),
+        home: LibraryScreen(disableAudio: disableAudio),
       );
 }
 
 class LibraryScreen extends StatefulWidget {
-  const LibraryScreen({super.key});
+  const LibraryScreen({super.key, this.disableAudio = false});
+
+  final bool disableAudio;
 
   @override
   State<LibraryScreen> createState() => _LibraryScreenState();
@@ -72,11 +81,14 @@ class _LibraryScreenState extends State<LibraryScreen> {
   String? _reviewUserFilter;
   String? _reviewRecordingFilter;
   _ReviewSort _reviewSort = _ReviewSort.trackTime;
+  bool _applyingAudioOutput = false;
+  String? _appliedAudioOutputDevice;
 
   @override
   void initState() {
     super.initState();
-    _audio = AudioController();
+    _audio = widget.disableAudio ? AudioController.inert() : AudioController();
+    _audio.addListener(_applyPreferredAudioOutputIfPossible);
     _waveform = WaveformController();
     _preferences = AppPreferences();
     _restorePreferences();
@@ -84,6 +96,7 @@ class _LibraryScreenState extends State<LibraryScreen> {
 
   @override
   void dispose() {
+    _audio.removeListener(_applyPreferredAudioOutputIfPossible);
     _audio.dispose();
     _waveform.dispose();
     super.dispose();
@@ -109,18 +122,49 @@ class _LibraryScreenState extends State<LibraryScreen> {
     final selection = await FilePicker.platform
         .getDirectoryPath(dialogTitle: 'Choose your Masters Folder');
     if (selection == null) return;
-    await _preferences.setMastersFolder(selection);
+    await _preferences
+        .setMastersFolder(_mastersPreferenceValueFor(Directory(selection)));
   }
 
   Future<Directory?> _requireMastersFolder() async {
-    final saved = _preferences.mastersFolder;
-    if (saved != null && await Directory(saved).exists()) {
-      return Directory(saved);
+    final saved = _resolvedMastersFolder;
+    if (saved != null && await saved.exists()) {
+      return saved;
+    }
+    final fallback = _defaultMastersFolder;
+    if (fallback != null) {
+      await fallback.create(recursive: true);
+      await _preferences.setMastersFolder('Masters');
+      return fallback;
     }
     await _chooseMastersFolder();
-    final selected = _preferences.mastersFolder;
-    if (selected == null || !await Directory(selected).exists()) return null;
-    return Directory(selected);
+    final selected = _resolvedMastersFolder;
+    if (selected == null || !await selected.exists()) return null;
+    return selected;
+  }
+
+  Directory? get _defaultMastersFolder {
+    final bandFolder = _bandFolder ?? _preferences.bandFolder;
+    if (bandFolder == null) return null;
+    return Directory(path.join(bandFolder, 'Masters'));
+  }
+
+  Directory? get _resolvedMastersFolder {
+    final saved = _preferences.mastersFolder;
+    if (saved == null || saved.trim().isEmpty) return _defaultMastersFolder;
+    if (path.isAbsolute(saved)) return Directory(saved);
+    final bandFolder = _bandFolder ?? _preferences.bandFolder;
+    if (bandFolder == null) return Directory(saved);
+    return Directory(path.normalize(path.join(bandFolder, saved)));
+  }
+
+  String _mastersPreferenceValueFor(Directory directory) {
+    final bandFolder = _bandFolder ?? _preferences.bandFolder;
+    if (bandFolder == null) return directory.path;
+    final relative = path.relative(directory.path, from: bandFolder);
+    return relative.startsWith('..') || path.isAbsolute(relative)
+        ? directory.path
+        : relative;
   }
 
   Future<Directory?> _requireSyncFolder() async {
@@ -136,6 +180,7 @@ class _LibraryScreenState extends State<LibraryScreen> {
 
   Future<void> _restorePreferences() async {
     await _preferences.load();
+    _applyPreferredAudioOutputIfPossible();
     final savedFolder = _preferences.bandFolder;
     if (savedFolder != null && await Directory(savedFolder).exists()) {
       await _openBandFolder(savedFolder);
@@ -315,6 +360,45 @@ class _LibraryScreenState extends State<LibraryScreen> {
       if (decibels > 0) '+${decibels.toStringAsFixed(0)} dB',
     ];
     return parts.isEmpty ? 'original' : parts.join(', ');
+  }
+
+  void _applyPreferredAudioOutputIfPossible() {
+    final saved = _preferences.audioOutputDevice;
+    if (saved == null || saved == _appliedAudioOutputDevice) return;
+    final device =
+        _audio.audioDevices.where((item) => item.name == saved).firstOrNull;
+    if (device == null || _applyingAudioOutput) return;
+    _applyingAudioOutput = true;
+    unawaited(_audio.setAudioDevice(device).then((_) {
+      _appliedAudioOutputDevice = saved;
+    }).whenComplete(() {
+      _applyingAudioOutput = false;
+    }));
+  }
+
+  Future<void> _setAudioOutputDevice(AudioDevice device) async {
+    await _audio.setAudioDevice(device);
+    await _preferences
+        .setAudioOutputDevice(device.name == 'auto' ? null : device.name);
+    _appliedAudioOutputDevice = device.name == 'auto' ? null : device.name;
+  }
+
+  String _audioDeviceLabel(AudioDevice device) {
+    if (device.name == 'auto') return 'Windows default output';
+    final description = device.description.trim();
+    return description.isEmpty ? device.name : description;
+  }
+
+  String _audioOutputSubtitle() => _audioDeviceLabel(_audio.audioDevice);
+
+  String _mastersFolderLabel() {
+    final saved = _preferences.mastersFolder;
+    final resolved = _resolvedMastersFolder;
+    if (resolved == null) return 'None selected';
+    if (saved == null || saved.trim().isEmpty) {
+      return '${resolved.path} (default)';
+    }
+    return path.isAbsolute(saved) ? saved : '$saved → ${resolved.path}';
   }
 
   Future<void> _refreshNotes(Recording recording) async {
@@ -735,6 +819,18 @@ class _LibraryScreenState extends State<LibraryScreen> {
               ),
               ListTile(
                 contentPadding: EdgeInsets.zero,
+                leading: const Icon(Icons.person_outline),
+                title: const Text('Display name'),
+                subtitle: Text(_preferences.displayName),
+                trailing: TextButton(
+                    onPressed: () async {
+                      await _editDisplayName();
+                      setDialogState(() {});
+                    },
+                    child: const Text('Edit')),
+              ),
+              ListTile(
+                contentPadding: EdgeInsets.zero,
                 title: const Text('Google Drive sync folder'),
                 subtitle: Text(_preferences.syncFolder ?? 'None selected'),
                 trailing: TextButton(
@@ -747,7 +843,7 @@ class _LibraryScreenState extends State<LibraryScreen> {
               ListTile(
                 contentPadding: EdgeInsets.zero,
                 title: const Text('Masters Folder'),
-                subtitle: Text(_preferences.mastersFolder ?? 'None selected'),
+                subtitle: Text(_mastersFolderLabel()),
                 trailing: TextButton(
                     onPressed: () async {
                       await _chooseMastersFolder();
@@ -773,12 +869,29 @@ class _LibraryScreenState extends State<LibraryScreen> {
                   setDialogState(() {});
                 },
               ),
-              const ListTile(
+              ListTile(
                 contentPadding: EdgeInsets.zero,
-                leading: Icon(Icons.speaker_outlined),
-                title: Text('Audio output device'),
-                subtitle: Text(
-                    'Currently uses the Windows default output. Device selection needs an audio backend upgrade.'),
+                leading: const Icon(Icons.speaker_outlined),
+                title: const Text('Audio output device'),
+                subtitle: Text(_audioOutputSubtitle()),
+                trailing: PopupMenuButton<AudioDevice>(
+                  tooltip: 'Choose output device',
+                  onSelected: (device) async {
+                    await _setAudioOutputDevice(device);
+                    setDialogState(() {});
+                  },
+                  itemBuilder: (context) => [
+                    for (final device in _audio.audioDevices)
+                      PopupMenuItem(
+                        value: device,
+                        child: Text(_audioDeviceLabel(device)),
+                      ),
+                  ],
+                  child: const Padding(
+                    padding: EdgeInsets.symmetric(horizontal: 8, vertical: 6),
+                    child: Text('Choose'),
+                  ),
+                ),
               ),
             ],
           ),
@@ -790,6 +903,40 @@ class _LibraryScreenState extends State<LibraryScreen> {
         ),
       ),
     );
+  }
+
+  Future<void> _editDisplayName() async {
+    final controller = TextEditingController(text: _preferences.displayName);
+    final name = await showDialog<String>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Display name'),
+        content: TextField(
+          controller: controller,
+          autofocus: true,
+          decoration: const InputDecoration(
+            labelText: 'Name used for your note file',
+            helperText: 'This controls .riffnotes.<name>.bandnotes',
+          ),
+          onSubmitted: (value) => Navigator.pop(context, value),
+        ),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(context),
+              child: const Text('Cancel')),
+          FilledButton(
+              onPressed: () => Navigator.pop(context, controller.text),
+              child: const Text('Save')),
+        ],
+      ),
+    );
+    controller.dispose();
+    if (name == null) return;
+    await _preferences.setDisplayName(name);
+    final recording = _selectedRecording;
+    if (recording != null) await _refreshNotes(recording);
+    final practice = _selected;
+    if (practice != null) await _refreshPracticeReview(practice);
   }
 
   Future<void> _updateRecording(

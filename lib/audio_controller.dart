@@ -2,33 +2,59 @@ import 'dart:async';
 import 'dart:io';
 
 import 'package:flutter/foundation.dart';
-import 'package:just_audio/just_audio.dart';
+import 'package:media_kit/media_kit.dart';
 
 import 'domain.dart';
 
 class AudioController extends ChangeNotifier {
-  AudioController({AudioPlayer? player}) : _player = player ?? AudioPlayer() {
-    _positionSubscription = _player.positionStream.listen((position) {
+  AudioController({Player? player}) : _player = player ?? Player() {
+    final activePlayer = _player!;
+    _positionSubscription = activePlayer.stream.position.listen((position) {
       _position = position;
       notifyListeners();
     });
-    _durationSubscription = _player.durationStream.listen((duration) {
-      _duration = duration;
+    _durationSubscription = activePlayer.stream.duration.listen((duration) {
+      _duration = duration == Duration.zero ? null : duration;
       notifyListeners();
     });
-    _stateSubscription = _player.playerStateStream.listen((state) {
-      _isPlaying = state.playing;
-      if (state.processingState == ProcessingState.completed) {
+    _playingSubscription = activePlayer.stream.playing.listen((playing) {
+      _isPlaying = playing;
+      notifyListeners();
+    });
+    _completedSubscription = activePlayer.stream.completed.listen((completed) {
+      if (completed) {
         _isPlaying = false;
+        notifyListeners();
       }
+    });
+    _audioDevicesSubscription =
+        activePlayer.stream.audioDevices.listen((devices) {
+      _audioDevices = _normalizeAudioDevices(devices);
       notifyListeners();
     });
+    _audioDeviceSubscription = activePlayer.stream.audioDevice.listen((device) {
+      _audioDevice = device;
+      notifyListeners();
+    });
+    _errorSubscription = activePlayer.stream.error.listen((error) {
+      _error = error;
+      _isLoading = false;
+      notifyListeners();
+    });
+    _audioDevices = _normalizeAudioDevices(activePlayer.state.audioDevices);
+    _audioDevice = activePlayer.state.audioDevice;
   }
 
-  final AudioPlayer _player;
-  late final StreamSubscription<Duration> _positionSubscription;
-  late final StreamSubscription<Duration?> _durationSubscription;
-  late final StreamSubscription<PlayerState> _stateSubscription;
+  AudioController.inert() : _player = null;
+
+  final Player? _player;
+  StreamSubscription<Duration>? _positionSubscription;
+  StreamSubscription<Duration>? _durationSubscription;
+  StreamSubscription<bool>? _playingSubscription;
+  StreamSubscription<bool>? _completedSubscription;
+  StreamSubscription<List<AudioDevice>>? _audioDevicesSubscription;
+  StreamSubscription<AudioDevice>? _audioDeviceSubscription;
+  StreamSubscription<String>? _errorSubscription;
 
   Recording? _recording;
   Duration _position = Duration.zero;
@@ -39,6 +65,8 @@ class AudioController extends ChangeNotifier {
   int _loadRequest = 0;
   Timer? _rangeTimer;
   bool _isLoopingRange = false;
+  List<AudioDevice> _audioDevices = const [AudioDevice('auto', '')];
+  AudioDevice _audioDevice = AudioDevice.auto();
 
   Recording? get recording => _recording;
   Duration get position => _position;
@@ -47,9 +75,21 @@ class AudioController extends ChangeNotifier {
   bool get isLoading => _isLoading;
   String? get error => _error;
   bool get isLoopingRange => _isLoopingRange;
+  List<AudioDevice> get audioDevices => _audioDevices;
+  AudioDevice get audioDevice => _audioDevice;
 
   Future<void> load(Recording recording,
       {bool autoPlay = false, File? playbackFile}) async {
+    final player = _player;
+    if (player == null) {
+      _recording = recording;
+      _position = Duration.zero;
+      _duration = null;
+      _error = null;
+      _isLoading = false;
+      notifyListeners();
+      return;
+    }
     final request = ++_loadRequest;
     _recording = recording;
     _position = Duration.zero;
@@ -58,20 +98,16 @@ class AudioController extends ChangeNotifier {
     _isLoading = true;
     notifyListeners();
     try {
-      await _player.stop();
-      final duration =
-          await _player.setFilePath((playbackFile ?? recording.file).path);
+      await player.stop();
+      await player.open(
+        Media((playbackFile ?? recording.file).uri.toString()),
+        play: autoPlay,
+      );
       if (request != _loadRequest) {
         return;
       }
-      _duration = duration ?? _player.duration;
-      if (autoPlay) {
-        await _player.play();
-      }
-    } on PlayerException catch (error) {
-      if (request == _loadRequest) {
-        _error = 'Unable to load ${recording.filename}: ${error.message}';
-      }
+      _duration =
+          player.state.duration == Duration.zero ? null : player.state.duration;
     } catch (_) {
       if (request == _loadRequest) {
         _error =
@@ -86,21 +122,20 @@ class AudioController extends ChangeNotifier {
   }
 
   Future<void> togglePlayback() async {
-    if (_recording == null || _isLoading || _error != null) {
+    final player = _player;
+    if (player == null || _recording == null || _isLoading || _error != null) {
       return;
     }
-    if (_isPlaying) {
-      await _player.pause();
-    } else {
-      await _player.play();
-    }
+    await player.playOrPause();
   }
 
   Future<void> stop() async {
+    final player = _player;
+    if (player == null) return;
     _rangeTimer?.cancel();
     _isLoopingRange = false;
-    await _player.pause();
-    await _player.seek(Duration.zero);
+    await player.pause();
+    await player.seek(Duration.zero);
   }
 
   Future<void> playFromNote(int startMs, {int? endMs}) async {
@@ -111,19 +146,21 @@ class AudioController extends ChangeNotifier {
     _rangeTimer?.cancel();
     _isLoopingRange = loop && endMs != null && endMs > startMs;
     await seek(Duration(milliseconds: startMs));
-    await _player.play();
+    final player = _player;
+    if (player == null) return;
+    await player.play();
     if (endMs != null && endMs > startMs) {
       final end = Duration(milliseconds: endMs);
       _rangeTimer =
           Timer.periodic(const Duration(milliseconds: 80), (timer) async {
-        if (_player.position >= end) {
+        if (player.state.position >= end) {
           if (_isLoopingRange) {
-            await _player.seek(Duration(milliseconds: startMs));
-            await _player.play();
+            await player.seek(Duration(milliseconds: startMs));
+            await player.play();
           } else {
             timer.cancel();
-            await _player.pause();
-            await _player.seek(Duration(milliseconds: startMs));
+            await player.pause();
+            await player.seek(Duration(milliseconds: startMs));
           }
         }
       });
@@ -142,18 +179,55 @@ class AudioController extends ChangeNotifier {
     final maximum = _duration ?? Duration.zero;
     final clamped = target < Duration.zero
         ? Duration.zero
-        : target > maximum
+        : maximum > Duration.zero && target > maximum
             ? maximum
             : target;
-    await _player.seek(clamped);
+    await _player?.seek(clamped);
+  }
+
+  Future<void> setAudioDevice(AudioDevice device) async {
+    final player = _player;
+    if (player == null) return;
+    await player.setAudioDevice(device);
+    _audioDevice = device;
+    notifyListeners();
+  }
+
+  List<AudioDevice> _normalizeAudioDevices(List<AudioDevice> devices) {
+    final result = <AudioDevice>[AudioDevice.auto()];
+    for (final device in devices) {
+      if (device.name == 'auto') continue;
+      if (!result.any((item) => item.name == device.name)) {
+        result.add(device);
+      }
+    }
+    return result;
   }
 
   @override
   void dispose() {
-    unawaited(_positionSubscription.cancel());
-    unawaited(_durationSubscription.cancel());
-    unawaited(_stateSubscription.cancel());
-    unawaited(_player.dispose());
+    final positionSubscription = _positionSubscription;
+    final durationSubscription = _durationSubscription;
+    final playingSubscription = _playingSubscription;
+    final completedSubscription = _completedSubscription;
+    final audioDevicesSubscription = _audioDevicesSubscription;
+    final audioDeviceSubscription = _audioDeviceSubscription;
+    final errorSubscription = _errorSubscription;
+    if (positionSubscription != null) unawaited(positionSubscription.cancel());
+    if (durationSubscription != null) unawaited(durationSubscription.cancel());
+    if (playingSubscription != null) unawaited(playingSubscription.cancel());
+    if (completedSubscription != null) {
+      unawaited(completedSubscription.cancel());
+    }
+    if (audioDevicesSubscription != null) {
+      unawaited(audioDevicesSubscription.cancel());
+    }
+    if (audioDeviceSubscription != null) {
+      unawaited(audioDeviceSubscription.cancel());
+    }
+    if (errorSubscription != null) unawaited(errorSubscription.cancel());
+    final player = _player;
+    if (player != null) unawaited(player.dispose());
     _rangeTimer?.cancel();
     super.dispose();
   }

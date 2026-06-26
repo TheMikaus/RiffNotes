@@ -17,6 +17,7 @@ class AppPreferences extends ChangeNotifier {
   static const _lastRecordingsByPracticeKey = 'last_recordings_by_practice';
   static const _boostsKey = 'playback_boosts';
   static const _channelModesKey = 'playback_channel_modes';
+  static const _audioOutputDeviceKey = 'audio_output_device';
 
   String? _bandFolder;
   String? _syncFolder;
@@ -30,6 +31,7 @@ class AppPreferences extends ChangeNotifier {
   Map<String, double> _boostsByRecording = <String, double>{};
   Map<String, PlaybackChannelMode> _channelModesByRecording =
       <String, PlaybackChannelMode>{};
+  String? _audioOutputDevice;
 
   String? get bandFolder => _bandFolder;
   String? get syncFolder => _syncFolder;
@@ -45,6 +47,7 @@ class AppPreferences extends ChangeNotifier {
   double boostFor(String recordingId) => _boostsByRecording[recordingId] ?? 0;
   PlaybackChannelMode channelModeFor(String recordingId) =>
       _channelModesByRecording[recordingId] ?? PlaybackChannelMode.stereo;
+  String? get audioOutputDevice => _audioOutputDevice;
 
   Future<void> load() async {
     final store = await SharedPreferences.getInstance();
@@ -54,6 +57,7 @@ class AppPreferences extends ChangeNotifier {
     _autoPlayOnTakeSelection = store.getBool(_autoPlayTakeKey) ?? false;
     _autoPlayOnPracticeSelection = store.getBool(_autoPlayPracticeKey) ?? false;
     _displayName = store.getString(_displayNameKey) ?? 'Bandmate';
+    _audioOutputDevice = store.getString(_audioOutputDeviceKey);
     _lastPractice = store.getString(_lastPracticeKey);
     _lastRecording = store.getString(_lastRecordingKey);
     final lastRecordingsByPractice =
@@ -171,6 +175,18 @@ class AppPreferences extends ChangeNotifier {
     _displayName = value.trim().isEmpty ? 'Bandmate' : value.trim();
     final store = await SharedPreferences.getInstance();
     await store.setString(_displayNameKey, _displayName);
+    notifyListeners();
+  }
+
+  Future<void> setAudioOutputDevice(String? value) async {
+    _audioOutputDevice = value;
+    final store = await SharedPreferences.getInstance();
+    if (value == null || value == 'auto') {
+      _audioOutputDevice = null;
+      await store.remove(_audioOutputDeviceKey);
+    } else {
+      await store.setString(_audioOutputDeviceKey, value);
+    }
     notifyListeners();
   }
 
