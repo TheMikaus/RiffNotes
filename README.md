@@ -25,10 +25,10 @@ The repository contains an early but usable Windows-focused practice-review appl
 - Select the Windows playback output device.
 - Export processed tracks or selected clips as WAV or MP3.
 - Convert WAV/WAVE recordings to MP3, replacing the source recording after a successful conversion.
-- Choose a Masters folder, mark tracks/clips as masters, section masters, and run fuzzy fingerprint suggestions against practice folders.
+- Open the Masters library, mark tracks/clips as masters, section master recordings, and run fuzzy fingerprint suggestions against practice folders.
 - Review fingerprint suggestions before applying song titles/sections or ignoring a match.
 - Manually sync a selected practice folder to/from a local Google Drive-style sync folder while excluding regenerable cache.
-- Connect to a Google Drive account using a bundled app OAuth client, browse top-level Drive folders, and remember a remote sync root. Direct Drive upload/download is in progress.
+- Connect to a Google Drive account using a bundled app OAuth client, browse Drive folders, create a RiffNotes folder, and remember a remote sync root. Direct Drive upload/download is in progress.
 - Clear the waveform/processed-audio cache for a specific practice.
 - Preserve portable metadata in the practice folder.
 - Keep long-running work visible so the app does not appear frozen.
@@ -109,7 +109,7 @@ Kindle Fire installation/testing depends on your local Android device setup and 
 1. Choose the band folder. RiffNotes lists each direct subfolder as a practice, except generated cache/backup folders.
 2. Open a practice. The app lists supported recordings and restores the last selected track for that practice when possible.
 3. Listen first. Use the waveform transport to play, seek, zoom, boost volume, select output, or switch channel mode.
-4. Add structure. Use the section lane to create named sections, drag edges into place, and loop a selected section while reviewing.
+4. Add structure. Use the section lane to create named sections, drag edges into place, and loop a selected section while reviewing. Use the Masters library to mark sections on reference recordings.
 5. Add notes. Point notes mark a single time; range notes describe a span of the performance.
 6. Review the practice. The practice review view collects notes across all tracks and can jump directly to the referenced clip.
 7. Apply housekeeping. Rename, mark Best Takes, convert WAV to MP3, export processed audio, sync, or run fingerprint matching when ready.
