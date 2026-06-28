@@ -66,9 +66,7 @@ class AppPreferences extends ChangeNotifier {
   String? get googleDriveRootFolderId => _googleDriveRootFolderId;
   String? get googleDriveRootFolderName => _googleDriveRootFolderName;
   bool get playerPanelCollapsed => _playerPanelCollapsed;
-  bool get hasGoogleClientConfig =>
-      (_googleClientId?.trim().isNotEmpty ?? false) &&
-      (_googleClientSecret?.trim().isNotEmpty ?? false);
+  bool get hasGoogleClientConfig => _googleClientId?.trim().isNotEmpty ?? false;
   bool get hasGoogleDriveConnection =>
       _googleDriveCredentials != null && _googleDriveRootFolderId != null;
 
@@ -221,19 +219,24 @@ class AppPreferences extends ChangeNotifier {
 
   Future<void> setGoogleClientConfig({
     required String clientId,
-    required String clientSecret,
+    String? clientSecret,
   }) async {
     _googleClientId = clientId.trim();
-    _googleClientSecret = clientSecret.trim();
+    _googleClientSecret = clientSecret?.trim();
     final store = await SharedPreferences.getInstance();
-    if (_googleClientId!.isEmpty || _googleClientSecret!.isEmpty) {
+    if (_googleClientId!.isEmpty) {
       _googleClientId = null;
       _googleClientSecret = null;
       await store.remove(_googleClientIdKey);
       await store.remove(_googleClientSecretKey);
     } else {
       await store.setString(_googleClientIdKey, _googleClientId!);
-      await store.setString(_googleClientSecretKey, _googleClientSecret!);
+      if (_googleClientSecret == null || _googleClientSecret!.isEmpty) {
+        _googleClientSecret = null;
+        await store.remove(_googleClientSecretKey);
+      } else {
+        await store.setString(_googleClientSecretKey, _googleClientSecret!);
+      }
     }
     notifyListeners();
   }

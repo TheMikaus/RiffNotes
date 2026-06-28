@@ -87,6 +87,7 @@ class PracticeRepository {
 
   Future<PracticeFolder> openPractice(Directory folder) async {
     final catalogue = await _loadCatalogue(folder);
+    final seenFilenames = <String>{};
     final recordings = <Recording>[];
     var catalogueChanged = false;
     await for (final entity in folder.list()) {
@@ -94,13 +95,32 @@ class PracticeRepository {
           supportedAudioExtensions
               .contains(path.extension(entity.path).toLowerCase())) {
         final filename = path.basename(entity.path);
-        final entry = catalogue[filename] as Map<String, dynamic>?;
+        seenFilenames.add(filename);
+        final stat = await entity.stat();
+        var entry = catalogue[filename] as Map<String, dynamic>?;
+        if (entry == null) {
+          final renamedFrom = _findRenamedCatalogueEntry(
+            catalogue,
+            seenFilenames,
+            stat,
+          );
+          if (renamedFrom != null) {
+            entry = catalogue.remove(renamedFrom) as Map<String, dynamic>?;
+            catalogue[filename] = entry!;
+            catalogueChanged = true;
+          }
+        }
         final id = entry?['id'] as String? ?? _newId();
-        if (entry?['id'] == null) {
+        final updatedEntry = <String, dynamic>{
+          'id': id,
+          'title': entry?['title'],
+          'isBestTake': entry?['isBestTake'] ?? false,
+          'size': stat.size,
+          'modifiedMs': stat.modified.millisecondsSinceEpoch,
+        };
+        if (!_catalogueEntryMatches(entry, updatedEntry)) {
           catalogue[filename] = <String, dynamic>{
-            'id': id,
-            'title': entry?['title'],
-            'isBestTake': entry?['isBestTake'] ?? false,
+            ...updatedEntry,
           };
           catalogueChanged = true;
         }
@@ -111,6 +131,15 @@ class PracticeRepository {
           isBestTake: entry?['isBestTake'] as bool? ?? false,
         ));
       }
+    }
+    final staleFilenames = catalogue.keys
+        .where((filename) => !seenFilenames.contains(filename))
+        .toList(growable: false);
+    if (staleFilenames.isNotEmpty) {
+      for (final filename in staleFilenames) {
+        catalogue.remove(filename);
+      }
+      catalogueChanged = true;
     }
     recordings.sort((a, b) => a.filename.compareTo(b.filename));
     if (catalogueChanged) {
@@ -130,6 +159,7 @@ class PracticeRepository {
       'id': recording.id,
       'title': title,
       'isBestTake': isBestTake,
+      ...await _fileMetadata(recording.file),
     };
     await _writeCatalogue(practice.directory, catalogue);
 
@@ -146,6 +176,17 @@ class PracticeRepository {
     );
   }
 
+  Future<PracticeFolder> deleteRecording(
+      PracticeFolder practice, Recording recording) async {
+    if (await recording.file.exists()) {
+      await recording.file.delete();
+    }
+    final catalogue = await _loadCatalogue(practice.directory);
+    catalogue.remove(recording.filename);
+    await _writeCatalogue(practice.directory, catalogue);
+    return openPractice(practice.directory);
+  }
+
   Future<PracticeFolder> replaceRecordingFile(
     PracticeFolder practice,
     Recording recording,
@@ -159,6 +200,7 @@ class PracticeRepository {
           'id': recording.id,
           'title': recording.title,
           'isBestTake': recording.isBestTake,
+          ...await _fileMetadata(replacement),
         };
     await _writeCatalogue(practice.directory, catalogue);
     return openPractice(practice.directory);
@@ -259,6 +301,10 @@ class PracticeRepository {
               'title': proposal.recording.title,
               'isBestTake': proposal.recording.isBestTake,
             };
+        catalogue[proposal.targetFilename] = <String, dynamic>{
+          ...(catalogue[proposal.targetFilename] as Map<String, dynamic>),
+          ...await _fileMetadata(target),
+        };
       }
       await _writeCatalogue(practice.directory, catalogue);
     } catch (_) {
@@ -333,5 +379,43 @@ class PracticeRepository {
         .replaceAll(RegExp(r'_+'), '_')
         .replaceAll(RegExp(r'[. ]+$'), '');
     return sanitized.isEmpty ? 'Untitled' : sanitized;
+  }
+
+  String? _findRenamedCatalogueEntry(
+    Map<String, dynamic> catalogue,
+    Set<String> seenFilenames,
+    FileStat stat,
+  ) {
+    final matches = catalogue.entries.where((entry) {
+      if (seenFilenames.contains(entry.key)) return false;
+      final value = entry.value;
+      if (value is! Map<String, dynamic>) return false;
+      return value['size'] == stat.size &&
+          value['modifiedMs'] == stat.modified.millisecondsSinceEpoch;
+    }).toList(growable: false);
+    return matches.length == 1 ? matches.single.key : null;
+  }
+
+  bool _catalogueEntryMatches(
+    Map<String, dynamic>? current,
+    Map<String, dynamic> updated,
+  ) {
+    if (current == null) return false;
+    for (final entry in updated.entries) {
+      if (current[entry.key] != entry.value) return false;
+    }
+    return true;
+  }
+
+  Future<Map<String, dynamic>> _fileMetadata(File file) async {
+    try {
+      final stat = await file.stat();
+      return <String, dynamic>{
+        'size': stat.size,
+        'modifiedMs': stat.modified.millisecondsSinceEpoch,
+      };
+    } on FileSystemException {
+      return <String, dynamic>{};
+    }
   }
 }

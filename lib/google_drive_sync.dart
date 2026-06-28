@@ -149,17 +149,30 @@ class GoogleDriveOAuthConfig {
   static Future<GoogleDriveOAuthConfig?> loadBundled() async {
     try {
       final content = await rootBundle.loadString('assets/google_oauth.json');
-      final json = jsonDecode(content) as Map<String, dynamic>;
-      final clientId = (json['client_id'] as String? ?? '').trim();
-      final clientSecret = (json['client_secret'] as String? ?? '').trim();
-      if (clientId.isEmpty) return null;
-      return GoogleDriveOAuthConfig(
-        clientId: clientId,
-        clientSecret: clientSecret.isEmpty ? null : clientSecret,
-      );
+      return fromJsonContent(content);
     } catch (_) {
       return null;
     }
+  }
+
+  static GoogleDriveOAuthConfig? fromJsonContent(String content) {
+    final json = jsonDecode(content) as Map<String, dynamic>;
+    final section = _oauthSection(json);
+    final clientId = (section['client_id'] as String? ?? '').trim();
+    final clientSecret = (section['client_secret'] as String? ?? '').trim();
+    if (clientId.isEmpty) return null;
+    return GoogleDriveOAuthConfig(
+      clientId: clientId,
+      clientSecret: clientSecret.isEmpty ? null : clientSecret,
+    );
+  }
+
+  static Map<String, dynamic> _oauthSection(Map<String, dynamic> json) {
+    final installed = json['installed'];
+    if (installed is Map<String, dynamic>) return installed;
+    final web = json['web'];
+    if (web is Map<String, dynamic>) return web;
+    return json;
   }
 }
 
