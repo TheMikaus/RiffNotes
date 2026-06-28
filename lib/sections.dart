@@ -3,26 +3,27 @@ import 'dart:io';
 
 import 'package:path/path.dart' as path;
 
-import 'domain.dart';
-
 class SongSection {
   const SongSection({
     required this.recordingId,
     required this.startMs,
     required this.endMs,
     required this.label,
+    this.colorIndex = 0,
   });
 
   final String recordingId;
   final int startMs;
   final int endMs;
   final String label;
+  final int colorIndex;
 
   Map<String, dynamic> toJson() => <String, dynamic>{
         'recordingId': recordingId,
         'startMs': startMs,
         'endMs': endMs,
         'label': label,
+        'colorIndex': colorIndex,
       };
 
   factory SongSection.fromJson(Map<String, dynamic> json) => SongSection(
@@ -30,6 +31,7 @@ class SongSection {
         startMs: json['startMs'] as int,
         endMs: json['endMs'] as int,
         label: json['label'] as String,
+        colorIndex: json['colorIndex'] as int? ?? 0,
       );
 }
 
@@ -57,6 +59,11 @@ class SongSectionRepository {
     final sections = await load(practiceFolder, section.recordingId)
       ..add(section);
     await _write(practiceFolder, section.recordingId, sections);
+  }
+
+  Future<void> saveAll(String practiceFolder, String recordingId,
+      List<SongSection> sections) async {
+    await _write(practiceFolder, recordingId, sections);
   }
 
   Future<void> replace(

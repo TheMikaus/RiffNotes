@@ -88,6 +88,56 @@ void main() {
     expect(renamed.recordings[0].title, 'My Song');
   });
 
+  test('removes deleted audio files from the practice catalogue', () async {
+    final folder = await Directory.systemTemp.createTemp('riffnotes-stale-');
+    addTearDown(() => folder.delete(recursive: true));
+    final first = File('${folder.path}${Platform.pathSeparator}first.wav');
+    final second = File('${folder.path}${Platform.pathSeparator}second.mp3');
+    await first.writeAsBytes([1]);
+    await second.writeAsBytes([2]);
+    final repository = PracticeRepository();
+    var practice = await repository.openPractice(folder);
+    expect(practice.recordings, hasLength(2));
+
+    await second.delete();
+    practice = await repository.openPractice(folder);
+
+    expect(practice.recordings, hasLength(1));
+    expect(practice.recordings.single.filename, 'first.wav');
+    final catalogue = await File(
+            '${folder.path}${Platform.pathSeparator}library.riffnotes.json')
+        .readAsString();
+    expect(catalogue, contains('first.wav'));
+    expect(catalogue, isNot(contains('second.mp3')));
+  });
+
+  test('keeps recording metadata when an audio file is renamed outside the app',
+      () async {
+    final folder =
+        await Directory.systemTemp.createTemp('riffnotes-external-rename-');
+    addTearDown(() => folder.delete(recursive: true));
+    final original = File('${folder.path}${Platform.pathSeparator}rough.wav');
+    await original.writeAsBytes([1, 2, 3, 4]);
+    final repository = PracticeRepository();
+    var practice = await repository.openPractice(folder);
+    practice = await repository.updateRecording(
+      practice,
+      practice.recordings.single,
+      title: 'Renamed Song',
+      isBestTake: true,
+    );
+    final originalId = practice.recordings.single.id;
+
+    await original.rename('${folder.path}${Platform.pathSeparator}clean.wav');
+    final refreshed = await repository.openPractice(folder);
+
+    expect(refreshed.recordings, hasLength(1));
+    expect(refreshed.recordings.single.filename, 'clean.wav');
+    expect(refreshed.recordings.single.id, originalId);
+    expect(refreshed.recordings.single.title, 'Renamed Song');
+    expect(refreshed.recordings.single.isBestTake, isTrue);
+  });
+
   test('stores point and range annotations in a user file', () async {
     final folder = await Directory.systemTemp.createTemp('riffnotes-notes-');
     addTearDown(() => folder.delete(recursive: true));

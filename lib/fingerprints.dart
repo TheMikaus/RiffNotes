@@ -10,11 +10,13 @@ import 'sections.dart';
 class FingerprintRepository {
   static const _cacheFolder = '.riffnotes-cache';
   static const _cacheVersion = 1;
+  static const _minimumSuggestionConfidence = .35;
 
   Future<List<FingerprintMatch>> matchPractice({
     required PracticeFolder practice,
     required Directory mastersFolder,
     int maxResultsPerRecording = 3,
+    Set<String> skipRecordingIds = const <String>{},
   }) async {
     final masters = await PracticeRepository().openPractice(mastersFolder);
     final masterTargets = <_MasterTarget>[];
@@ -43,6 +45,9 @@ class FingerprintRepository {
 
     final matches = <FingerprintMatch>[];
     for (final recording in practice.recordings) {
+      if (skipRecordingIds.contains(recording.id)) {
+        continue;
+      }
       final fingerprint =
           await loadOrGenerateFingerprint(practice.directory, recording);
       final ranked = masterTargets
@@ -55,12 +60,73 @@ class FingerprintRepository {
                 sectionLabel: target.section?.label,
                 confidence: _similarity(fingerprint, target.fingerprint),
               ))
-          .where((match) => match.confidence >= .55)
+          .where((match) => match.confidence >= _minimumSuggestionConfidence)
           .toList()
         ..sort((a, b) => b.confidence.compareTo(a.confidence));
       matches.addAll(ranked.take(maxResultsPerRecording));
     }
     return matches;
+  }
+
+  Future<List<SongSection>> alignSectionsToRecording({
+    required Directory practiceFolder,
+    required Recording recording,
+    required Directory mastersFolder,
+    required Recording masterRecording,
+    required List<SongSection> masterSections,
+    double minimumSectionConfidence = .48,
+  }) async {
+    if (masterSections.isEmpty) return const <SongSection>[];
+    final recordingFingerprint =
+        await loadOrGenerateFingerprint(practiceFolder, recording);
+    final masterFingerprint =
+        await loadOrGenerateFingerprint(mastersFolder, masterRecording);
+    if (recordingFingerprint.values.length < 8 ||
+        masterFingerprint.values.length < 8) {
+      return const <SongSection>[];
+    }
+    final candidates = <_AlignedSectionCandidate>[];
+    for (final section in masterSections) {
+      final sectionFingerprint = _sliceFingerprint(masterFingerprint, section);
+      if (sectionFingerprint.values.length < 8) continue;
+      final offset =
+          _bestSectionOffset(recordingFingerprint.values, sectionFingerprint.values);
+      if (offset == null) continue;
+      final similarity =
+          _windowSimilarity(sectionFingerprint.values, recordingFingerprint.values, offset);
+      if (similarity < minimumSectionConfidence) continue;
+      final startRatio = offset / recordingFingerprint.values.length;
+      final endRatio =
+          (offset + sectionFingerprint.values.length) / recordingFingerprint.values.length;
+      final startMs =
+          (startRatio * recordingFingerprint.durationMs).round().clamp(0, recordingFingerprint.durationMs);
+      final endMs =
+          (endRatio * recordingFingerprint.durationMs).round().clamp(startMs + 1, recordingFingerprint.durationMs);
+      if (endMs - startMs < 250) continue;
+      candidates.add(_AlignedSectionCandidate(
+        section: SongSection(
+          recordingId: recording.id,
+          startMs: startMs,
+          endMs: endMs,
+          label: section.label,
+          colorIndex: section.colorIndex,
+        ),
+        confidence: similarity,
+      ));
+    }
+    if (candidates.isEmpty) return const <SongSection>[];
+    candidates.sort((a, b) => b.confidence.compareTo(a.confidence));
+    final accepted = <SongSection>[];
+    for (final candidate in candidates) {
+      final overlapsExisting = accepted.any((existing) =>
+          candidate.section.startMs < existing.endMs &&
+          candidate.section.endMs > existing.startMs);
+      if (!overlapsExisting) {
+        accepted.add(candidate.section);
+      }
+    }
+    accepted.sort((a, b) => a.startMs.compareTo(b.startMs));
+    return accepted;
   }
 
   Future<AudioFingerprint> loadOrGenerateFingerprint(
@@ -224,6 +290,60 @@ class FingerprintRepository {
     final averageDifference = difference / left.length;
     return (1 - averageDifference).clamp(0, 1);
   }
+
+  int? _bestSectionOffset(List<double> timeline, List<double> section) {
+    if (timeline.length < section.length || section.length < 4) return null;
+    var bestOffset = 0;
+    var bestScore = -1.0;
+    final maxOffset = timeline.length - section.length;
+    final step = max(1, section.length ~/ 20);
+    for (var offset = 0; offset <= maxOffset; offset += step) {
+      final score = _windowSimilarity(section, timeline, offset);
+      if (score > bestScore) {
+        bestScore = score;
+        bestOffset = offset;
+      }
+    }
+    if (bestOffset != maxOffset) {
+      final score = _windowSimilarity(section, timeline, maxOffset);
+      if (score > bestScore) {
+        bestOffset = maxOffset;
+      }
+    }
+    return bestOffset;
+  }
+}
+
+class FingerprintSuggestionRepository {
+  static const _filename = '.riffnotes.fingerprint-suggestions.json';
+
+  Future<List<FingerprintMatch>> load(String practiceFolder) async {
+    final file = File(path.join(practiceFolder, _filename));
+    if (!await file.exists()) return const <FingerprintMatch>[];
+    try {
+      final decoded = jsonDecode(await file.readAsString()) as Map<String, dynamic>;
+      return (decoded['matches'] as List<dynamic>? ?? const <dynamic>[])
+          .cast<Map<String, dynamic>>()
+          .map(FingerprintMatch.fromJson)
+          .toList(growable: false);
+    } on FormatException {
+      return const <FingerprintMatch>[];
+    } on TypeError {
+      return const <FingerprintMatch>[];
+    }
+  }
+
+  Future<void> save(String practiceFolder, List<FingerprintMatch> matches) async {
+    final file = File(path.join(practiceFolder, _filename));
+    const encoder = JsonEncoder.withIndent('  ');
+    await file.writeAsString(
+      encoder.convert(<String, dynamic>{
+        'version': 1,
+        'matches': matches.map((item) => item.toJson()).toList(),
+      }),
+      flush: true,
+    );
+  }
 }
 
 class FingerprintDecisionRepository {
@@ -364,6 +484,27 @@ class FingerprintMatch {
   final String? sectionLabel;
   final double confidence;
 
+  Map<String, dynamic> toJson() => <String, dynamic>{
+        'recordingId': recordingId,
+        'recordingFilename': recordingFilename,
+        'masterRecordingId': masterRecordingId,
+        'masterFilename': masterFilename,
+        'masterTitle': masterTitle,
+        'sectionLabel': sectionLabel,
+        'confidence': confidence,
+      };
+
+  factory FingerprintMatch.fromJson(Map<String, dynamic> json) =>
+      FingerprintMatch(
+        recordingId: json['recordingId'] as String,
+        recordingFilename: json['recordingFilename'] as String,
+        masterRecordingId: json['masterRecordingId'] as String,
+        masterFilename: json['masterFilename'] as String,
+        masterTitle: json['masterTitle'] as String?,
+        sectionLabel: json['sectionLabel'] as String?,
+        confidence: (json['confidence'] as num).toDouble(),
+      );
+
   String get key =>
       '$recordingId|$masterRecordingId|${sectionLabel ?? ''}|$masterFilename';
 
@@ -383,4 +524,11 @@ class _MasterTarget {
   final Recording recording;
   final SongSection? section;
   final AudioFingerprint fingerprint;
+}
+
+class _AlignedSectionCandidate {
+  const _AlignedSectionCandidate({required this.section, required this.confidence});
+
+  final SongSection section;
+  final double confidence;
 }

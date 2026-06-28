@@ -6,10 +6,12 @@ import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:media_kit/media_kit.dart';
+import 'package:package_info_plus/package_info_plus.dart';
 import 'package:path/path.dart' as path;
 
 import 'activity.dart';
 import 'annotations.dart';
+import 'app_log.dart';
 import 'audio_processing.dart';
 import 'app_preferences.dart';
 import 'audio_controller.dart';
@@ -59,12 +61,16 @@ class _LibraryScreenState extends State<LibraryScreen> {
   final _syncRepository = PracticeSyncRepository();
   final _googleDriveSync = GoogleDriveSyncRepository();
   final _activity = ActivityQueue();
+  final _log = AppLog();
   final _audioProcessing = AudioProcessingRepository();
   final _fingerprints = FingerprintRepository();
   final _fingerprintDecisions = FingerprintDecisionRepository();
+  final _fingerprintSuggestions = FingerprintSuggestionRepository();
   late final AudioController _audio;
   late final WaveformController _waveform;
   late final AppPreferences _preferences;
+  StreamSubscription<FileSystemEvent>? _selectedFolderWatcher;
+  Timer? _selectedFolderRefreshTimer;
   List<PracticeFolder> _practices = const [];
   PracticeFolder? _mastersPractice;
   PracticeFolder? _selected;
@@ -73,11 +79,13 @@ class _LibraryScreenState extends State<LibraryScreen> {
   List<PracticeAnnotation> _notes = const [];
   List<UserAnnotation> _reviewNotes = const [];
   List<SongSection> _sections = const [];
+  final List<List<SongSection>> _sectionUndoStack = <List<SongSection>>[];
   List<FingerprintMatch> _fingerprintMatches = const [];
   FingerprintDecisions _fingerprintDecisionState = const FingerprintDecisions();
   GoogleDriveOAuthConfig? _bundledGoogleOAuthConfig;
   GoogleDriveConnection? _googleDriveConnection;
   StreamSubscription? _googleDriveCredentialSubscription;
+  PackageInfo? _packageInfo;
   String? _bandFolder;
   double _volumeBoostDb = 0;
   PlaybackChannelMode _channelMode = PlaybackChannelMode.stereo;
@@ -91,7 +99,10 @@ class _LibraryScreenState extends State<LibraryScreen> {
   _ReviewSort _reviewSort = _ReviewSort.trackTime;
   bool _playerPanelCollapsed = false;
   bool _applyingAudioOutput = false;
+  bool _refreshingSelectedFolder = false;
   String? _appliedAudioOutputDevice;
+  DateTime? _lastSectionResizeLogAt;
+  bool _sectionResizeGestureActive = false;
 
   @override
   void initState() {
@@ -107,9 +118,12 @@ class _LibraryScreenState extends State<LibraryScreen> {
   void dispose() {
     _audio.removeListener(_applyPreferredAudioOutputIfPossible);
     unawaited(_googleDriveCredentialSubscription?.cancel());
+    unawaited(_selectedFolderWatcher?.cancel());
+    _selectedFolderRefreshTimer?.cancel();
     _googleDriveConnection?.close();
     _audio.dispose();
     _waveform.dispose();
+    _log.dispose();
     super.dispose();
   }
 
@@ -277,6 +291,42 @@ class _LibraryScreenState extends State<LibraryScreen> {
     clientSecretController.dispose();
   }
 
+  Future<void> _importGoogleOAuthJson() async {
+    final selection = await FilePicker.platform.pickFiles(
+      dialogTitle: 'Choose Google OAuth JSON',
+      type: FileType.custom,
+      allowedExtensions: const ['json'],
+      withData: false,
+    );
+    final filePath = selection?.files.single.path;
+    if (filePath == null) return;
+    try {
+      final config = GoogleDriveOAuthConfig.fromJsonContent(
+          await File(filePath).readAsString());
+      if (config == null || !config.isConfigured) {
+        throw const FormatException('No client_id was found in the JSON file.');
+      }
+      await _preferences.setGoogleClientConfig(
+        clientId: config.clientId,
+        clientSecret: config.clientSecret,
+      );
+      await _disconnectGoogleDrive();
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+            content: Text('Google OAuth JSON imported. Connect when ready.')));
+      }
+    } on FormatException catch (error) {
+      if (mounted) {
+        _showCopyableError(
+            'Could not import Google OAuth JSON: ${error.message}');
+      }
+    } catch (error) {
+      if (mounted) {
+        _showCopyableError('Could not import Google OAuth JSON: $error');
+      }
+    }
+  }
+
   Future<void> _connectGoogleDrive() async {
     try {
       await _requireGoogleDriveConnection();
@@ -339,7 +389,10 @@ class _LibraryScreenState extends State<LibraryScreen> {
 
   Future<void> _restorePreferences() async {
     await _preferences.load();
-    _bundledGoogleOAuthConfig = await GoogleDriveOAuthConfig.loadBundled();
+    final bundledGoogleOAuthConfig = await GoogleDriveOAuthConfig.loadBundled();
+    final packageInfo = await PackageInfo.fromPlatform();
+    _bundledGoogleOAuthConfig = bundledGoogleOAuthConfig;
+    _packageInfo = packageInfo;
     if (mounted) {
       setState(() => _playerPanelCollapsed = _preferences.playerPanelCollapsed);
     }
@@ -377,9 +430,12 @@ class _LibraryScreenState extends State<LibraryScreen> {
                 .firstOrNull ??
             (practices.isEmpty ? null : practices.first);
         _selectedRecording = null;
+        _sections = const [];
+        _sectionUndoStack.clear();
         _rangeStartMs = null;
         _rangeRecordingId = null;
       });
+      _watchSelectedFolder(_selected);
       _waveform.clear();
       if (_selected != null) await _refreshPracticeReview(_selected!);
       if (_selected != null) await _refreshFingerprintDecisions(_selected!);
@@ -403,28 +459,32 @@ class _LibraryScreenState extends State<LibraryScreen> {
   }
 
   Future<void> _selectPractice(PracticeFolder practice) async {
+    final refreshed = await _repository.openPractice(practice.directory);
     setState(() {
-      _selected = practice;
       _selectedIsMasters = false;
+      _replaceSelectedPractice(refreshed);
       _selectedRecording = null;
+      _sections = const [];
+      _sectionUndoStack.clear();
       _rangeStartMs = null;
       _rangeRecordingId = null;
       _sectionStartMs = null;
       _sectionRecordingId = null;
       _reviewRecordingFilter = null;
     });
+    _watchSelectedFolder(refreshed);
     _waveform.clear();
-    await _refreshPracticeReview(practice);
-    await _refreshFingerprintDecisions(practice);
-    await _preferences.rememberPractice(practice.name);
-    final remembered = practice.recordings
+    await _refreshPracticeReview(refreshed);
+    await _refreshFingerprintDecisions(refreshed);
+    await _preferences.rememberPractice(refreshed.name);
+    final remembered = refreshed.recordings
         .where((item) =>
-            item.id == _preferences.lastRecordingForPractice(practice.name))
+            item.id == _preferences.lastRecordingForPractice(refreshed.name))
         .firstOrNull;
     if (remembered != null) {
       await _selectRecording(remembered);
-    } else if (practice.recordings.isNotEmpty) {
-      await _selectRecording(practice.recordings.first,
+    } else if (refreshed.recordings.isNotEmpty) {
+      await _selectRecording(refreshed.recordings.first,
           autoPlay: _preferences.autoPlayOnPracticeSelection);
     }
   }
@@ -454,6 +514,8 @@ class _LibraryScreenState extends State<LibraryScreen> {
       _selected = masters;
       _selectedIsMasters = true;
       _selectedRecording = null;
+      _sections = const [];
+      _sectionUndoStack.clear();
       _rangeStartMs = null;
       _rangeRecordingId = null;
       _sectionStartMs = null;
@@ -464,6 +526,7 @@ class _LibraryScreenState extends State<LibraryScreen> {
       _fingerprintDecisionState = const FingerprintDecisions();
       _reviewNotes = const [];
     });
+    _watchSelectedFolder(masters);
     _waveform.clear();
     if (masters.recordings.isNotEmpty) {
       await _selectRecording(masters.recordings.first,
@@ -477,6 +540,7 @@ class _LibraryScreenState extends State<LibraryScreen> {
     final rememberedChannelMode = _preferences.channelModeFor(recording.id);
     setState(() {
       _selectedRecording = recording;
+      _sectionUndoStack.clear();
       _volumeBoostDb = rememberedBoost;
       _channelMode = rememberedChannelMode;
     });
@@ -504,9 +568,11 @@ class _LibraryScreenState extends State<LibraryScreen> {
     }
     await _audio.load(recording,
         autoPlay: autoPlay, playbackFile: playbackFile);
-    if (_selected != null)
+    if (_selected != null) {
       await _preferences.rememberSelection(_selected!.name, recording.id);
+    }
     await _refreshNotes(recording);
+    await _refreshSections(recording);
   }
 
   void _replaceSelectedPractice(PracticeFolder updatedPractice) {
@@ -520,6 +586,101 @@ class _LibraryScreenState extends State<LibraryScreen> {
               : item)
           .toList(growable: false);
     }
+  }
+
+  void _watchSelectedFolder(PracticeFolder? practice) {
+    unawaited(_selectedFolderWatcher?.cancel());
+    _selectedFolderWatcher = null;
+    _selectedFolderRefreshTimer?.cancel();
+    _selectedFolderRefreshTimer = null;
+    if (practice == null) return;
+    try {
+      _selectedFolderWatcher = practice.directory.watch().listen((event) {
+        if (!_isAudioFilePath(event.path)) return;
+        _scheduleSelectedFolderRefresh();
+      }, onError: (_) {});
+    } on FileSystemException {
+      // Some folders cannot be watched. They still refresh when selected/opened.
+    }
+  }
+
+  bool _isAudioFilePath(String filePath) =>
+      supportedAudioExtensions.contains(path.extension(filePath).toLowerCase());
+
+  void _scheduleSelectedFolderRefresh() {
+    _selectedFolderRefreshTimer?.cancel();
+    _selectedFolderRefreshTimer = Timer(
+        const Duration(milliseconds: 700), _refreshSelectedFolderFromDisk);
+  }
+
+  Future<void> _refreshSelectedFolderFromDisk() async {
+    if (_refreshingSelectedFolder) {
+      _scheduleSelectedFolderRefresh();
+      return;
+    }
+    final current = _selected;
+    if (current == null) return;
+    _refreshingSelectedFolder = true;
+    final selectedPath = current.directory.path;
+    final previousRecording = _selectedRecording;
+    try {
+      final refreshed = await _repository.openPractice(current.directory);
+      if (!mounted || _selected?.directory.path != selectedPath) return;
+      final nextRecording = _bestRefreshedRecording(
+        refreshed,
+        previousRecording,
+      );
+      setState(() {
+        _replaceSelectedPractice(refreshed);
+        _selectedRecording = nextRecording;
+        if (nextRecording == null) {
+          _notes = const [];
+          _sections = const [];
+          _sectionUndoStack.clear();
+          _rangeStartMs = null;
+          _rangeRecordingId = null;
+          _sectionStartMs = null;
+          _sectionRecordingId = null;
+        }
+      });
+      if (nextRecording == null) {
+        await _audio.stop();
+        _waveform.clear();
+        if (!_selectedIsMasters) {
+          await _refreshPracticeReview(refreshed);
+          await _refreshFingerprintDecisions(refreshed);
+        }
+        return;
+      }
+      if (previousRecording?.id != nextRecording.id ||
+          previousRecording?.filename != nextRecording.filename) {
+        await _selectRecording(nextRecording);
+      } else {
+        await _refreshNotes(nextRecording);
+        await _refreshSections(nextRecording);
+      }
+      if (!_selectedIsMasters) {
+        await _refreshPracticeReview(refreshed);
+        await _refreshFingerprintDecisions(refreshed);
+      }
+    } finally {
+      _refreshingSelectedFolder = false;
+    }
+  }
+
+  Recording? _bestRefreshedRecording(
+    PracticeFolder refreshed,
+    Recording? previous,
+  ) {
+    if (refreshed.recordings.isEmpty) return null;
+    if (previous == null) return refreshed.recordings.first;
+    return refreshed.recordings
+            .where((item) => item.id == previous.id)
+            .firstOrNull ??
+        refreshed.recordings
+            .where((item) => item.filename == previous.filename)
+            .firstOrNull ??
+        refreshed.recordings.first;
   }
 
   Future<void> _setVolumeBoost(double decibels) async {
@@ -630,12 +791,13 @@ class _LibraryScreenState extends State<LibraryScreen> {
 
   String _googleDriveStatusLabel() {
     if (!_hasGoogleOAuthConfig) {
-      return 'This build does not include Google Drive sign-in yet.';
+      return 'No OAuth JSON imported yet.';
     }
     if (_preferences.googleDriveCredentials == null) {
-      return _bundledGoogleOAuthConfig?.isConfigured == true
-          ? 'Ready to connect with the bundled RiffNotes OAuth client.'
-          : 'Developer OAuth override saved. Not connected yet.';
+      if (_preferences.hasGoogleClientConfig) {
+        return 'OAuth JSON imported. Not connected yet.';
+      }
+      return 'Ready to connect with the bundled RiffNotes OAuth client.';
     }
     return 'Connected. Direct Drive upload/download is the next slice.';
   }
@@ -649,6 +811,12 @@ class _LibraryScreenState extends State<LibraryScreen> {
     final id = _preferences.googleDriveRootFolderId;
     if (name == null || id == null) return 'No Drive folder selected.';
     return '$name ($id)';
+  }
+
+  String _appVersionLabel() {
+    final info = _packageInfo;
+    if (info == null) return 'Version loading…';
+    return 'Version ${info.version}+${info.buildNumber}';
   }
 
   Future<void> _refreshNotes(Recording recording) async {
@@ -671,8 +839,17 @@ class _LibraryScreenState extends State<LibraryScreen> {
 
   Future<void> _refreshFingerprintDecisions(PracticeFolder practice) async {
     final decisions = await _fingerprintDecisions.load(practice.directory.path);
+    final suggestions = await _fingerprintSuggestions.load(practice.directory.path);
+    final visibleMatches = suggestions
+        .where((match) => !decisions.ignoredKeys.contains(match.key))
+        .where((match) =>
+            decisions.accepted.every((item) => item.recordingId != match.recordingId))
+        .toList(growable: false);
     if (mounted && _selected?.directory.path == practice.directory.path) {
-      setState(() => _fingerprintDecisionState = decisions);
+      setState(() {
+        _fingerprintDecisionState = decisions;
+        _fingerprintMatches = visibleMatches;
+      });
     }
   }
 
@@ -682,17 +859,41 @@ class _LibraryScreenState extends State<LibraryScreen> {
     final syncFolder = await _requireSyncFolder();
     if (syncFolder == null) return;
     try {
+      final candidates = await _syncRepository.listUploadCandidates(
+        practiceFolder: practice.directory,
+        syncRoot: syncFolder,
+      );
+      if (!mounted) return;
+      if (candidates.isEmpty) {
+        ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(content: Text('No uploadable files were found.')));
+        return;
+      }
+      final decision = await _confirmUploadSelection(practice, candidates);
+      if (decision == null) return;
+      if (decision.files.isEmpty) {
+        ScaffoldMessenger.of(context)
+            .showSnackBar(const SnackBar(content: Text('Nothing selected.')));
+        return;
+      }
       final result = await _activity.run('Uploading practice', (update) async {
-        update(null, 'Copying ${practice.name} to sync folder…');
-        final copied = await _syncRepository.uploadPractice(
-            practiceFolder: practice.directory, syncRoot: syncFolder);
+        update(null,
+            'Copying ${decision.files.length} files from ${practice.name} to sync folder…');
+        final copied = await _syncRepository.uploadPracticeSelection(
+          practiceFolder: practice.directory,
+          syncRoot: syncFolder,
+          relativePaths:
+              decision.files.map((item) => item.relativePath).toSet(),
+          changedOnly: decision.changedOnly,
+          deleteMissingFiles: decision.deleteMissingFiles,
+        );
         update(1, 'Upload complete');
         return copied;
       });
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(SnackBar(
             content: Text(
-                'Uploaded ${result.copiedFiles} files for ${practice.name}.')));
+                _syncSummary(verb: 'Uploaded', result: result, practiceName: practice.name))));
       }
     } on FileSystemException catch (error) {
       if (mounted) {
@@ -707,34 +908,179 @@ class _LibraryScreenState extends State<LibraryScreen> {
     }
   }
 
+  Future<({List<SyncFileCandidate> files, bool changedOnly, bool deleteMissingFiles})?>
+      _confirmUploadSelection(
+      PracticeFolder practice, List<SyncFileCandidate> candidates) async {
+    final selectedPaths = candidates.map((item) => item.relativePath).toSet();
+    var changedOnly = true;
+    var deleteMissingFiles = false;
+    return showDialog<
+        ({List<SyncFileCandidate> files, bool changedOnly, bool deleteMissingFiles})>(
+      context: context,
+      builder: (context) => StatefulBuilder(
+        builder: (context, setDialogState) {
+          final allSelected = selectedPaths.length == candidates.length;
+          final changedCount =
+              candidates.where((item) => item.isLikelyChanged).length;
+          return AlertDialog(
+            title: Text('Upload ${practice.name}'),
+            content: SizedBox(
+              width: 860,
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                      'Select files to upload to the sync folder. All files start selected.'),
+                  const SizedBox(height: 8),
+                    CheckboxListTile(
+                    dense: true,
+                    contentPadding: EdgeInsets.zero,
+                    value: changedOnly,
+                    onChanged: (value) =>
+                      setDialogState(() => changedOnly = value ?? true),
+                    title: const Text('Only copy changed files'),
+                    subtitle:
+                      Text('Estimated changed files: $changedCount/${candidates.length}'),
+                    ),
+                    CheckboxListTile(
+                    dense: true,
+                    contentPadding: EdgeInsets.zero,
+                    value: deleteMissingFiles,
+                    onChanged: (value) => setDialogState(
+                      () => deleteMissingFiles = value ?? false),
+                    title: const Text('Delete files in sync folder that are missing locally'),
+                    subtitle: const Text(
+                      'Use carefully. With partial selection, unselected files can be deleted.'),
+                    ),
+                    const SizedBox(height: 4),
+                  Wrap(
+                    spacing: 8,
+                    children: [
+                      TextButton(
+                        onPressed: allSelected
+                            ? null
+                            : () => setDialogState(() {
+                                  selectedPaths
+                                    ..clear()
+                                    ..addAll(candidates
+                                        .map((item) => item.relativePath));
+                                }),
+                        child: const Text('Select all'),
+                      ),
+                      TextButton(
+                        onPressed: selectedPaths.isEmpty
+                            ? null
+                            : () => setDialogState(selectedPaths.clear),
+                        child: const Text('Clear all'),
+                      ),
+                      Text('${selectedPaths.length}/${candidates.length} selected'),
+                    ],
+                  ),
+                  const SizedBox(height: 8),
+                  Flexible(
+                    child: ListView.builder(
+                      shrinkWrap: true,
+                      itemCount: candidates.length,
+                      itemBuilder: (context, index) {
+                        final candidate = candidates[index];
+                        final isSelected =
+                            selectedPaths.contains(candidate.relativePath);
+                        return CheckboxListTile(
+                          dense: true,
+                          value: isSelected,
+                          controlAffinity: ListTileControlAffinity.leading,
+                          onChanged: (value) {
+                            setDialogState(() {
+                              if (value == true) {
+                                selectedPaths.add(candidate.relativePath);
+                              } else {
+                                selectedPaths.remove(candidate.relativePath);
+                              }
+                            });
+                          },
+                          title: Text(candidate.relativePath),
+                          subtitle: Text(
+                              '${_formatBytes(candidate.sizeBytes)}${candidate.existsInSync ? ' • exists in sync folder' : ''}${candidate.existsInSync && !candidate.isLikelyChanged ? ' • unchanged' : ''}'),
+                        );
+                      },
+                    ),
+                  ),
+                ],
+              ),
+            ),
+            actions: [
+              TextButton(
+                  onPressed: () => Navigator.pop(context),
+                  child: const Text('Cancel')),
+              FilledButton(
+                onPressed: selectedPaths.isEmpty
+                    ? null
+                    : () {
+                        final selection = candidates
+                            .where((item) =>
+                                selectedPaths.contains(item.relativePath))
+                            .toList(growable: false);
+                      Navigator.pop(
+                          context,
+                          (
+                            files: selection,
+                            changedOnly: changedOnly,
+                            deleteMissingFiles: deleteMissingFiles,
+                          ));
+                      },
+                child: Text('Upload ${selectedPaths.length} files'),
+              ),
+            ],
+          );
+        },
+      ),
+    );
+  }
+
+  String _formatBytes(int bytes) {
+    if (bytes < 1024) return '$bytes B';
+    final kb = bytes / 1024;
+    if (kb < 1024) return '${kb.toStringAsFixed(1)} KB';
+    final mb = kb / 1024;
+    if (mb < 1024) return '${mb.toStringAsFixed(1)} MB';
+    final gb = mb / 1024;
+    return '${gb.toStringAsFixed(1)} GB';
+  }
+
+  String _syncSummary({
+    required String verb,
+    required SyncResult result,
+    required String practiceName,
+  }) {
+    final details = <String>[];
+    if (result.skippedItems > 0) {
+      details.add('${result.skippedItems} skipped');
+    }
+    if (result.deletedFiles > 0) {
+      details.add('${result.deletedFiles} deleted');
+    }
+    final suffix = details.isEmpty ? '' : ' (${details.join(', ')})';
+    return '$verb ${result.copiedFiles} files for $practiceName$suffix.';
+  }
+
   Future<void> _downloadSelectedPractice() async {
     final practice = _selected;
     if (practice == null) return;
     final syncFolder = await _requireSyncFolder();
     if (syncFolder == null) return;
-    final confirmed = await showDialog<bool>(
-      context: context,
-      builder: (context) => AlertDialog(
-        title: Text('Download ${practice.name}?'),
-        content: const Text(
-            'This copies files from the sync folder into the local practice folder. Existing files with the same names may be overwritten.'),
-        actions: [
-          TextButton(
-              onPressed: () => Navigator.pop(context, false),
-              child: const Text('Cancel')),
-          FilledButton(
-              onPressed: () => Navigator.pop(context, true),
-              child: const Text('Download')),
-        ],
-      ),
-    );
-    if (confirmed != true) return;
+    final options = await _confirmDownloadSyncOptions(practice);
+    if (options == null) return;
     try {
       final updatedPractice =
           await _activity.run('Downloading practice', (update) async {
         update(null, 'Copying ${practice.name} from sync folder…');
         final result = await _syncRepository.downloadPractice(
-            localPracticeFolder: practice.directory, syncRoot: syncFolder);
+          localPracticeFolder: practice.directory,
+          syncRoot: syncFolder,
+          changedOnly: options.changedOnly,
+          deleteMissingFiles: options.deleteMissingFiles,
+        );
         update(.85, 'Refreshing local practice…');
         final refreshed = await _repository.openPractice(practice.directory);
         update(1, 'Download complete');
@@ -761,7 +1107,7 @@ class _LibraryScreenState extends State<LibraryScreen> {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(SnackBar(
             content: Text(
-                'Downloaded ${result.copiedFiles} files for ${practice.name}.')));
+                _syncSummary(verb: 'Downloaded', result: result, practiceName: practice.name))));
       }
     } on FileSystemException catch (error) {
       if (mounted) {
@@ -774,6 +1120,58 @@ class _LibraryScreenState extends State<LibraryScreen> {
             .showSnackBar(SnackBar(content: Text(error.message)));
       }
     }
+  }
+
+  Future<({bool changedOnly, bool deleteMissingFiles})?>
+      _confirmDownloadSyncOptions(PracticeFolder practice) async {
+    var changedOnly = true;
+    var deleteMissingFiles = false;
+    return showDialog<({bool changedOnly, bool deleteMissingFiles})>(
+      context: context,
+      builder: (context) => StatefulBuilder(
+        builder: (context, setDialogState) => AlertDialog(
+          title: Text('Download ${practice.name}?'),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              const Text(
+                  'This copies files from the sync folder into the local practice folder.'),
+              const SizedBox(height: 8),
+              CheckboxListTile(
+                dense: true,
+                contentPadding: EdgeInsets.zero,
+                value: changedOnly,
+                onChanged: (value) =>
+                    setDialogState(() => changedOnly = value ?? true),
+                title: const Text('Only copy changed files'),
+              ),
+              CheckboxListTile(
+                dense: true,
+                contentPadding: EdgeInsets.zero,
+                value: deleteMissingFiles,
+                onChanged: (value) => setDialogState(
+                    () => deleteMissingFiles = value ?? false),
+                title: const Text('Delete local files missing from sync folder'),
+              ),
+            ],
+          ),
+          actions: [
+            TextButton(
+                onPressed: () => Navigator.pop(context),
+                child: const Text('Cancel')),
+            FilledButton(
+                onPressed: () => Navigator.pop(
+                    context,
+                    (
+                      changedOnly: changedOnly,
+                      deleteMissingFiles: deleteMissingFiles,
+                    )),
+                child: const Text('Download')),
+          ],
+        ),
+      ),
+    );
   }
 
   Future<void> _clearSelectedPracticeCache() async {
@@ -824,9 +1222,13 @@ class _LibraryScreenState extends State<LibraryScreen> {
       final matches =
           await _activity.run('Matching fingerprints', (update) async {
         update(null, 'Fingerprinting masters and ${practice.name}…');
+        final decisions =
+            await _fingerprintDecisions.load(practice.directory.path);
         final result = await _fingerprints.matchPractice(
           practice: practice,
           mastersFolder: mastersFolder,
+          skipRecordingIds:
+              decisions.accepted.map((item) => item.recordingId).toSet(),
         );
         update(1, 'Fingerprint matching complete');
         return result;
@@ -841,6 +1243,7 @@ class _LibraryScreenState extends State<LibraryScreen> {
         _fingerprintMatches = visibleMatches;
         _fingerprintDecisionState = decisions;
       });
+      await _fingerprintSuggestions.save(practice.directory.path, visibleMatches);
       ScaffoldMessenger.of(context).showSnackBar(SnackBar(
           content: Text(visibleMatches.isEmpty
               ? 'No confident fingerprint matches found.'
@@ -861,6 +1264,7 @@ class _LibraryScreenState extends State<LibraryScreen> {
   Future<void> _reviewFingerprintMatches() async {
     final practice = _selected;
     if (practice == null) return;
+    const uncertainConfidence = .72;
     await showDialog<void>(
       context: context,
       builder: (context) => StatefulBuilder(
@@ -886,34 +1290,64 @@ class _LibraryScreenState extends State<LibraryScreen> {
                         final recording = practice.recordings
                             .where((item) => item.id == match.recordingId)
                             .firstOrNull;
+                        Future<void> handleMatchAction(String action) async {
+                          switch (action) {
+                            case 'accept':
+                              if (recording != null) {
+                                await _acceptFingerprintMatch(recording, match);
+                              }
+                            case 'dontknow':
+                              await _ignoreFingerprintMatch(match);
+                          }
+                          setDialogState(() {});
+                        }
                         return Card(
-                          child: ListTile(
-                            leading: const Icon(Icons.fingerprint),
-                            title: Text(
-                                '${match.recordingFilename} → ${match.displayName}'),
-                            subtitle: Text(
-                                'Confidence ${(match.confidence * 100).round()}%${recording?.title == null ? '' : ' • current title: ${recording!.title}'}'),
-                            trailing: Wrap(
-                              spacing: 8,
-                              children: [
-                                TextButton(
-                                  onPressed: () async {
-                                    await _ignoreFingerprintMatch(match);
-                                    setDialogState(() {});
-                                  },
-                                  child: const Text('Ignore'),
+                          child: GestureDetector(
+                            behavior: HitTestBehavior.opaque,
+                            onSecondaryTapDown: (details) async {
+                              final action = await showMenu<String>(
+                                context: context,
+                                position: RelativeRect.fromLTRB(
+                                  details.globalPosition.dx,
+                                  details.globalPosition.dy,
+                                  details.globalPosition.dx,
+                                  details.globalPosition.dy,
                                 ),
-                                FilledButton(
-                                  onPressed: recording == null
-                                      ? null
-                                      : () async {
-                                          await _acceptFingerprintMatch(
-                                              recording, match);
-                                          setDialogState(() {});
-                                        },
-                                  child: const Text('Accept title'),
-                                ),
-                              ],
+                                items: const [
+                                  PopupMenuItem<String>(
+                                    value: 'accept',
+                                    child: Text('Accept title'),
+                                  ),
+                                  PopupMenuItem<String>(
+                                    value: 'dontknow',
+                                    child: Text("Don't know"),
+                                  ),
+                                ],
+                              );
+                              if (action == null) return;
+                              await handleMatchAction(action);
+                            },
+                            child: ListTile(
+                              leading: const Icon(Icons.fingerprint),
+                              title: Text(
+                                  '${match.recordingFilename} → ${match.displayName}'),
+                              subtitle: Text(
+                                  'Confidence ${(match.confidence * 100).round()}%${match.confidence < uncertainConfidence ? ' • low confidence' : ''}${recording?.title == null ? '' : ' • current title: ${recording!.title}'}'),
+                              trailing: Wrap(
+                                spacing: 8,
+                                children: [
+                                  TextButton(
+                                    onPressed: () => handleMatchAction('dontknow'),
+                                    child: const Text("Don't know"),
+                                  ),
+                                  FilledButton(
+                                    onPressed: recording == null
+                                        ? null
+                                        : () => handleMatchAction('accept'),
+                                    child: const Text('Accept title'),
+                                  ),
+                                ],
+                              ),
                             ),
                           ),
                         );
@@ -942,6 +1376,7 @@ class _LibraryScreenState extends State<LibraryScreen> {
       title: title,
       isBestTake: recording.isBestTake,
     );
+    await _applyMasterSectionsForAcceptedMatch(recording, match);
     await _fingerprintDecisions.accept(practice.directory.path, match);
     final decisions = await _fingerprintDecisions.load(practice.directory.path);
     if (mounted) {
@@ -951,6 +1386,56 @@ class _LibraryScreenState extends State<LibraryScreen> {
             .where((item) => item.recordingId != match.recordingId)
             .toList(growable: false);
       });
+    }
+    await _fingerprintSuggestions.save(practice.directory.path, _fingerprintMatches);
+  }
+
+  Future<void> _acceptBestFingerprintGuessForRecording(Recording recording) async {
+    final match = _fingerprintMatches
+        .where((item) => item.recordingId == recording.id)
+        .toList()
+      ..sort((a, b) => b.confidence.compareTo(a.confidence));
+    if (match.isEmpty) return;
+    await _acceptFingerprintMatch(recording, match.first);
+  }
+
+  Future<void> _dontKnowFingerprintForRecording(Recording recording) async {
+    final matches = _fingerprintMatches
+        .where((item) => item.recordingId == recording.id)
+        .toList(growable: false);
+    for (final match in matches) {
+      await _ignoreFingerprintMatch(match);
+    }
+  }
+
+  Future<void> _applyMasterSectionsForAcceptedMatch(
+      Recording recording, FingerprintMatch match) async {
+    final practice = _selected;
+    if (practice == null) return;
+    final masters = _mastersPractice ?? await _loadMastersPractice();
+    if (masters == null) return;
+    final masterRecording = masters.recordings
+        .where((item) => item.id == match.masterRecordingId)
+        .firstOrNull;
+    if (masterRecording == null) return;
+    final masterSections =
+        await _sectionsRepository.load(masters.directory.path, match.masterRecordingId);
+    if (masterSections.isEmpty) return;
+    final mappedSections = await _fingerprints.alignSectionsToRecording(
+      practiceFolder: practice.directory,
+      recording: recording,
+      mastersFolder: masters.directory,
+      masterRecording: masterRecording,
+      masterSections: masterSections,
+    );
+    if (mappedSections.isEmpty) return;
+    if (_selectedRecording?.id == recording.id) {
+      _rememberSectionUndo();
+    }
+    await _sectionsRepository.saveAll(
+        practice.directory.path, recording.id, mappedSections);
+    if (_selectedRecording?.id == recording.id) {
+      await _refreshSections(recording);
     }
   }
 
@@ -967,6 +1452,7 @@ class _LibraryScreenState extends State<LibraryScreen> {
             .toList(growable: false);
       });
     }
+    await _fingerprintSuggestions.save(practice.directory.path, _fingerprintMatches);
   }
 
   Future<void> _saveRecordingAsMaster(Recording recording) async {
@@ -1121,6 +1607,13 @@ class _LibraryScreenState extends State<LibraryScreen> {
                       children: [
                         TextButton(
                           onPressed: () async {
+                            await _importGoogleOAuthJson();
+                            setDialogState(() {});
+                          },
+                          child: const Text('Import JSON'),
+                        ),
+                        TextButton(
+                          onPressed: () async {
                             await _editGoogleClientConfig();
                             setDialogState(() {});
                           },
@@ -1225,6 +1718,12 @@ class _LibraryScreenState extends State<LibraryScreen> {
                         child: Text('Choose'),
                       ),
                     ),
+                  ),
+                  ListTile(
+                    contentPadding: EdgeInsets.zero,
+                    leading: const Icon(Icons.info_outline),
+                    title: const Text('RiffNotes version'),
+                    subtitle: Text(_appVersionLabel()),
                   ),
                 ]),
               ),
@@ -1338,6 +1837,66 @@ class _LibraryScreenState extends State<LibraryScreen> {
     }
   }
 
+  Future<void> _deleteTake(Recording recording) async {
+    final practice = _selected;
+    if (practice == null) return;
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Delete take?'),
+        content: Text(
+            'This will permanently delete ${recording.filename} from ${practice.name}.'),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(context, false),
+              child: const Text('Cancel')),
+          FilledButton(
+              onPressed: () => Navigator.pop(context, true),
+              child: const Text('Delete')),
+        ],
+      ),
+    );
+    if (confirmed != true) return;
+    try {
+      await _audio.stop();
+      final updatedPractice =
+          await _activity.run('Deleting take', (update) async {
+        update(null, 'Removing ${recording.filename}…');
+        final result = await _repository.deleteRecording(practice, recording);
+        update(1, 'Take deleted');
+        return result;
+      });
+      if (!mounted) return;
+      final deletedSelected = _selectedRecording?.id == recording.id;
+      setState(() {
+        _replaceSelectedPractice(updatedPractice);
+        _fingerprintMatches = _fingerprintMatches
+            .where((item) => item.recordingId != recording.id)
+            .toList(growable: false);
+        if (deletedSelected) {
+          _selectedRecording = null;
+          _notes = const [];
+          _sections = const [];
+          _sectionUndoStack.clear();
+          _rangeStartMs = null;
+          _rangeRecordingId = null;
+          _sectionStartMs = null;
+          _sectionRecordingId = null;
+        }
+      });
+      await _refreshPracticeReview(updatedPractice);
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(content: Text('Deleted ${recording.filename}.')));
+      }
+    } on FileSystemException catch (error) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(content: Text('Delete failed: ${error.message}')));
+      }
+    }
+  }
+
   Future<void> _addAnnotation(Recording recording) async {
     final practice = _selected;
     if (practice == null) return;
@@ -1432,6 +1991,8 @@ class _LibraryScreenState extends State<LibraryScreen> {
   Future<void> _addSection(Recording recording, int startMs, int endMs) async {
     final practice = _selected;
     if (practice == null) return;
+    final normalized = _normalizedNewSectionRange(startMs, endMs);
+    if (normalized == null) return;
     final label = TextEditingController();
     final accepted = await showDialog<bool>(
       context: context,
@@ -1459,57 +2020,306 @@ class _LibraryScreenState extends State<LibraryScreen> {
         practice.directory.path,
         SongSection(
             recordingId: recording.id,
-            startMs: startMs,
-            endMs: endMs,
-            label: label.text.trim()),
+            startMs: normalized.$1,
+            endMs: normalized.$2,
+            label: label.text.trim(),
+            colorIndex: _sectionColorIndexForLabel(label.text.trim())),
       );
+      _rememberSectionUndo();
       await _refreshSections(recording);
     }
     label.dispose();
   }
 
-  Future<void> _addSectionFromLane(Recording recording, int clickedMs) async {
-    final previousEnd = _sections
-        .where((section) => section.endMs <= clickedMs)
-        .fold<int>(
-            0,
-            (latest, section) =>
-                section.endMs > latest ? section.endMs : latest);
-    final nextStart = _sections
-        .where((section) => section.startMs > clickedMs)
-        .fold<int?>(
-            null,
-            (earliest, section) =>
-                earliest == null || section.startMs < earliest
-                    ? section.startMs
-                    : earliest);
-    final startMs = previousEnd.clamp(0, clickedMs).toInt();
-    final endMs = (nextStart ?? clickedMs)
-        .clamp(startMs + 250, _audio.duration?.inMilliseconds ?? clickedMs)
-        .toInt();
-    await _addSection(recording, startMs, endMs);
+  Future<void> _addSectionRangeFromLane(
+      Recording recording, int startMs, int endMs) async {
+    final durationMs = _audio.duration?.inMilliseconds;
+    if (durationMs == null || durationMs <= 0) return;
+    final clampedStart = startMs.clamp(0, durationMs).toInt();
+    final clampedEnd = endMs.clamp(0, durationMs).toInt();
+    final sectionStart = clampedStart < clampedEnd ? clampedStart : clampedEnd;
+    final sectionEnd = clampedStart < clampedEnd ? clampedEnd : clampedStart;
+    if (sectionEnd - sectionStart < 250) return;
+    await _addSection(recording, sectionStart, sectionEnd);
+  }
+
+  Future<void> _splitSectionAt(int clickedMs) async {
+    final practice = _selected;
+    final recording = _selectedRecording;
+    final durationMs = _audio.duration?.inMilliseconds;
+    if (practice == null || recording == null || durationMs == null) {
+      _log.warning('sections', 'Split ignored: no practice/recording/duration');
+      return;
+    }
+    final splitMs = clickedMs.clamp(0, durationMs).toInt();
+    _log.info('sections',
+        'Split requested at ${_formatMilliseconds(splitMs)} for ${recording.filename}');
+    final sorted = _sections.toList()
+      ..sort((a, b) => a.startMs.compareTo(b.startMs));
+    final containing = sorted
+        .where((section) =>
+            splitMs > section.startMs + 250 && splitMs < section.endMs - 250)
+        .firstOrNull;
+    final updated = List<SongSection>.of(sorted);
+    if (containing != null) {
+      _log.info('sections', 'Splitting existing section "${containing.label}"');
+      final index = updated.indexOf(containing);
+      final newLabel = _nextSectionLabel(sorted);
+      updated
+        ..removeAt(index)
+        ..insertAll(index, [
+          SongSection(
+            recordingId: containing.recordingId,
+            startMs: containing.startMs,
+            endMs: splitMs,
+            label: containing.label,
+            colorIndex: containing.colorIndex,
+          ),
+          SongSection(
+            recordingId: containing.recordingId,
+            startMs: splitMs,
+            endMs: containing.endMs,
+            label: newLabel,
+            colorIndex: _sectionColorIndexForLabel(newLabel),
+          ),
+        ]);
+    } else {
+      final previousEnd = sorted
+          .where((section) => section.endMs <= splitMs)
+          .fold<int>(
+              0,
+              (latest, section) =>
+                  section.endMs > latest ? section.endMs : latest);
+      final nextStart = sorted
+          .where((section) => section.startMs >= splitMs)
+          .fold<int>(
+              durationMs,
+              (earliest, section) =>
+                  section.startMs < earliest ? section.startMs : earliest);
+      if (splitMs <= previousEnd + 250 || splitMs >= nextStart - 250) return;
+      _log.info('sections',
+          'Splitting empty lane ${_formatMilliseconds(previousEnd)}-${_formatMilliseconds(nextStart)}');
+      updated.addAll([
+        SongSection(
+          recordingId: recording.id,
+          startMs: previousEnd,
+          endMs: splitMs,
+          label: _nextSectionLabel(updated),
+          colorIndex: _sectionColorIndexForLabel(_nextSectionLabel(updated)),
+        ),
+        SongSection(
+          recordingId: recording.id,
+          startMs: splitMs,
+          endMs: nextStart,
+          label: _nextSectionLabel(updated, offset: 1),
+          colorIndex:
+              _sectionColorIndexForLabel(_nextSectionLabel(updated, offset: 1)),
+        ),
+      ]);
+    }
+    _rememberSectionUndo();
+    await _sectionsRepository.saveAll(
+        practice.directory.path, recording.id, updated);
+    await _refreshSections(recording);
+    _log.info('sections', 'Split saved; ${updated.length} sections now');
   }
 
   Future<void> _resizeSection(
       SongSection section, int startMs, int endMs) async {
     final practice = _selected;
     final recording = _selectedRecording;
-    if (practice == null || recording == null) return;
-    final updated = SongSection(
-        recordingId: section.recordingId,
-        startMs: startMs,
-        endMs: endMs,
-        label: section.label);
-    setState(() => _sections = _sections
-        .map((item) => item == section ? updated : item)
-        .toList(growable: false)
-      ..sort((a, b) => a.startMs.compareTo(b.startMs)));
-    try {
-      await _sectionsRepository.replace(
-          practice.directory.path, section, updated);
-    } on StateError {
-      await _sectionsRepository.add(practice.directory.path, updated);
+    if (practice == null || recording == null) {
+      _log.warning('sections', 'Resize ignored: no practice/recording');
+      return;
     }
+    final current = _currentSectionFor(section) ?? section;
+    final updatedSections = _sections.toList()
+      ..sort((a, b) => a.startMs.compareTo(b.startMs));
+    final index = updatedSections.indexOf(current);
+    if (index == -1) {
+      _log.warning('sections',
+          'Resize ignored: section "${section.label}" was not found');
+      return;
+    }
+    var resizeAction = 'resize';
+    final isLeftDrag = startMs != current.startMs;
+    final isRightDrag = endMs != current.endMs;
+    if (isLeftDrag && index > 0) {
+      final previous = updatedSections[index - 1];
+      if (startMs <= previous.startMs + 250) {
+        resizeAction = 'merge-left';
+        updatedSections
+          ..removeAt(index)
+          ..removeAt(index - 1)
+          ..insert(
+            index - 1,
+            SongSection(
+              recordingId: current.recordingId,
+              startMs: previous.startMs,
+              endMs: current.endMs,
+              label: _mergedLabel(previous.label, current.label),
+              colorIndex: current.colorIndex,
+            ),
+          );
+      } else if (startMs < previous.endMs ||
+          previous.endMs == current.startMs) {
+        resizeAction = 'move-left-boundary';
+        final boundary =
+            startMs.clamp(previous.startMs + 250, current.endMs - 250).toInt();
+        updatedSections[index - 1] = SongSection(
+          recordingId: previous.recordingId,
+          startMs: previous.startMs,
+          endMs: boundary,
+          label: previous.label,
+          colorIndex: previous.colorIndex,
+        );
+        updatedSections[index] = SongSection(
+          recordingId: current.recordingId,
+          startMs: boundary,
+          endMs: current.endMs,
+          label: current.label,
+          colorIndex: current.colorIndex,
+        );
+      } else {
+        resizeAction = 'resize-left';
+        final clamped = _clampedSectionRange(current, startMs, current.endMs);
+        if (clamped == null) {
+          _log.warning('sections', 'Resize-left rejected by clamp');
+          return;
+        }
+        updatedSections[index] = SongSection(
+          recordingId: current.recordingId,
+          startMs: clamped.$1,
+          endMs: clamped.$2,
+          label: current.label,
+          colorIndex: current.colorIndex,
+        );
+      }
+    } else if (isRightDrag && index < updatedSections.length - 1) {
+      final next = updatedSections[index + 1];
+      if (endMs >= next.endMs - 250) {
+        resizeAction = 'merge-right';
+        updatedSections
+          ..removeAt(index + 1)
+          ..removeAt(index)
+          ..insert(
+            index,
+            SongSection(
+              recordingId: current.recordingId,
+              startMs: current.startMs,
+              endMs: next.endMs,
+              label: _mergedLabel(current.label, next.label),
+              colorIndex: current.colorIndex,
+            ),
+          );
+      } else if (endMs > next.startMs || current.endMs == next.startMs) {
+        resizeAction = 'move-right-boundary';
+        final boundary =
+            endMs.clamp(current.startMs + 250, next.endMs - 250).toInt();
+        updatedSections[index] = SongSection(
+          recordingId: current.recordingId,
+          startMs: current.startMs,
+          endMs: boundary,
+          label: current.label,
+          colorIndex: current.colorIndex,
+        );
+        updatedSections[index + 1] = SongSection(
+          recordingId: next.recordingId,
+          startMs: boundary,
+          endMs: next.endMs,
+          label: next.label,
+          colorIndex: next.colorIndex,
+        );
+      } else {
+        resizeAction = 'resize-right';
+        final clamped = _clampedSectionRange(current, current.startMs, endMs);
+        if (clamped == null) {
+          _log.warning('sections', 'Resize-right rejected by clamp');
+          return;
+        }
+        updatedSections[index] = SongSection(
+          recordingId: current.recordingId,
+          startMs: clamped.$1,
+          endMs: clamped.$2,
+          label: current.label,
+          colorIndex: current.colorIndex,
+        );
+      }
+    } else {
+      final clamped = _clampedSectionRange(current, startMs, endMs);
+      if (clamped == null) {
+        _log.warning('sections', 'Resize rejected by clamp');
+        return;
+      }
+      updatedSections[index] = SongSection(
+        recordingId: current.recordingId,
+        startMs: clamped.$1,
+        endMs: clamped.$2,
+        label: current.label,
+        colorIndex: current.colorIndex,
+      );
+    }
+    if (resizeAction.startsWith('merge') || _shouldLogSectionResize()) {
+      _log.info('sections',
+          '$resizeAction "${current.label}" to ${_formatMilliseconds(startMs)}-${_formatMilliseconds(endMs)}');
+    }
+    if (!_sectionResizeGestureActive) {
+      _rememberSectionUndo();
+    }
+    if (mounted) {
+      setState(() => _sections = List<SongSection>.of(updatedSections)
+        ..sort((a, b) => a.startMs.compareTo(b.startMs)));
+    }
+    await _sectionsRepository.saveAll(
+        practice.directory.path, recording.id, updatedSections);
+  }
+
+  void _startSectionResizeGesture() {
+    if (_sectionResizeGestureActive) return;
+    _sectionResizeGestureActive = true;
+    _rememberSectionUndo();
+  }
+
+  void _endSectionResizeGesture() {
+    _sectionResizeGestureActive = false;
+  }
+
+  Future<void> _mergeSections(SongSection first, SongSection second) async {
+    final practice = _selected;
+    final recording = _selectedRecording;
+    if (practice == null || recording == null) return;
+    final currentFirst = _currentSectionFor(first) ?? first;
+    final currentSecond = _currentSectionFor(second) ?? second;
+    final sorted = _sections.toList()
+      ..sort((a, b) => a.startMs.compareTo(b.startMs));
+    final firstIndex = sorted.indexOf(currentFirst);
+    final secondIndex = sorted.indexOf(currentSecond);
+    if (firstIndex == -1 ||
+        secondIndex == -1 ||
+        (firstIndex - secondIndex).abs() != 1) {
+      _log.warning('sections',
+          'Merge ignored: "${first.label}" and "${second.label}" are not adjacent');
+      return;
+    }
+    final left = firstIndex < secondIndex ? currentFirst : currentSecond;
+    final right = firstIndex < secondIndex ? currentSecond : currentFirst;
+    final merged = SongSection(
+      recordingId: left.recordingId,
+      startMs: left.startMs,
+      endMs: right.endMs,
+      label: _mergedLabel(left.label, right.label),
+      colorIndex: left.colorIndex,
+    );
+    final updated = sorted
+      ..remove(left)
+      ..remove(right)
+      ..add(merged)
+      ..sort((a, b) => a.startMs.compareTo(b.startMs));
+    _rememberSectionUndo();
+    _log.info('sections',
+        'Merged "${left.label}" + "${right.label}" into "${merged.label}"');
+    await _sectionsRepository.saveAll(
+        practice.directory.path, recording.id, updated);
     await _refreshSections(recording);
   }
 
@@ -1517,59 +2327,104 @@ class _LibraryScreenState extends State<LibraryScreen> {
     final practice = _selected;
     final recording = _selectedRecording;
     if (practice == null || recording == null) return;
+    section = _currentSectionFor(section) ?? section;
+    _log.info('sections',
+        'Opening edit dialog for "${section.label}" ${_formatMilliseconds(section.startMs)}-${_formatMilliseconds(section.endMs)}');
     final label = TextEditingController(text: section.label);
     final start =
-        TextEditingController(text: _formatMilliseconds(section.startMs));
-    final end = TextEditingController(text: _formatMilliseconds(section.endMs));
+      TextEditingController(text: _formatTimestampForEdit(section.startMs));
+    final end =
+      TextEditingController(text: _formatTimestampForEdit(section.endMs));
+    var selectedColor = section.colorIndex;
     final accepted = await showDialog<bool>(
       context: context,
-      builder: (context) => AlertDialog(
-        title: const Text('Edit song section'),
-        content: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            TextField(
-              controller: label,
-              autofocus: true,
-              decoration: const InputDecoration(labelText: 'Section name'),
-            ),
-            TextField(
-              controller: start,
-              decoration: const InputDecoration(labelText: 'Start mm:ss'),
-            ),
-            TextField(
-              controller: end,
-              decoration: const InputDecoration(labelText: 'End mm:ss'),
-            ),
+      builder: (context) => StatefulBuilder(
+        builder: (context, setDialogState) => AlertDialog(
+          title: const Text('Edit song section'),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              TextField(
+                controller: label,
+                autofocus: true,
+                decoration: const InputDecoration(labelText: 'Section name'),
+              ),
+              TextField(
+                controller: start,
+                decoration:
+                    const InputDecoration(labelText: 'Start mm:ss.mmm'),
+              ),
+              TextField(
+                controller: end,
+                decoration: const InputDecoration(labelText: 'End mm:ss.mmm'),
+              ),
+              const SizedBox(height: 12),
+              Align(
+                alignment: Alignment.centerLeft,
+                child: Text('Color',
+                    style: Theme.of(context).textTheme.labelLarge),
+              ),
+              const SizedBox(height: 8),
+              Wrap(
+                spacing: 8,
+                runSpacing: 8,
+                children: [
+                  for (var index = 0; index < sectionPalette.length; index += 1)
+                    InkWell(
+                      onTap: () => setDialogState(() => selectedColor = index),
+                      borderRadius: BorderRadius.circular(999),
+                      child: Container(
+                        width: 28,
+                        height: 28,
+                        decoration: BoxDecoration(
+                          shape: BoxShape.circle,
+                          color: sectionPalette[index],
+                          border: Border.all(
+                            color: selectedColor == index
+                                ? Colors.white
+                                : Colors.transparent,
+                            width: 3,
+                          ),
+                        ),
+                      ),
+                    ),
+                ],
+              ),
+            ],
+          ),
+          actions: [
+            TextButton(
+                onPressed: () => Navigator.pop(context, false),
+                child: const Text('Cancel')),
+            FilledButton(
+                onPressed: () => Navigator.pop(context, true),
+                child: const Text('Save section')),
           ],
         ),
-        actions: [
-          TextButton(
-              onPressed: () => Navigator.pop(context, false),
-              child: const Text('Cancel')),
-          FilledButton(
-              onPressed: () => Navigator.pop(context, true),
-              child: const Text('Save section')),
-        ],
       ),
     );
     if (accepted == true && label.text.trim().isNotEmpty) {
       final startMs = _parseTimestamp(start.text.trim()) ?? section.startMs;
       final endMs = _parseTimestamp(end.text.trim()) ?? section.endMs;
-      if (endMs <= startMs) {
+      final clamped = _clampedSectionRange(section, startMs, endMs);
+      if (clamped == null) {
         if (mounted) {
           ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
               content: Text('Section end must be after the start.')));
         }
       } else {
+        _rememberSectionUndo();
+        _log.info('sections',
+            'Saving edit as "${label.text.trim()}" ${_formatMilliseconds(clamped.$1)}-${_formatMilliseconds(clamped.$2)}');
         await _sectionsRepository.replace(
           practice.directory.path,
           section,
           SongSection(
             recordingId: section.recordingId,
-            startMs: startMs,
-            endMs: endMs,
+            startMs: clamped.$1,
+            endMs: clamped.$2,
             label: label.text.trim(),
+            colorIndex: selectedColor,
           ),
         );
         await _refreshSections(recording);
@@ -1580,10 +2435,83 @@ class _LibraryScreenState extends State<LibraryScreen> {
     end.dispose();
   }
 
+  Future<void> _adjustSection(SongSection section) async {
+    final practice = _selected;
+    final recording = _selectedRecording;
+    final durationMs = _audio.duration?.inMilliseconds;
+    if (practice == null || recording == null || durationMs == null) return;
+    section = _currentSectionFor(section) ?? section;
+    final startAdjust = TextEditingController(text: '0');
+    final endAdjust = TextEditingController(text: '0');
+    final accepted = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: Text('Adjust ${section.label}'),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const Text(
+                'Enter seconds to move each edge. Use negative values to move earlier.'),
+            const SizedBox(height: 12),
+            TextField(
+              controller: startAdjust,
+              autofocus: true,
+              keyboardType:
+                  const TextInputType.numberWithOptions(decimal: true),
+              decoration:
+                  const InputDecoration(labelText: 'Start adjustment seconds'),
+            ),
+            TextField(
+              controller: endAdjust,
+              keyboardType:
+                  const TextInputType.numberWithOptions(decimal: true),
+              decoration:
+                  const InputDecoration(labelText: 'End adjustment seconds'),
+            ),
+          ],
+        ),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(context, false),
+              child: const Text('Cancel')),
+          FilledButton(
+              onPressed: () => Navigator.pop(context, true),
+              child: const Text('Adjust')),
+        ],
+      ),
+    );
+    if (accepted == true) {
+      final startDelta =
+          ((double.tryParse(startAdjust.text.trim()) ?? 0) * 1000).round();
+      final endDelta =
+          ((double.tryParse(endAdjust.text.trim()) ?? 0) * 1000).round();
+      final startMs =
+          (section.startMs + startDelta).clamp(0, section.endMs - 250).toInt();
+      final endMs =
+          (section.endMs + endDelta).clamp(startMs + 250, durationMs).toInt();
+      final clamped = _clampedSectionRange(section, startMs, endMs);
+      if (clamped == null) return;
+      final updated = SongSection(
+        recordingId: section.recordingId,
+        startMs: clamped.$1,
+        endMs: clamped.$2,
+        label: section.label,
+        colorIndex: section.colorIndex,
+      );
+      _rememberSectionUndo();
+      await _sectionsRepository.replace(
+          practice.directory.path, section, updated);
+      await _refreshSections(recording);
+    }
+    startAdjust.dispose();
+    endAdjust.dispose();
+  }
+
   Future<void> _deleteSection(SongSection section) async {
     final practice = _selected;
     final recording = _selectedRecording;
     if (practice == null || recording == null) return;
+    section = _currentSectionFor(section) ?? section;
     final confirmed = await showDialog<bool>(
       context: context,
       builder: (context) => AlertDialog(
@@ -1601,9 +2529,199 @@ class _LibraryScreenState extends State<LibraryScreen> {
       ),
     );
     if (confirmed == true) {
+      _rememberSectionUndo();
+      _log.info('sections',
+          'Deleting "${section.label}" ${_formatMilliseconds(section.startMs)}-${_formatMilliseconds(section.endMs)}');
       await _sectionsRepository.delete(practice.directory.path, section);
       await _refreshSections(recording);
     }
+  }
+
+  void _rememberSectionUndo() {
+    setState(() {
+      _sectionUndoStack.add(List<SongSection>.of(_sections));
+      if (_sectionUndoStack.length > 20) {
+        _sectionUndoStack.removeAt(0);
+      }
+    });
+  }
+
+  Future<void> _autoAssignSectionColors() async {
+    final practice = _selected;
+    final recording = _selectedRecording;
+    if (practice == null || recording == null || _sections.isEmpty) return;
+    final updated = _sections
+        .map(
+          (section) => SongSection(
+            recordingId: section.recordingId,
+            startMs: section.startMs,
+            endMs: section.endMs,
+            label: section.label,
+            colorIndex: _sectionColorIndexForLabel(section.label),
+          ),
+        )
+        .toList(growable: false)
+      ..sort((a, b) => a.startMs.compareTo(b.startMs));
+    _rememberSectionUndo();
+    await _sectionsRepository.saveAll(
+        practice.directory.path, recording.id, updated);
+    await _refreshSections(recording);
+  }
+
+  bool _shouldLogSectionResize() {
+    final now = DateTime.now();
+    final last = _lastSectionResizeLogAt;
+    if (last != null && now.difference(last).inMilliseconds < 250) {
+      return false;
+    }
+    _lastSectionResizeLogAt = now;
+    return true;
+  }
+
+  Future<void> _undoLastSectionEdit() async {
+    final practice = _selected;
+    final recording = _selectedRecording;
+    if (practice == null || recording == null || _sectionUndoStack.isEmpty) {
+      _log.warning('sections', 'Undo ignored: no previous section state');
+      return;
+    }
+    final previous = _sectionUndoStack.removeLast();
+    _log.info('sections', 'Undo restored ${previous.length} sections');
+    await _sectionsRepository.saveAll(
+      practice.directory.path,
+      recording.id,
+      previous,
+    );
+    if (mounted) setState(() {});
+    await _refreshSections(recording);
+  }
+
+  String _formatTimestampForEdit(int milliseconds) {
+    final duration = Duration(milliseconds: milliseconds);
+    final hours = duration.inHours;
+    final minutes = duration.inMinutes.remainder(60);
+    final seconds = duration.inSeconds.remainder(60);
+    final millis = duration.inMilliseconds.remainder(1000);
+    final secondsPart = '${seconds.toString().padLeft(2, '0')}.'
+        '${millis.toString().padLeft(3, '0')}';
+    if (hours > 0) {
+      return '$hours:${minutes.toString().padLeft(2, '0')}:$secondsPart';
+    }
+    return '${minutes.toString().padLeft(2, '0')}:$secondsPart';
+  }
+
+  (int, int)? _normalizedNewSectionRange(int startMs, int endMs) {
+    final durationMs = _audio.duration?.inMilliseconds;
+    if (durationMs == null || durationMs <= 0) return null;
+    final start =
+        (startMs < endMs ? startMs : endMs).clamp(0, durationMs).toInt();
+    final end =
+        (startMs < endMs ? endMs : startMs).clamp(0, durationMs).toInt();
+    if (end - start < 250) return null;
+    final overlaps = _sections.any(
+      (section) => start < section.endMs && end > section.startMs,
+    );
+    return overlaps ? null : (start, end);
+  }
+
+  (int, int)? _clampedSectionRange(
+    SongSection section,
+    int requestedStartMs,
+    int requestedEndMs,
+  ) {
+    final durationMs = _audio.duration?.inMilliseconds;
+    if (durationMs == null || durationMs <= 0) return null;
+    final others = _sections.where((item) => item != section).toList()
+      ..sort((a, b) => a.startMs.compareTo(b.startMs));
+    final previousEnd = others
+        .where((item) => item.endMs <= section.startMs)
+        .fold<int>(
+            0, (latest, item) => item.endMs > latest ? item.endMs : latest);
+    final nextStart = others
+        .where((item) => item.startMs >= section.endMs)
+        .fold<int>(
+            durationMs,
+            (earliest, item) =>
+                item.startMs < earliest ? item.startMs : earliest);
+    final start = requestedStartMs.clamp(previousEnd, nextStart - 250).toInt();
+    final end = requestedEndMs.clamp(start + 250, nextStart).toInt();
+    if (end - start < 250) return null;
+    return (start, end);
+  }
+
+  SongSection? _currentSectionFor(SongSection section) {
+    return _sections.where((item) => item == section).firstOrNull ??
+        _sections
+            .where((item) =>
+                item.recordingId == section.recordingId &&
+                item.label == section.label)
+            .firstOrNull;
+  }
+
+  String _splitLabel(String label) {
+    final trimmed = label.trim();
+    return trimmed.isEmpty ? 'Section' : '$trimmed 2';
+  }
+
+  String _normalizedSectionPrefix(String label) {
+    final cleaned = label.trim().toLowerCase().replaceAll(RegExp(r'[^a-z]+'), '');
+    if (cleaned.isEmpty) return '';
+    for (final prefix in const <String>[
+      'intro',
+      'prechorus',
+      'chorus',
+      'verse',
+      'bridge',
+      'outro',
+    ]) {
+      if (cleaned.startsWith(prefix)) return prefix;
+    }
+    return cleaned;
+  }
+
+  int _sectionColorIndexForLabel(String label) {
+    switch (_normalizedSectionPrefix(label)) {
+      case 'intro':
+      case 'outro':
+        return 0;
+      case 'verse':
+        return 5;
+      case 'prechorus':
+        return 3;
+      case 'chorus':
+        return 6;
+      case 'bridge':
+        return 1;
+      case '':
+        return 2;
+      default:
+        return 2;
+    }
+  }
+
+  String _mergedLabel(String left, String right) {
+    if (left == right) return left;
+    if (left.trim().isEmpty) return right;
+    if (right.trim().isEmpty) return left;
+    return '$left / $right';
+  }
+
+  String _nextSectionLabel(List<SongSection> existing, {int offset = 0}) {
+    return 'Section ${existing.length + offset + 1}';
+  }
+
+  int _suggestSectionColor(String label) {
+    final normalized =
+        label.toLowerCase().replaceAll(RegExp(r'\s+[a-z0-9]+$'), '').trim();
+    if (normalized.isEmpty) return 0;
+    final match = _sections.where((section) {
+      final existing = section.label
+          .toLowerCase()
+          .replaceAll(RegExp(r'\s+[a-z0-9]+$'), '')
+          .trim();
+      return existing == normalized;
+    }).firstOrNull;
+    return match?.colorIndex ?? 0;
   }
 
   Future<void> _addRangeAnnotation(
@@ -1658,21 +2776,32 @@ class _LibraryScreenState extends State<LibraryScreen> {
     }
   }
 
+  int? _parseTimestamp(String value) {
+    final trimmed = value.trim();
+    if (trimmed.isEmpty) return null;
+    final parts = trimmed.split(':');
+    if (parts.length < 2 || parts.length > 3) return null;
+    final secondsPart = parts.removeLast();
+    final minutesPart = parts.removeLast();
+    final hours = parts.isEmpty ? 0 : int.tryParse(parts.single);
+    final minutes = int.tryParse(minutesPart);
+    if (hours == null || minutes == null) return null;
+    final secondsPieces = secondsPart.split('.');
+    final seconds = int.tryParse(secondsPieces.first);
+    if (seconds == null) return null;
+    var millis = 0;
+    if (secondsPieces.length > 1) {
+      final fraction = (secondsPieces.sublist(1).join()).padRight(3, '0');
+      final parsedMillis = int.tryParse(fraction.substring(0, 3));
+      if (parsedMillis == null) return null;
+      millis = parsedMillis;
+    }
+    return (((hours * 60 + minutes) * 60 + seconds) * 1000) + millis;
+  }
+
   String _formatMilliseconds(int milliseconds) {
     final duration = Duration(milliseconds: milliseconds);
     return '${duration.inMinutes.remainder(60).toString().padLeft(2, '0')}:${duration.inSeconds.remainder(60).toString().padLeft(2, '0')}';
-  }
-
-  int? _parseTimestamp(String value) {
-    final parts = value.split(':').map((item) => int.tryParse(item)).toList();
-    if (parts.any((item) => item == null)) return null;
-    if (parts.length == 2) {
-      return (parts[0]! * 60 + parts[1]!) * 1000;
-    }
-    if (parts.length == 3) {
-      return (parts[0]! * 3600 + parts[1]! * 60 + parts[2]!) * 1000;
-    }
-    return null;
   }
 
   Future<void> _exportAudio(
@@ -1886,6 +3015,8 @@ class _LibraryScreenState extends State<LibraryScreen> {
         setState(() {
           _replaceSelectedPractice(updatedPractice);
           _selectedRecording = null;
+          _sections = const [];
+          _sectionUndoStack.clear();
         });
       }
     } on StateError catch (error) {
@@ -1901,12 +3032,93 @@ class _LibraryScreenState extends State<LibraryScreen> {
     }
   }
 
+  Future<void> _showLogs() async {
+    await showDialog<void>(
+      context: context,
+      builder: (dialogContext) => AnimatedBuilder(
+        animation: _log,
+        builder: (context, _) => AlertDialog(
+          title: const Text('RiffNotes logs'),
+          content: SizedBox(
+            width: 820,
+            height: 520,
+            child: _log.entries.isEmpty
+                ? const Center(child: Text('No log entries yet.'))
+                : ListView.builder(
+                    itemCount: _log.entries.length,
+                    itemBuilder: (context, index) {
+                      final entry = _log.entries[index];
+                      final color = switch (entry.level) {
+                        AppLogLevel.info =>
+                          Theme.of(context).colorScheme.onSurface,
+                        AppLogLevel.warning =>
+                          Theme.of(context).colorScheme.tertiary,
+                        AppLogLevel.error =>
+                          Theme.of(context).colorScheme.error,
+                      };
+                      return SelectableText(
+                        entry.line,
+                        style: TextStyle(
+                          color: color,
+                          fontFamily: 'monospace',
+                          fontSize: 12,
+                        ),
+                      );
+                    },
+                  ),
+          ),
+          actions: [
+            TextButton.icon(
+              onPressed: _log.entries.isEmpty ? null : _log.clear,
+              icon: const Icon(Icons.delete_sweep_outlined),
+              label: const Text('Clear'),
+            ),
+            TextButton.icon(
+              onPressed: _log.entries.isEmpty
+                  ? null
+                  : () async {
+                      await Clipboard.setData(ClipboardData(
+                        text:
+                            _log.entries.map((entry) => entry.line).join('\n'),
+                      ));
+                      if (dialogContext.mounted) {
+                        Navigator.of(dialogContext).pop();
+                      }
+                      if (mounted) {
+                        ScaffoldMessenger.of(this.context).showSnackBar(
+                          const SnackBar(content: Text('Logs copied')),
+                        );
+                      }
+                    },
+              icon: const Icon(Icons.copy),
+              label: const Text('Copy'),
+            ),
+            FilledButton(
+              onPressed: () => Navigator.of(dialogContext).pop(),
+              child: const Text('Close'),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) => AnimatedBuilder(
         animation: _activity,
         builder: (context, _) => Scaffold(
           appBar: AppBar(
-            title: const Text('RiffNotes'),
+            title: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                const Text('RiffNotes'),
+                Text(
+                  _appVersionLabel(),
+                  style: Theme.of(context).textTheme.labelSmall,
+                ),
+              ],
+            ),
             actions: [
               TextButton.icon(
                   onPressed: _chooseBandFolder,
@@ -1945,6 +3157,10 @@ class _LibraryScreenState extends State<LibraryScreen> {
                       _selected == null ? null : _clearSelectedPracticeCache,
                   icon: const Icon(Icons.cleaning_services_outlined)),
               IconButton(
+                  tooltip: 'View logs',
+                  onPressed: _showLogs,
+                  icon: const Icon(Icons.article_outlined)),
+              IconButton(
                   tooltip: 'Preferences',
                   onPressed: _showPreferences,
                   icon: const Icon(Icons.settings_outlined)),
@@ -1975,6 +3191,7 @@ class _LibraryScreenState extends State<LibraryScreen> {
                     autoPlay: _preferences.autoPlayOnTakeSelection,
                   ),
                   onEditTitle: _editTitle,
+                  onDeleteTake: _deleteTake,
                   onToggleBest: (recording, isBestTake) => _updateRecording(
                     recording,
                     title: recording.title,
@@ -1984,10 +3201,24 @@ class _LibraryScreenState extends State<LibraryScreen> {
                   onAddAnnotation: _addAnnotation,
                   onStartRangeNote: _startRangeNote,
                   onStartSection: _startSection,
-                  onAddSectionFromLane: _addSectionFromLane,
+                  onSplitSectionAt: _splitSectionAt,
+                  onCreateSectionFromGap: (startMs, endMs) {
+                    final recording = _selectedRecording;
+                    if (recording == null) return;
+                    unawaited(
+                        _addSectionRangeFromLane(recording, startMs, endMs));
+                  },
+                  onAutoAssignSectionColors: _autoAssignSectionColors,
                   onResizeSection: _resizeSection,
+                  onResizeSectionStart: _startSectionResizeGesture,
+                  onResizeSectionEnd: _endSectionResizeGesture,
+                  onMergeSections: _mergeSections,
                   onEditSection: _editSection,
+                  onAdjustSection: _adjustSection,
                   onDeleteSection: _deleteSection,
+                  onSectionLog: (message) => _log.info('section-ui', message),
+                  canUndoSectionEdit: _sectionUndoStack.isNotEmpty,
+                  onUndoSectionEdit: _undoLastSectionEdit,
                   onExportAudio: _exportAudio,
                   onConvertToMp3: _convertSelectedWavToMp3,
                   onSaveRecordingAsMaster: _saveRecordingAsMaster,
@@ -2019,6 +3250,8 @@ class _LibraryScreenState extends State<LibraryScreen> {
                       setState(() => _reviewSort = value),
                   reviewNotes: _reviewNotes,
                   fingerprintMatches: _fingerprintMatches,
+                    onAcceptFingerprintGuess: _acceptBestFingerprintGuessForRecording,
+                    onDontKnowFingerprintGuess: _dontKnowFingerprintForRecording,
                   onPlayReviewNote: _playReviewNote,
                   audio: _audio,
                   waveform: _waveform,
@@ -2097,15 +3330,25 @@ class _RecordingList extends StatelessWidget {
     required this.selected,
     required this.onSelect,
     required this.onEditTitle,
+    required this.onDeleteTake,
     required this.onToggleBest,
     required this.onBatchRename,
     required this.onAddAnnotation,
     required this.onStartRangeNote,
     required this.onStartSection,
-    required this.onAddSectionFromLane,
+    required this.onSplitSectionAt,
+    required this.onCreateSectionFromGap,
+    required this.onAutoAssignSectionColors,
     required this.onResizeSection,
+    required this.onResizeSectionStart,
+    required this.onResizeSectionEnd,
+    required this.onMergeSections,
     required this.onEditSection,
+    required this.onAdjustSection,
     required this.onDeleteSection,
+    required this.onSectionLog,
+    required this.canUndoSectionEdit,
+    required this.onUndoSectionEdit,
     required this.onExportAudio,
     required this.onConvertToMp3,
     required this.onSaveRecordingAsMaster,
@@ -2129,6 +3372,8 @@ class _RecordingList extends StatelessWidget {
     required this.onSetReviewSort,
     required this.reviewNotes,
     required this.fingerprintMatches,
+    required this.onAcceptFingerprintGuess,
+    required this.onDontKnowFingerprintGuess,
     required this.onPlayReviewNote,
     required this.audio,
     required this.waveform,
@@ -2141,17 +3386,27 @@ class _RecordingList extends StatelessWidget {
   final Recording? selected;
   final ValueChanged<Recording> onSelect;
   final ValueChanged<Recording> onEditTitle;
+  final ValueChanged<Recording> onDeleteTake;
   final Future<void> Function(Recording recording, bool isBestTake)
       onToggleBest;
   final Future<void> Function() onBatchRename;
   final ValueChanged<Recording> onAddAnnotation;
   final ValueChanged<Recording> onStartRangeNote;
   final ValueChanged<Recording> onStartSection;
-  final void Function(Recording recording, int clickedMs) onAddSectionFromLane;
+  final ValueChanged<int> onSplitSectionAt;
+  final void Function(int startMs, int endMs) onCreateSectionFromGap;
+  final Future<void> Function() onAutoAssignSectionColors;
   final void Function(SongSection section, int startMs, int endMs)
       onResizeSection;
+  final VoidCallback onResizeSectionStart;
+  final VoidCallback onResizeSectionEnd;
+  final void Function(SongSection first, SongSection second) onMergeSections;
   final ValueChanged<SongSection> onEditSection;
+  final ValueChanged<SongSection> onAdjustSection;
   final ValueChanged<SongSection> onDeleteSection;
+  final ValueChanged<String> onSectionLog;
+  final bool canUndoSectionEdit;
+  final Future<void> Function() onUndoSectionEdit;
   final Future<void> Function(
           Recording recording, SongSection? section, String extension)
       onExportAudio;
@@ -2178,6 +3433,8 @@ class _RecordingList extends StatelessWidget {
   final ValueChanged<_ReviewSort> onSetReviewSort;
   final List<UserAnnotation> reviewNotes;
   final List<FingerprintMatch> fingerprintMatches;
+  final Future<void> Function(Recording recording) onAcceptFingerprintGuess;
+  final Future<void> Function(Recording recording) onDontKnowFingerprintGuess;
   final ValueChanged<UserAnnotation> onPlayReviewNote;
   final AudioController audio;
   final WaveformController waveform;
@@ -2339,6 +3596,32 @@ class _RecordingList extends StatelessWidget {
                     trailing: Row(
                       mainAxisSize: MainAxisSize.min,
                       children: [
+                        if (!isMasters && _bestFingerprintMatch(recording) != null)
+                          PopupMenuButton<String>(
+                            tooltip: 'Fingerprint guess actions',
+                            onSelected: (action) async {
+                              switch (action) {
+                                case 'accept':
+                                  await onAcceptFingerprintGuess(recording);
+                                case 'dontknow':
+                                  await onDontKnowFingerprintGuess(recording);
+                              }
+                            },
+                            itemBuilder: (context) => const [
+                              PopupMenuItem<String>(
+                                value: 'accept',
+                                child: Text('Accept guessed title'),
+                              ),
+                              PopupMenuItem<String>(
+                                value: 'dontknow',
+                                child: Text("Don't know"),
+                              ),
+                            ],
+                            child: const Padding(
+                              padding: EdgeInsets.symmetric(horizontal: 4),
+                              child: Icon(Icons.fingerprint),
+                            ),
+                          ),
                         if (!isMasters)
                           IconButton(
                             tooltip: recording.isBestTake
@@ -2358,6 +3641,12 @@ class _RecordingList extends StatelessWidget {
                           icon: const Icon(Icons.edit_outlined),
                           onPressed: () => onEditTitle(recording),
                         ),
+                        if (!isMasters)
+                          IconButton(
+                            tooltip: 'Delete take',
+                            icon: const Icon(Icons.delete_outline),
+                            onPressed: () => onDeleteTake(recording),
+                          ),
                         if (!isMasters)
                           IconButton(
                             tooltip: 'Save take as new master',
@@ -2381,10 +3670,19 @@ class _RecordingList extends StatelessWidget {
           onAddAnnotation: onAddAnnotation,
           onStartRangeNote: onStartRangeNote,
           onStartSection: onStartSection,
-          onAddSectionFromLane: onAddSectionFromLane,
+          onSplitSectionAt: onSplitSectionAt,
+          onCreateSectionFromGap: onCreateSectionFromGap,
+          onAutoAssignSectionColors: onAutoAssignSectionColors,
           onResizeSection: onResizeSection,
+          onResizeSectionStart: onResizeSectionStart,
+          onResizeSectionEnd: onResizeSectionEnd,
+          onMergeSections: onMergeSections,
           onEditSection: onEditSection,
+          onAdjustSection: onAdjustSection,
           onDeleteSection: onDeleteSection,
+          onSectionLog: onSectionLog,
+          canUndoSectionEdit: canUndoSectionEdit,
+          onUndoSectionEdit: onUndoSectionEdit,
           onExportAudio: onExportAudio,
           onConvertToMp3: onConvertToMp3,
           onSaveRecordingAsMaster: onSaveRecordingAsMaster,
@@ -2489,10 +3787,19 @@ class _PlayerPanel extends StatefulWidget {
     required this.onAddAnnotation,
     required this.onStartRangeNote,
     required this.onStartSection,
-    required this.onAddSectionFromLane,
+    required this.onSplitSectionAt,
+    required this.onCreateSectionFromGap,
+    required this.onAutoAssignSectionColors,
     required this.onResizeSection,
+    required this.onResizeSectionStart,
+    required this.onResizeSectionEnd,
+    required this.onMergeSections,
     required this.onEditSection,
+    required this.onAdjustSection,
     required this.onDeleteSection,
+    required this.onSectionLog,
+    required this.canUndoSectionEdit,
+    required this.onUndoSectionEdit,
     required this.onExportAudio,
     required this.onConvertToMp3,
     required this.onSaveRecordingAsMaster,
@@ -2514,11 +3821,20 @@ class _PlayerPanel extends StatefulWidget {
   final ValueChanged<Recording> onAddAnnotation;
   final ValueChanged<Recording> onStartRangeNote;
   final ValueChanged<Recording> onStartSection;
-  final void Function(Recording recording, int clickedMs) onAddSectionFromLane;
+  final ValueChanged<int> onSplitSectionAt;
+  final void Function(int startMs, int endMs) onCreateSectionFromGap;
+  final Future<void> Function() onAutoAssignSectionColors;
   final void Function(SongSection section, int startMs, int endMs)
       onResizeSection;
+  final VoidCallback onResizeSectionStart;
+  final VoidCallback onResizeSectionEnd;
+  final void Function(SongSection first, SongSection second) onMergeSections;
   final ValueChanged<SongSection> onEditSection;
+  final ValueChanged<SongSection> onAdjustSection;
   final ValueChanged<SongSection> onDeleteSection;
+  final ValueChanged<String> onSectionLog;
+  final bool canUndoSectionEdit;
+  final Future<void> Function() onUndoSectionEdit;
   final Future<void> Function(
           Recording recording, SongSection? section, String extension)
       onExportAudio;
@@ -2551,7 +3867,9 @@ class _ExportChoice {
 
 class _PlayerPanelState extends State<_PlayerPanel> {
   final FocusNode _waveformFocus = FocusNode(debugLabel: 'Waveform controls');
+  final ScrollController _waveformScrollController = ScrollController();
   double? _hoverProgress;
+  int? _sectionResizePreviewMs;
   PracticeAnnotation? _hoveredNote;
   SongSection? _selectedSection;
   double _waveformZoom = 1;
@@ -2559,14 +3877,59 @@ class _PlayerPanelState extends State<_PlayerPanel> {
   @override
   void dispose() {
     _waveformFocus.dispose();
+    _waveformScrollController.dispose();
     super.dispose();
+  }
+
+  void _followWaveformProgress(
+    double progress,
+    double viewportWidth,
+    double contentWidth,
+  ) {
+    if (!_waveformScrollController.hasClients || contentWidth <= viewportWidth) {
+      return;
+    }
+    final position = _waveformScrollController.position;
+    const lead = 140.0;
+    final targetX = progress * contentWidth;
+    final currentLeft = position.pixels + lead;
+    final currentRight = position.pixels + viewportWidth - lead;
+    var targetOffset = position.pixels;
+    if (targetX < currentLeft) {
+      targetOffset = targetX - lead;
+    } else if (targetX > currentRight) {
+      targetOffset = targetX - viewportWidth + lead;
+    }
+    targetOffset = targetOffset.clamp(
+      position.minScrollExtent,
+      position.maxScrollExtent,
+    );
+    if ((targetOffset - position.pixels).abs() >= 1) {
+      position.jumpTo(targetOffset);
+    }
   }
 
   KeyEventResult _handleWaveformKey(
       KeyEvent event, AudioController controller) {
     if (event is! KeyDownEvent) return KeyEventResult.ignored;
+    final pressed = HardwareKeyboard.instance.logicalKeysPressed;
+    final isCtrl = pressed.contains(LogicalKeyboardKey.controlLeft) ||
+        pressed.contains(LogicalKeyboardKey.controlRight);
+    if (isCtrl && event.logicalKey == LogicalKeyboardKey.keyZ) {
+      if (!widget.canUndoSectionEdit) return KeyEventResult.ignored;
+      unawaited(widget.onUndoSectionEdit());
+      return KeyEventResult.handled;
+    }
     if (event.logicalKey == LogicalKeyboardKey.space) {
       unawaited(controller.togglePlayback());
+      return KeyEventResult.handled;
+    }
+    if (event.logicalKey == LogicalKeyboardKey.delete ||
+        event.logicalKey == LogicalKeyboardKey.backspace) {
+      final section = _selectedSection;
+      if (section == null) return KeyEventResult.ignored;
+      setState(() => _selectedSection = null);
+      widget.onDeleteSection(section);
       return KeyEventResult.handled;
     }
     if (event.logicalKey == LogicalKeyboardKey.arrowLeft) {
@@ -2588,9 +3951,15 @@ class _PlayerPanelState extends State<_PlayerPanel> {
     final waveform = widget.waveform;
     final onAddAnnotation = widget.onAddAnnotation;
     final onStartRangeNote = widget.onStartRangeNote;
-    final onAddSectionFromLane = widget.onAddSectionFromLane;
+    final onSplitSectionAt = widget.onSplitSectionAt;
+    final onCreateSectionFromGap = widget.onCreateSectionFromGap;
+    final onAutoAssignSectionColors = widget.onAutoAssignSectionColors;
     final onResizeSection = widget.onResizeSection;
+    final onResizeSectionStart = widget.onResizeSectionStart;
+    final onResizeSectionEnd = widget.onResizeSectionEnd;
+    final onMergeSections = widget.onMergeSections;
     final onEditSection = widget.onEditSection;
+    final onAdjustSection = widget.onAdjustSection;
     final onDeleteSection = widget.onDeleteSection;
     final onExportAudio = widget.onExportAudio;
     final onConvertToMp3 = widget.onConvertToMp3;
@@ -2692,88 +4061,180 @@ class _PlayerPanelState extends State<_PlayerPanel> {
                               builder: (context, constraints) {
                                 final contentWidth =
                                     constraints.maxWidth * _waveformZoom;
-                                return SingleChildScrollView(
-                                  scrollDirection: Axis.horizontal,
-                                  child: SizedBox(
-                                    width: contentWidth,
-                                    child: Column(
-                                      children: [
-                                        SectionTimeline(
-                                          sections: sections,
-                                          duration: duration,
-                                          selectedSection: _selectedSection,
-                                          onSectionTap: (section) {
-                                            setState(() =>
-                                                _selectedSection = section);
-                                            unawaited(controller.seek(Duration(
-                                                milliseconds:
-                                                    section.startMs)));
-                                          },
-                                          onEmptyTapProgress: (progress) {
-                                            final recording =
-                                                controller.recording;
-                                            if (recording == null ||
-                                                duration == Duration.zero) {
-                                              return;
-                                            }
-                                            final clickedMs =
-                                                (duration.inMilliseconds *
-                                                        progress)
-                                                    .round();
-                                            onAddSectionFromLane(
-                                                recording, clickedMs);
-                                          },
-                                          onSectionResize: onResizeSection,
-                                        ),
-                                        WaveformView(
-                                          peaks: data.peaks,
-                                          progress: duration == Duration.zero
-                                              ? 0
-                                              : position.inMilliseconds /
-                                                  duration.inMilliseconds,
-                                          rangeStartProgress: (rangeStartMs ??
-                                                          sectionStartMs) ==
-                                                      null ||
-                                                  duration == Duration.zero
-                                              ? null
-                                              : (rangeStartMs ??
-                                                      sectionStartMs!) /
-                                                  duration.inMilliseconds,
-                                          hoverProgress: _hoverProgress,
-                                          hoverTimeLabel: _hoverProgress ==
-                                                      null ||
-                                                  duration == Duration.zero
-                                              ? null
-                                              : _format(Duration(
-                                                  milliseconds: (_hoverProgress! *
-                                                          duration
-                                                              .inMilliseconds)
-                                                      .round())),
-                                          highlightStartProgress:
-                                              _hoveredNote == null ||
-                                                      duration == Duration.zero
-                                                  ? null
-                                                  : _hoveredNote!.startMs /
-                                                      duration.inMilliseconds,
-                                          highlightEndProgress: _hoveredNote ==
-                                                      null ||
-                                                  duration == Duration.zero
-                                              ? null
-                                              : (_hoveredNote!.endMs ??
-                                                      _hoveredNote!.startMs) /
-                                                  duration.inMilliseconds,
-                                          onSeekProgress: (progress) {
-                                            _waveformFocus.requestFocus();
-                                            onWaveformSeek(progress);
-                                          },
-                                          onHoverProgress: (progress) {
-                                            if (_hoverProgress != progress) {
+                                return Scrollbar(
+                                  controller: _waveformScrollController,
+                                  thumbVisibility: _waveformZoom > 1,
+                                  trackVisibility: _waveformZoom > 1,
+                                  child: SingleChildScrollView(
+                                    controller: _waveformScrollController,
+                                    scrollDirection: Axis.horizontal,
+                                    child: SizedBox(
+                                      width: contentWidth,
+                                      child: Column(
+                                        children: [
+                                          SectionTimeline(
+                                            sections: sections,
+                                            duration: duration,
+                                            selectedSection: _selectedSection,
+                                            onSectionTap: (section) {
                                               setState(() =>
-                                                  _hoverProgress = progress);
-                                            }
-                                          },
-                                        ),
-                                      ],
+                                                  _selectedSection = section);
+                                              unawaited(controller.seek(
+                                                  Duration(
+                                                      milliseconds:
+                                                          section.startMs)));
+                                            },
+                                            onSplitAt: onSplitSectionAt,
+                                            onCreateSectionInGap:
+                                                onCreateSectionFromGap,
+                                            onAutoAssignSectionColors:
+                                                onAutoAssignSectionColors,
+                                            onGapTapMs: (milliseconds) {
+                                              if (duration == Duration.zero) {
+                                                return;
+                                              }
+                                              _waveformFocus.requestFocus();
+                                              onWaveformSeek(
+                                                (milliseconds /
+                                                        duration
+                                                            .inMilliseconds)
+                                                    .clamp(0, 1)
+                                                    .toDouble(),
+                                              );
+                                            },
+                                            onSectionResizeStart: () {
+                                              onResizeSectionStart();
+                                            },
+                                            onSectionResizeEnd: () {
+                                              onResizeSectionEnd();
+                                              if (_sectionResizePreviewMs !=
+                                                  null) {
+                                                setState(() =>
+                                                    _sectionResizePreviewMs =
+                                                        null);
+                                              }
+                                            },
+                                            onSectionResizePreviewMs:
+                                                (milliseconds) {
+                                              if (_sectionResizePreviewMs !=
+                                                  milliseconds) {
+                                                setState(() =>
+                                                    _sectionResizePreviewMs =
+                                                        milliseconds);
+                                              }
+                                              if (milliseconds != null) {
+                                                _followWaveformProgress(
+                                                  milliseconds /
+                                                      duration.inMilliseconds,
+                                                  constraints.maxWidth,
+                                                  contentWidth,
+                                                );
+                                              }
+                                            },
+                                            onHoverProgress: (progress) {
+                                              if (_hoverProgress != progress) {
+                                                setState(() =>
+                                                    _hoverProgress = progress);
+                                              }
+                                              if (progress != null) {
+                                                _followWaveformProgress(
+                                                  progress,
+                                                  constraints.maxWidth,
+                                                  contentWidth,
+                                                );
+                                              }
+                                            },
+                                            onSectionResize: onResizeSection,
+                                            onMergeSections: onMergeSections,
+                                            onSectionEdit: (section) {
+                                              setState(() =>
+                                                  _selectedSection = section);
+                                              onEditSection(section);
+                                            },
+                                            onSectionAdjust: (section) {
+                                              setState(() =>
+                                                  _selectedSection = section);
+                                              onAdjustSection(section);
+                                            },
+                                            onSectionDelete: (section) {
+                                              setState(() {
+                                                if (_selectedSection ==
+                                                    section) {
+                                                  _selectedSection = null;
+                                                }
+                                              });
+                                              onDeleteSection(section);
+                                            },
+                                            onDebugLog: widget.onSectionLog,
+                                          ),
+                                          WaveformView(
+                                            peaks: data.peaks,
+                                            progress: duration == Duration.zero
+                                                ? 0
+                                                : position.inMilliseconds /
+                                                    duration.inMilliseconds,
+                                            rangeStartProgress: (rangeStartMs ??
+                                                            sectionStartMs) ==
+                                                        null ||
+                                                    duration == Duration.zero
+                                                ? null
+                                                : (rangeStartMs ??
+                                                        sectionStartMs!) /
+                                                    duration.inMilliseconds,
+                                            hoverProgress: _hoverProgress,
+                                            hoverTimeLabel: _hoverProgress ==
+                                                        null ||
+                                                    duration == Duration.zero
+                                                ? null
+                                                : _format(Duration(
+                                                    milliseconds: (_hoverProgress! *
+                                                            duration
+                                                                .inMilliseconds)
+                                                        .round())),
+                                            dragProgress:
+                                              _sectionResizePreviewMs ==
+                                                    null ||
+                                                  duration ==
+                                                    Duration.zero
+                                                ? null
+                                                : _sectionResizePreviewMs! /
+                                                  duration
+                                                    .inMilliseconds,
+                                            dragTimeLabel:
+                                              _sectionResizePreviewMs == null
+                                                ? null
+                                                : _format(Duration(
+                                                  milliseconds:
+                                                    _sectionResizePreviewMs!)),
+                                            highlightStartProgress:
+                                                _hoveredNote == null ||
+                                                        duration ==
+                                                            Duration.zero
+                                                    ? null
+                                                    : _hoveredNote!.startMs /
+                                                        duration.inMilliseconds,
+                                            highlightEndProgress:
+                                                _hoveredNote == null ||
+                                                        duration ==
+                                                            Duration.zero
+                                                    ? null
+                                                    : (_hoveredNote!.endMs ??
+                                                            _hoveredNote!
+                                                                .startMs) /
+                                                        duration.inMilliseconds,
+                                            onSeekProgress: (progress) {
+                                              _waveformFocus.requestFocus();
+                                              onWaveformSeek(progress);
+                                            },
+                                            onHoverProgress: (progress) {
+                                              if (_hoverProgress != progress) {
+                                                setState(() =>
+                                                    _hoverProgress = progress);
+                                              }
+                                            },
+                                          ),
+                                        ],
+                                      ),
                                     ),
                                   ),
                                 );
@@ -2830,6 +4291,21 @@ class _PlayerPanelState extends State<_PlayerPanel> {
                                           Text(_zoomLabel(_waveformZoom)),
                                         ]),
                                   ),
+                                ),
+                                TextButton.icon(
+                                  onPressed: widget.canUndoSectionEdit
+                                      ? widget.onUndoSectionEdit
+                                      : null,
+                                  icon: const Icon(Icons.undo_outlined),
+                                  label: const Text('Undo section'),
+                                ),
+                                TextButton.icon(
+                                  onPressed: sections.isEmpty
+                                      ? null
+                                      : () => unawaited(
+                                          onAutoAssignSectionColors()),
+                                  icon: const Icon(Icons.palette_outlined),
+                                  label: const Text('Auto colors'),
                                 ),
                                 if (_selectedSection != null)
                                   IconButton(
