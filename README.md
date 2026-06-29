@@ -26,10 +26,10 @@ The repository contains an early but usable Windows-focused practice-review appl
 - Export processed tracks or selected clips as WAV or MP3.
 - Convert WAV/WAVE recordings to MP3, replacing the source recording after a successful conversion.
 - Open the Masters library, mark tracks/clips as masters, section master recordings, and run fuzzy fingerprint suggestions against practice folders.
-- Review fingerprint suggestions before applying song titles/sections or ignoring a match.
+- Use each take's fingerprint menu to inspect two-stage song/section match details, accept a guessed title/sections, or mark the guess as unknown.
 - Manually sync a selected practice folder to/from a local Google Drive-style sync folder while excluding regenerable cache.
 - Connect to a Google Drive account using a bundled app OAuth client, browse Drive folders, create a RiffNotes folder, and remember a remote sync root. Direct Drive upload/download is in progress.
-- Clear the waveform/processed-audio cache for a specific practice.
+- Clear generated cache for a selected practice from Preferences, including waveform, processed-audio, fingerprint cache, pending fingerprint suggestions, and fingerprint review state.
 - Preserve portable metadata in the practice folder.
 - Keep long-running work visible so the app does not appear frozen.
 
@@ -121,7 +121,7 @@ RiffNotes stores portable metadata beside the audio so a practice folder can be 
 - `.riffnotes.<user>.bandnotes` stores one user's annotations.
 - `.riffnotes.<recording-id>.sections.json` stores song sections for one track.
 - `library.riffnotes.json` stores the practice recording catalogue and take metadata.
-- `.riffnotes-cache\` stores regenerable waveform and processed-audio cache files.
+- `.riffnotes-cache\` stores regenerable waveform, processed-audio, and fingerprint cache files.
 - `Masters\` can live inside the band/practice area and contain reference recordings for fingerprint matching.
 
 Cache folders are safe to exclude from backups and cloud sync.

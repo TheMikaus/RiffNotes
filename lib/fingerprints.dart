@@ -9,8 +9,12 @@ import 'sections.dart';
 
 class FingerprintRepository {
   static const _cacheFolder = '.riffnotes-cache';
-  static const _cacheVersion = 1;
-  static const _minimumSuggestionConfidence = .35;
+  static const _cacheVersion = 2;
+  static const _minimumSuggestionConfidence = .42;
+  static const _sampleRate = 4000;
+  static const _windowSamples = 800;
+
+  final _learning = FingerprintLearningRepository();
 
   Future<List<FingerprintMatch>> matchPractice({
     required PracticeFolder practice,
@@ -19,11 +23,14 @@ class FingerprintRepository {
     Set<String> skipRecordingIds = const <String>{},
   }) async {
     final masters = await PracticeRepository().openPractice(mastersFolder);
-    final masterTargets = <_MasterTarget>[];
+    final learning = await _learning.load(mastersFolder.path);
+    final songTargets = <_MasterTarget>[];
+    final sectionTargets = <_MasterTarget>[];
     for (final master in masters.recordings) {
+      if (_isJamRecording(master)) continue;
       final fingerprint =
           await loadOrGenerateFingerprint(masters.directory, master);
-      masterTargets.add(_MasterTarget(
+      songTargets.add(_MasterTarget(
         recording: master,
         section: null,
         fingerprint: fingerprint,
@@ -32,8 +39,8 @@ class FingerprintRepository {
           await SongSectionRepository().load(masters.directory.path, master.id);
       for (final section in sections) {
         final sectionFingerprint = _sliceFingerprint(fingerprint, section);
-        if (sectionFingerprint.values.length >= 8) {
-          masterTargets.add(_MasterTarget(
+        if (sectionFingerprint.windowCount >= 8) {
+          sectionTargets.add(_MasterTarget(
             recording: master,
             section: section,
             fingerprint: sectionFingerprint,
@@ -41,31 +48,121 @@ class FingerprintRepository {
         }
       }
     }
-    if (masterTargets.isEmpty) return const <FingerprintMatch>[];
+    if (songTargets.isEmpty) return const <FingerprintMatch>[];
 
     final matches = <FingerprintMatch>[];
     for (final recording in practice.recordings) {
+      if (_isJamRecording(recording)) {
+        continue;
+      }
       if (skipRecordingIds.contains(recording.id)) {
         continue;
       }
       final fingerprint =
           await loadOrGenerateFingerprint(practice.directory, recording);
-      final ranked = masterTargets
-          .map((target) => FingerprintMatch(
-                recordingId: recording.id,
-                recordingFilename: recording.filename,
-                masterRecordingId: target.recording.id,
-                masterFilename: target.recording.filename,
-                masterTitle: target.recording.title,
-                sectionLabel: target.section?.label,
-                confidence: _similarity(fingerprint, target.fingerprint),
+      final songCandidates = songTargets
+          .map((target) => _matchTarget(
+                recording: recording,
+                fingerprint: fingerprint,
+                target: target,
+                learning: learning,
+                targetType: FingerprintTargetType.song,
               ))
-          .where((match) => match.confidence >= _minimumSuggestionConfidence)
           .toList()
         ..sort((a, b) => b.confidence.compareTo(a.confidence));
-      matches.addAll(ranked.take(maxResultsPerRecording));
+      final likelySongIds = _likelySongIds(songCandidates);
+      final candidates = <FingerprintMatch>[
+        ...songCandidates,
+        for (final target in sectionTargets)
+          if (likelySongIds.contains(target.recording.id))
+            _matchTarget(
+              recording: recording,
+              fingerprint: fingerprint,
+              target: target,
+              learning: learning,
+              targetType: FingerprintTargetType.section,
+              songConfidence: songCandidates
+                  .where(
+                      (item) => item.masterRecordingId == target.recording.id)
+                  .firstOrNull
+                  ?.confidence,
+            ),
+      ];
+      candidates.sort((a, b) => b.confidence.compareTo(a.confidence));
+      var addedForRecording = 0;
+      for (var index = 0;
+          index < candidates.length &&
+              addedForRecording < maxResultsPerRecording;
+          index += 1) {
+        final candidate = candidates[index];
+        final nextConfidence = index + 1 < candidates.length
+            ? candidates[index + 1].confidence
+            : 0.0;
+        final margin =
+            (candidate.confidence - nextConfidence).clamp(0.0, 1.0).toDouble();
+        if (candidate.confidence >= _minimumSuggestionConfidence) {
+          matches.add(candidate.copyWith(confidenceMargin: margin));
+          addedForRecording += 1;
+        }
+      }
     }
     return matches;
+  }
+
+  Set<String> _likelySongIds(List<FingerprintMatch> songCandidates) {
+    if (songCandidates.isEmpty) return const <String>{};
+    final best = songCandidates.first.confidence;
+    final likely = songCandidates
+        .where((match) =>
+            match.confidence >= .40 ||
+            (best >= .50 && best - match.confidence <= .12))
+        .take(3)
+        .map((match) => match.masterRecordingId)
+        .toSet();
+    if (likely.isNotEmpty) return likely;
+    return songCandidates
+        .take(2)
+        .map((match) => match.masterRecordingId)
+        .toSet();
+  }
+
+  FingerprintMatch _matchTarget({
+    required Recording recording,
+    required AudioFingerprint fingerprint,
+    required _MasterTarget target,
+    required FingerprintLearning learning,
+    required FingerprintTargetType targetType,
+    double? songConfidence,
+  }) {
+    final score = _similarity(fingerprint, target.fingerprint);
+    final adjustment = learning.adjustmentFor(
+      masterRecordingId: target.recording.id,
+      sectionLabel: target.section?.label,
+    );
+    final sectionPenalty =
+        targetType == FingerprintTargetType.section && songConfidence != null
+            ? ((1 - songConfidence) * .10).clamp(0.0, .08).toDouble()
+            : 0.0;
+    final adjustedConfidence = (score.confidence + adjustment - sectionPenalty)
+        .clamp(0.0, 1.0)
+        .toDouble();
+    return FingerprintMatch(
+      recordingId: recording.id,
+      recordingFilename: recording.filename,
+      masterRecordingId: target.recording.id,
+      masterFilename: target.recording.filename,
+      masterTitle: target.recording.title,
+      sectionLabel: target.section?.label,
+      confidence: adjustedConfidence,
+      rawConfidence: score.confidence,
+      confidenceMargin: 0,
+      learningAdjustment: adjustment,
+      sectionSongPenalty: sectionPenalty,
+      songConfidence: songConfidence,
+      matchOffsetMs: _offsetMsFor(score.offset, fingerprint),
+      targetType: targetType,
+      featureScores: score.featureScores,
+    );
   }
 
   Future<List<SongSection>> alignSectionsToRecording({
@@ -74,34 +171,34 @@ class FingerprintRepository {
     required Directory mastersFolder,
     required Recording masterRecording,
     required List<SongSection> masterSections,
-    double minimumSectionConfidence = .48,
+    double minimumSectionConfidence = .52,
   }) async {
     if (masterSections.isEmpty) return const <SongSection>[];
     final recordingFingerprint =
         await loadOrGenerateFingerprint(practiceFolder, recording);
     final masterFingerprint =
         await loadOrGenerateFingerprint(mastersFolder, masterRecording);
-    if (recordingFingerprint.values.length < 8 ||
-        masterFingerprint.values.length < 8) {
+    if (recordingFingerprint.windowCount < 8 ||
+        masterFingerprint.windowCount < 8) {
       return const <SongSection>[];
     }
     final candidates = <_AlignedSectionCandidate>[];
     for (final section in masterSections) {
       final sectionFingerprint = _sliceFingerprint(masterFingerprint, section);
-      if (sectionFingerprint.values.length < 8) continue;
-      final offset =
-          _bestSectionOffset(recordingFingerprint.values, sectionFingerprint.values);
-      if (offset == null) continue;
-      final similarity =
-          _windowSimilarity(sectionFingerprint.values, recordingFingerprint.values, offset);
-      if (similarity < minimumSectionConfidence) continue;
-      final startRatio = offset / recordingFingerprint.values.length;
-      final endRatio =
-          (offset + sectionFingerprint.values.length) / recordingFingerprint.values.length;
-      final startMs =
-          (startRatio * recordingFingerprint.durationMs).round().clamp(0, recordingFingerprint.durationMs);
-      final endMs =
-          (endRatio * recordingFingerprint.durationMs).round().clamp(startMs + 1, recordingFingerprint.durationMs);
+      if (sectionFingerprint.windowCount < 8) continue;
+      final score = _similarity(recordingFingerprint, sectionFingerprint);
+      if (score.confidence < minimumSectionConfidence || score.offset == null) {
+        continue;
+      }
+      final startRatio = score.offset! / recordingFingerprint.windowCount;
+      final endRatio = (score.offset! + sectionFingerprint.windowCount) /
+          recordingFingerprint.windowCount;
+      final startMs = (startRatio * recordingFingerprint.durationMs)
+          .round()
+          .clamp(0, recordingFingerprint.durationMs);
+      final endMs = (endRatio * recordingFingerprint.durationMs)
+          .round()
+          .clamp(startMs + 1, recordingFingerprint.durationMs);
       if (endMs - startMs < 250) continue;
       candidates.add(_AlignedSectionCandidate(
         section: SongSection(
@@ -111,7 +208,7 @@ class FingerprintRepository {
           label: section.label,
           colorIndex: section.colorIndex,
         ),
-        confidence: similarity,
+        confidence: score.confidence,
       ));
     }
     if (candidates.isEmpty) return const <SongSection>[];
@@ -148,7 +245,7 @@ class FingerprintRepository {
         '-ac',
         '1',
         '-ar',
-        '4000',
+        '$_sampleRate',
         '-f',
         's16le',
         'pipe:1',
@@ -163,18 +260,18 @@ class FingerprintRepository {
     if (output is! List<int> || output.length < 2) {
       throw StateError('No usable audio samples for ${recording.filename}.');
     }
-    final fingerprint = AudioFingerprint(
-      durationMs: output.length ~/ 2 * 1000 ~/ 4000,
-      values: calculateFingerprint(output),
-    );
+    final fingerprint = calculateAudioFingerprint(output);
     await cache.parent.create(recursive: true);
     await cache.writeAsString(
       const JsonEncoder.withIndent('  ').convert(<String, dynamic>{
         'version': _cacheVersion,
         'sourceBytes': sourceStat.size,
         'sourceModifiedMs': sourceStat.modified.millisecondsSinceEpoch,
+        'algorithm': 'multi-feature-v2',
+        'sampleRate': _sampleRate,
+        'windowSamples': _windowSamples,
         'durationMs': fingerprint.durationMs,
-        'values': fingerprint.values,
+        'features': fingerprint.features,
       }),
       flush: true,
     );
@@ -192,11 +289,18 @@ class FingerprintRepository {
               sourceStat.modified.millisecondsSinceEpoch) {
         return null;
       }
+      final featuresJson = decoded['features'] as Map<String, dynamic>?;
+      if (featuresJson == null) return null;
       return AudioFingerprint(
         durationMs: decoded['durationMs'] as int,
-        values: (decoded['values'] as List<dynamic>)
-            .map((value) => (value as num).toDouble())
-            .toList(growable: false),
+        features: featuresJson.map(
+          (key, value) => MapEntry(
+            key,
+            (value as List<dynamic>)
+                .map((item) => (item as num).toDouble())
+                .toList(growable: false),
+          ),
+        ),
       );
     } on FormatException {
       return null;
@@ -205,113 +309,238 @@ class FingerprintRepository {
     }
   }
 
-  static List<double> calculateFingerprint(List<int> pcmBytes,
-      {int windowSamples = 800}) {
+  static AudioFingerprint calculateAudioFingerprint(List<int> pcmBytes,
+      {int sampleRate = _sampleRate, int windowSamples = _windowSamples}) {
     final sampleCount = pcmBytes.length ~/ 2;
-    if (sampleCount == 0) return const <double>[];
+    if (sampleCount == 0) {
+      return const AudioFingerprint(durationMs: 0, features: {});
+    }
     final windows = max(1, sampleCount ~/ windowSamples);
-    final values = <double>[];
+    final energy = <double>[];
+    final zeroCrossing = <double>[];
+    final attack = <double>[];
+    final lowMotion = <double>[];
+    final highMotion = <double>[];
+    final peaks = <double>[];
+    var previousWindowEnergy = 0.0;
+
     for (var window = 0; window < windows; window += 1) {
       final start = window * windowSamples;
       final end = min(sampleCount, start + windowSamples);
-      var energy = 0.0;
+      var absoluteEnergy = 0.0;
       var crossings = 0;
-      var previous = 0;
+      var highDifference = 0.0;
+      var lowAccumulator = 0.0;
+      var peakCount = 0;
+      var previous = 0.0;
+      var smoothed = 0.0;
       for (var sample = start; sample < end; sample += 1) {
-        final low = pcmBytes[sample * 2];
-        final high = pcmBytes[sample * 2 + 1];
-        var value = low | (high << 8);
-        if (value >= 0x8000) value -= 0x10000;
-        energy += value.abs() / 32768;
+        final value = _readSignedSample(pcmBytes, sample) / 32768.0;
+        final absValue = value.abs();
+        absoluteEnergy += absValue;
         if (sample > start &&
             ((value >= 0 && previous < 0) || (value < 0 && previous >= 0))) {
           crossings += 1;
         }
+        if (sample > start) highDifference += (value - previous).abs();
+        smoothed = (smoothed * .92) + (value * .08);
+        lowAccumulator += smoothed.abs();
+        if (absValue >= .62) peakCount += 1;
         previous = value;
       }
       final length = max(1, end - start);
-      final normalizedEnergy = energy / length;
-      final normalizedCrossings = crossings / length;
-      values.add((normalizedEnergy * .8) + (normalizedCrossings * .2));
+      final currentEnergy = absoluteEnergy / length;
+      energy.add(currentEnergy);
+      zeroCrossing.add(crossings / length);
+      highMotion.add(highDifference / length);
+      lowMotion.add(lowAccumulator / length);
+      attack.add(max(0, currentEnergy - previousWindowEnergy));
+      peaks.add(peakCount / length);
+      previousWindowEnergy = currentEnergy;
     }
-    final maximum =
-        values.reduce((largest, value) => value > largest ? value : largest);
-    if (maximum == 0) return values;
-    return values.map((value) => value / maximum).toList(growable: false);
+
+    final features = <String, List<double>>{
+      'energy': _normalize(energy),
+      'zeroCrossing': _normalize(zeroCrossing),
+      'attack': _normalize(attack),
+      'lowMotion': _normalize(lowMotion),
+      'highMotion': _normalize(highMotion),
+      'peaks': _normalize(peaks),
+    };
+    return AudioFingerprint(
+      durationMs: sampleCount * 1000 ~/ sampleRate,
+      features: features,
+    );
+  }
+
+  static List<double> calculateFingerprint(List<int> pcmBytes,
+      {int windowSamples = _windowSamples}) {
+    return calculateAudioFingerprint(pcmBytes, windowSamples: windowSamples)
+        .values;
   }
 
   AudioFingerprint _sliceFingerprint(
       AudioFingerprint fingerprint, SongSection section) {
-    if (fingerprint.durationMs <= 0 || fingerprint.values.isEmpty) {
-      return const AudioFingerprint(durationMs: 0, values: <double>[]);
+    if (fingerprint.durationMs <= 0 || fingerprint.windowCount == 0) {
+      return const AudioFingerprint(durationMs: 0, features: {});
     }
     final start =
-        (section.startMs / fingerprint.durationMs * fingerprint.values.length)
+        (section.startMs / fingerprint.durationMs * fingerprint.windowCount)
             .floor()
-            .clamp(0, fingerprint.values.length - 1);
+            .clamp(0, fingerprint.windowCount - 1);
     final end =
-        (section.endMs / fingerprint.durationMs * fingerprint.values.length)
+        (section.endMs / fingerprint.durationMs * fingerprint.windowCount)
             .ceil()
-            .clamp(start + 1, fingerprint.values.length);
+            .clamp(start + 1, fingerprint.windowCount);
     return AudioFingerprint(
       durationMs: section.endMs - section.startMs,
-      values: fingerprint.values.sublist(start, end),
+      features: fingerprint.features.map(
+        (name, values) => MapEntry(name, values.sublist(start, end)),
+      ),
     );
   }
 
-  double _similarity(AudioFingerprint query, AudioFingerprint target) {
-    if (query.values.isEmpty || target.values.isEmpty) return 0;
-    final shorter =
-        query.values.length <= target.values.length ? query : target;
+  _SimilarityResult _similarity(
+      AudioFingerprint query, AudioFingerprint target) {
+    if (query.windowCount == 0 || target.windowCount == 0) {
+      return const _SimilarityResult(confidence: 0, offset: null);
+    }
+    final shorter = query.windowCount <= target.windowCount ? query : target;
     final longer = identical(shorter, query) ? target : query;
-    if (shorter.values.length < 4) return 0;
+    if (shorter.windowCount < 4) {
+      return const _SimilarityResult(confidence: 0, offset: null);
+    }
 
     var best = 0.0;
-    final maxOffset = max(0, longer.values.length - shorter.values.length);
-    final step = max(1, shorter.values.length ~/ 24);
-    for (var offset = 0; offset <= maxOffset; offset += step) {
-      best =
-          max(best, _windowSimilarity(shorter.values, longer.values, offset));
-    }
-    if (maxOffset > 0) {
-      best = max(
-          best, _windowSimilarity(shorter.values, longer.values, maxOffset));
-    }
-    final durationRatio = min(query.durationMs, target.durationMs) /
-        max(query.durationMs, target.durationMs);
-    return (best * .85) + (durationRatio * .15);
-  }
-
-  double _windowSimilarity(List<double> left, List<double> right, int offset) {
-    var difference = 0.0;
-    for (var index = 0; index < left.length; index += 1) {
-      difference += (left[index] - right[index + offset]).abs();
-    }
-    final averageDifference = difference / left.length;
-    return (1 - averageDifference).clamp(0, 1);
-  }
-
-  int? _bestSectionOffset(List<double> timeline, List<double> section) {
-    if (timeline.length < section.length || section.length < 4) return null;
     var bestOffset = 0;
-    var bestScore = -1.0;
-    final maxOffset = timeline.length - section.length;
-    final step = max(1, section.length ~/ 20);
-    for (var offset = 0; offset <= maxOffset; offset += step) {
-      final score = _windowSimilarity(section, timeline, offset);
-      if (score > bestScore) {
-        bestScore = score;
+    final maxOffset = max(0, longer.windowCount - shorter.windowCount);
+    final coarseStep = max(1, shorter.windowCount ~/ 24);
+    for (var offset = 0; offset <= maxOffset; offset += coarseStep) {
+      final score = _windowSimilarity(shorter, longer, offset);
+      if (score > best) {
+        best = score;
         bestOffset = offset;
       }
     }
-    if (bestOffset != maxOffset) {
-      final score = _windowSimilarity(section, timeline, maxOffset);
-      if (score > bestScore) {
+    if (maxOffset > 0) {
+      final score = _windowSimilarity(shorter, longer, maxOffset);
+      if (score > best) {
+        best = score;
         bestOffset = maxOffset;
       }
     }
-    return bestOffset;
+    final refineStart = max(0, bestOffset - coarseStep);
+    final refineEnd = min(maxOffset, bestOffset + coarseStep);
+    for (var offset = refineStart; offset <= refineEnd; offset += 1) {
+      final score = _windowSimilarity(shorter, longer, offset);
+      if (score > best) {
+        best = score;
+        bestOffset = offset;
+      }
+    }
+    final durationRatio = min(query.durationMs, target.durationMs) /
+        max(query.durationMs, target.durationMs);
+    final confidence = (best * .9) + (durationRatio * .1);
+    final offset = identical(longer, query) ? bestOffset : 0;
+    final featureScores = _windowFeatureScores(shorter, longer, bestOffset);
+    return _SimilarityResult(
+      confidence: confidence.clamp(0.0, 1.0).toDouble(),
+      offset: offset,
+      featureScores: featureScores,
+    );
   }
+
+  double _windowSimilarity(
+      AudioFingerprint left, AudioFingerprint right, int offset) {
+    final featureNames = left.features.keys
+        .where((name) => right.features.containsKey(name))
+        .toList(growable: false);
+    if (featureNames.isEmpty) return 0;
+    var weightedScore = 0.0;
+    var totalWeight = 0.0;
+    for (final name in featureNames) {
+      final leftValues = left.features[name]!;
+      final rightValues = right.features[name]!;
+      if (leftValues.isEmpty ||
+          rightValues.length < leftValues.length + offset) {
+        continue;
+      }
+      final weight = _featureWeight(name);
+      var difference = 0.0;
+      for (var index = 0; index < leftValues.length; index += 1) {
+        difference += (leftValues[index] - rightValues[index + offset]).abs();
+      }
+      final averageDifference = difference / leftValues.length;
+      weightedScore += (1 - averageDifference).clamp(0.0, 1.0) * weight;
+      totalWeight += weight;
+    }
+    return totalWeight == 0 ? 0 : weightedScore / totalWeight;
+  }
+
+  Map<String, double> _windowFeatureScores(
+      AudioFingerprint left, AudioFingerprint right, int offset) {
+    final scores = <String, double>{};
+    final featureNames = left.features.keys
+        .where((name) => right.features.containsKey(name))
+        .toList(growable: false);
+    for (final name in featureNames) {
+      final leftValues = left.features[name]!;
+      final rightValues = right.features[name]!;
+      if (leftValues.isEmpty ||
+          rightValues.length < leftValues.length + offset) {
+        continue;
+      }
+      var difference = 0.0;
+      for (var index = 0; index < leftValues.length; index += 1) {
+        difference += (leftValues[index] - rightValues[index + offset]).abs();
+      }
+      scores[name] =
+          (1 - (difference / leftValues.length)).clamp(0.0, 1.0).toDouble();
+    }
+    return scores;
+  }
+
+  int? _offsetMsFor(int? offset, AudioFingerprint fingerprint) {
+    if (offset == null || fingerprint.windowCount == 0) return null;
+    return (offset / fingerprint.windowCount * fingerprint.durationMs).round();
+  }
+
+  static int _readSignedSample(List<int> pcmBytes, int sample) {
+    final low = pcmBytes[sample * 2];
+    final high = pcmBytes[sample * 2 + 1];
+    var value = low | (high << 8);
+    if (value >= 0x8000) value -= 0x10000;
+    return value;
+  }
+
+  static List<double> _normalize(List<double> values) {
+    if (values.isEmpty) return const <double>[];
+    final minimum =
+        values.reduce((smallest, value) => value < smallest ? value : smallest);
+    final maximum =
+        values.reduce((largest, value) => value > largest ? value : largest);
+    final range = maximum - minimum;
+    if (range <= 0) {
+      final constant = maximum == 0 ? 0.0 : 1.0;
+      return values.map((_) => constant).toList(growable: false);
+    }
+    return values
+        .map((value) => (value - minimum) / range)
+        .toList(growable: false);
+  }
+
+  double _featureWeight(String name) => switch (name) {
+        'energy' => 1.25,
+        'attack' => 1.15,
+        'lowMotion' => .9,
+        'highMotion' => .8,
+        'zeroCrossing' => .65,
+        'peaks' => .55,
+        _ => .5,
+      };
+
+  bool _isJamRecording(Recording recording) =>
+      recording.title?.trim().toLowerCase() == 'jam';
 }
 
 class FingerprintSuggestionRepository {
@@ -321,7 +550,8 @@ class FingerprintSuggestionRepository {
     final file = File(path.join(practiceFolder, _filename));
     if (!await file.exists()) return const <FingerprintMatch>[];
     try {
-      final decoded = jsonDecode(await file.readAsString()) as Map<String, dynamic>;
+      final decoded =
+          jsonDecode(await file.readAsString()) as Map<String, dynamic>;
       return (decoded['matches'] as List<dynamic>? ?? const <dynamic>[])
           .cast<Map<String, dynamic>>()
           .map(FingerprintMatch.fromJson)
@@ -333,16 +563,22 @@ class FingerprintSuggestionRepository {
     }
   }
 
-  Future<void> save(String practiceFolder, List<FingerprintMatch> matches) async {
+  Future<void> save(
+      String practiceFolder, List<FingerprintMatch> matches) async {
     final file = File(path.join(practiceFolder, _filename));
     const encoder = JsonEncoder.withIndent('  ');
     await file.writeAsString(
       encoder.convert(<String, dynamic>{
-        'version': 1,
+        'version': 2,
         'matches': matches.map((item) => item.toJson()).toList(),
       }),
       flush: true,
     );
+  }
+
+  Future<void> clear(String practiceFolder) async {
+    final file = File(path.join(practiceFolder, _filename));
+    if (await file.exists()) await file.delete();
   }
 }
 
@@ -413,6 +649,132 @@ class FingerprintDecisionRepository {
       flush: true,
     );
   }
+
+  Future<void> clear(String practiceFolder) async {
+    final file = File(path.join(practiceFolder, _filename));
+    if (await file.exists()) await file.delete();
+  }
+}
+
+class FingerprintLearningRepository {
+  static const _filename = '.riffnotes.fingerprint-learning.json';
+
+  Future<FingerprintLearning> load(String mastersFolder) async {
+    final file = File(path.join(mastersFolder, _filename));
+    if (!await file.exists()) return const FingerprintLearning();
+    try {
+      final decoded =
+          jsonDecode(await file.readAsString()) as Map<String, dynamic>;
+      return FingerprintLearning(
+        examples: (decoded['examples'] as List<dynamic>? ?? const <dynamic>[])
+            .cast<Map<String, dynamic>>()
+            .map(FingerprintLearningExample.fromJson)
+            .toList(growable: false),
+      );
+    } on FormatException {
+      return const FingerprintLearning();
+    } on TypeError {
+      return const FingerprintLearning();
+    }
+  }
+
+  Future<void> recordAccepted(
+      String mastersFolder, FingerprintMatch match) async {
+    await _append(mastersFolder, match, accepted: true);
+  }
+
+  Future<void> recordIgnored(
+      String mastersFolder, FingerprintMatch match) async {
+    await _append(mastersFolder, match, accepted: false);
+  }
+
+  Future<void> _append(
+    String mastersFolder,
+    FingerprintMatch match, {
+    required bool accepted,
+  }) async {
+    final learning = await load(mastersFolder);
+    final examples = learning.examples.toList()
+      ..add(FingerprintLearningExample(
+        masterRecordingId: match.masterRecordingId,
+        sectionLabel: match.sectionLabel,
+        accepted: accepted,
+        confidence: match.confidence,
+        recordedAt: DateTime.now().toUtc(),
+      ));
+    final file = File(path.join(mastersFolder, _filename));
+    const encoder = JsonEncoder.withIndent('  ');
+    await file.writeAsString(
+      encoder.convert(<String, dynamic>{
+        'version': 1,
+        'examples': examples.map((item) => item.toJson()).toList(),
+      }),
+      flush: true,
+    );
+  }
+}
+
+class FingerprintLearning {
+  const FingerprintLearning(
+      {this.examples = const <FingerprintLearningExample>[]});
+
+  final List<FingerprintLearningExample> examples;
+
+  double adjustmentFor({
+    required String masterRecordingId,
+    required String? sectionLabel,
+  }) {
+    var accepted = 0;
+    var ignored = 0;
+    for (final example in examples) {
+      if (example.masterRecordingId != masterRecordingId) continue;
+      final sameSection = example.sectionLabel == sectionLabel;
+      final sameSongWholeTrack =
+          sectionLabel == null || example.sectionLabel == null;
+      if (!sameSection && !sameSongWholeTrack) continue;
+      if (example.accepted) {
+        accepted += sameSection ? 2 : 1;
+      } else {
+        ignored += sameSection ? 2 : 1;
+      }
+    }
+    final boost = min(.10, accepted * .015);
+    final penalty = min(.14, ignored * .025);
+    return boost - penalty;
+  }
+}
+
+class FingerprintLearningExample {
+  const FingerprintLearningExample({
+    required this.masterRecordingId,
+    required this.sectionLabel,
+    required this.accepted,
+    required this.confidence,
+    required this.recordedAt,
+  });
+
+  final String masterRecordingId;
+  final String? sectionLabel;
+  final bool accepted;
+  final double confidence;
+  final DateTime recordedAt;
+
+  Map<String, dynamic> toJson() => <String, dynamic>{
+        'masterRecordingId': masterRecordingId,
+        'sectionLabel': sectionLabel,
+        'accepted': accepted,
+        'confidence': confidence,
+        'recordedAt': recordedAt.toIso8601String(),
+      };
+
+  factory FingerprintLearningExample.fromJson(Map<String, dynamic> json) =>
+      FingerprintLearningExample(
+        masterRecordingId: json['masterRecordingId'] as String,
+        sectionLabel: json['sectionLabel'] as String?,
+        accepted: json['accepted'] as bool,
+        confidence: (json['confidence'] as num).toDouble(),
+        recordedAt: DateTime.parse(json['recordedAt'] as String),
+      );
 }
 
 class FingerprintDecisions {
@@ -459,11 +821,18 @@ class FingerprintDecision {
 }
 
 class AudioFingerprint {
-  const AudioFingerprint({required this.durationMs, required this.values});
+  const AudioFingerprint({required this.durationMs, required this.features});
 
   final int durationMs;
-  final List<double> values;
+  final Map<String, List<double>> features;
+
+  List<double> get values => features['energy'] ?? const <double>[];
+
+  int get windowCount =>
+      features.values.isEmpty ? 0 : features.values.first.length;
 }
+
+enum FingerprintTargetType { song, section }
 
 class FingerprintMatch {
   const FingerprintMatch({
@@ -474,6 +843,14 @@ class FingerprintMatch {
     required this.masterTitle,
     required this.sectionLabel,
     required this.confidence,
+    this.rawConfidence,
+    this.confidenceMargin = 0,
+    this.learningAdjustment = 0,
+    this.sectionSongPenalty = 0,
+    this.songConfidence,
+    this.matchOffsetMs,
+    this.targetType = FingerprintTargetType.song,
+    this.featureScores = const <String, double>{},
   });
 
   final String recordingId;
@@ -483,6 +860,43 @@ class FingerprintMatch {
   final String? masterTitle;
   final String? sectionLabel;
   final double confidence;
+  final double? rawConfidence;
+  final double confidenceMargin;
+  final double learningAdjustment;
+  final double sectionSongPenalty;
+  final double? songConfidence;
+  final int? matchOffsetMs;
+  final FingerprintTargetType targetType;
+  final Map<String, double> featureScores;
+
+  FingerprintMatch copyWith({
+    double? confidence,
+    double? rawConfidence,
+    double? confidenceMargin,
+    double? learningAdjustment,
+    double? sectionSongPenalty,
+    double? songConfidence,
+    int? matchOffsetMs,
+    FingerprintTargetType? targetType,
+    Map<String, double>? featureScores,
+  }) =>
+      FingerprintMatch(
+        recordingId: recordingId,
+        recordingFilename: recordingFilename,
+        masterRecordingId: masterRecordingId,
+        masterFilename: masterFilename,
+        masterTitle: masterTitle,
+        sectionLabel: sectionLabel,
+        confidence: confidence ?? this.confidence,
+        rawConfidence: rawConfidence ?? this.rawConfidence,
+        confidenceMargin: confidenceMargin ?? this.confidenceMargin,
+        learningAdjustment: learningAdjustment ?? this.learningAdjustment,
+        sectionSongPenalty: sectionSongPenalty ?? this.sectionSongPenalty,
+        songConfidence: songConfidence ?? this.songConfidence,
+        matchOffsetMs: matchOffsetMs ?? this.matchOffsetMs,
+        targetType: targetType ?? this.targetType,
+        featureScores: featureScores ?? this.featureScores,
+      );
 
   Map<String, dynamic> toJson() => <String, dynamic>{
         'recordingId': recordingId,
@@ -492,6 +906,14 @@ class FingerprintMatch {
         'masterTitle': masterTitle,
         'sectionLabel': sectionLabel,
         'confidence': confidence,
+        'rawConfidence': rawConfidence,
+        'confidenceMargin': confidenceMargin,
+        'learningAdjustment': learningAdjustment,
+        'sectionSongPenalty': sectionSongPenalty,
+        'songConfidence': songConfidence,
+        'matchOffsetMs': matchOffsetMs,
+        'targetType': targetType.name,
+        'featureScores': featureScores,
       };
 
   factory FingerprintMatch.fromJson(Map<String, dynamic> json) =>
@@ -503,6 +925,22 @@ class FingerprintMatch {
         masterTitle: json['masterTitle'] as String?,
         sectionLabel: json['sectionLabel'] as String?,
         confidence: (json['confidence'] as num).toDouble(),
+        rawConfidence: (json['rawConfidence'] as num?)?.toDouble(),
+        confidenceMargin: (json['confidenceMargin'] as num?)?.toDouble() ?? 0,
+        learningAdjustment:
+            (json['learningAdjustment'] as num?)?.toDouble() ?? 0,
+        sectionSongPenalty:
+            (json['sectionSongPenalty'] as num?)?.toDouble() ?? 0,
+        songConfidence: (json['songConfidence'] as num?)?.toDouble(),
+        matchOffsetMs: json['matchOffsetMs'] as int?,
+        targetType: FingerprintTargetType.values
+                .where((value) => value.name == json['targetType'])
+                .firstOrNull ??
+            (json['sectionLabel'] == null
+                ? FingerprintTargetType.song
+                : FingerprintTargetType.section),
+        featureScores: (json['featureScores'] as Map<String, dynamic>? ?? {})
+            .map((key, value) => MapEntry(key, (value as num).toDouble())),
       );
 
   String get key =>
@@ -511,6 +949,56 @@ class FingerprintMatch {
   String get displayName {
     final song = masterTitle ?? path.basenameWithoutExtension(masterFilename);
     return sectionLabel == null ? song : '$song / $sectionLabel';
+  }
+
+  String get confidenceLabel {
+    if (confidence >= .78 && confidenceMargin >= .08) return 'strong';
+    if (confidence >= .62 && confidenceMargin >= .04) return 'likely';
+    if (confidence >= .50) return 'possible';
+    return 'weak';
+  }
+
+  String get scoreDetails {
+    final pieces = <String>[
+      targetType == FingerprintTargetType.section ? 'section' : 'song',
+      '${(confidence * 100).round()}% $confidenceLabel',
+      'margin ${(confidenceMargin * 100).round()}%',
+    ];
+    if (rawConfidence != null && (rawConfidence! - confidence).abs() > .004) {
+      pieces.add('raw ${(rawConfidence! * 100).round()}%');
+    }
+    if (learningAdjustment.abs() > .004) {
+      final sign = learningAdjustment > 0 ? '+' : '';
+      pieces.add('learned $sign${(learningAdjustment * 100).round()}%');
+    }
+    if (sectionSongPenalty.abs() > .004) {
+      pieces.add('song gate -${(sectionSongPenalty * 100).round()}%');
+    }
+    if (songConfidence != null) {
+      pieces.add('song ${(songConfidence! * 100).round()}%');
+    }
+    if (matchOffsetMs != null && matchOffsetMs! > 0) {
+      pieces.add('offset ${_formatMilliseconds(matchOffsetMs!)}');
+    }
+    return pieces.join(' • ');
+  }
+
+  String get diagnosticDetails {
+    final lines = <String>[scoreDetails];
+    if (featureScores.isNotEmpty) {
+      final featureLine = featureScores.entries.toList()
+        ..sort((a, b) => a.key.compareTo(b.key));
+      lines.add(
+          'features: ${featureLine.map((entry) => '${entry.key} ${(entry.value * 100).round()}%').join(', ')}');
+    }
+    return lines.join('\n');
+  }
+
+  static String _formatMilliseconds(int milliseconds) {
+    final duration = Duration(milliseconds: milliseconds);
+    final minutes = duration.inMinutes.remainder(60).toString().padLeft(2, '0');
+    final seconds = duration.inSeconds.remainder(60).toString().padLeft(2, '0');
+    return '$minutes:$seconds';
   }
 }
 
@@ -527,8 +1015,23 @@ class _MasterTarget {
 }
 
 class _AlignedSectionCandidate {
-  const _AlignedSectionCandidate({required this.section, required this.confidence});
+  const _AlignedSectionCandidate({
+    required this.section,
+    required this.confidence,
+  });
 
   final SongSection section;
   final double confidence;
+}
+
+class _SimilarityResult {
+  const _SimilarityResult({
+    required this.confidence,
+    required this.offset,
+    this.featureScores = const <String, double>{},
+  });
+
+  final double confidence;
+  final int? offset;
+  final Map<String, double> featureScores;
 }
