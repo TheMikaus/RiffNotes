@@ -321,5 +321,111 @@ void main() {
     decisions = await repository.load(folder.path);
     expect(decisions.ignoredKeys, isNot(contains(match.key)));
     expect(decisions.accepted.single.displayName, 'The Song / Chorus');
+
+    await repository.clear(folder.path);
+    decisions = await repository.load(folder.path);
+    expect(decisions.accepted, isEmpty);
+    expect(decisions.ignoredKeys, isEmpty);
+  });
+
+  test('clears persisted fingerprint suggestions', () async {
+    final folder =
+        await Directory.systemTemp.createTemp('riffnotes-fp-suggestions-');
+    addTearDown(() async {
+      if (await folder.exists()) await folder.delete(recursive: true);
+    });
+    const match = FingerprintMatch(
+      recordingId: 'practice-1',
+      recordingFilename: 'practice.mp3',
+      masterRecordingId: 'master-1',
+      masterFilename: 'song.mp3',
+      masterTitle: 'The Song',
+      sectionLabel: null,
+      confidence: .74,
+    );
+    final repository = FingerprintSuggestionRepository();
+
+    await repository.save(folder.path, const [match]);
+    expect(await repository.load(folder.path), hasLength(1));
+
+    await repository.clear(folder.path);
+    expect(await repository.load(folder.path), isEmpty);
+  });
+
+  test('persists rich fingerprint match diagnostics', () async {
+    final folder =
+        await Directory.systemTemp.createTemp('riffnotes-fp-diagnostics-');
+    addTearDown(() async {
+      if (await folder.exists()) await folder.delete(recursive: true);
+    });
+    const match = FingerprintMatch(
+      recordingId: 'practice-1',
+      recordingFilename: 'practice.mp3',
+      masterRecordingId: 'master-1',
+      masterFilename: 'song.mp3',
+      masterTitle: 'The Song',
+      sectionLabel: 'Chorus',
+      confidence: .74,
+      rawConfidence: .71,
+      confidenceMargin: .09,
+      learningAdjustment: .03,
+      sectionSongPenalty: .01,
+      songConfidence: .81,
+      matchOffsetMs: 42000,
+      targetType: FingerprintTargetType.section,
+      featureScores: {'energy': .8, 'attack': .63},
+    );
+    final repository = FingerprintSuggestionRepository();
+
+    await repository.save(folder.path, const [match]);
+    final loaded = (await repository.load(folder.path)).single;
+
+    expect(loaded.targetType, FingerprintTargetType.section);
+    expect(loaded.featureScores['energy'], closeTo(.8, .001));
+    expect(loaded.scoreDetails, contains('section'));
+    expect(loaded.scoreDetails, contains('song 81%'));
+    expect(loaded.diagnosticDetails, contains('energy 80%'));
+  });
+
+  test(
+      'records fingerprint learning examples from accepted and ignored matches',
+      () async {
+    final folder =
+        await Directory.systemTemp.createTemp('riffnotes-fp-learning-');
+    addTearDown(() async {
+      if (await folder.exists()) await folder.delete(recursive: true);
+    });
+    const match = FingerprintMatch(
+      recordingId: 'practice-1',
+      recordingFilename: 'practice.mp3',
+      masterRecordingId: 'master-1',
+      masterFilename: 'song.mp3',
+      masterTitle: 'The Song',
+      sectionLabel: 'Chorus',
+      confidence: .82,
+    );
+    final repository = FingerprintLearningRepository();
+
+    await repository.recordAccepted(folder.path, match);
+    var learning = await repository.load(folder.path);
+    expect(learning.examples, hasLength(1));
+    expect(
+      learning.adjustmentFor(
+        masterRecordingId: 'master-1',
+        sectionLabel: 'Chorus',
+      ),
+      greaterThan(0),
+    );
+
+    await repository.recordIgnored(folder.path, match);
+    learning = await repository.load(folder.path);
+    expect(learning.examples, hasLength(2));
+    expect(
+      learning.adjustmentFor(
+        masterRecordingId: 'missing',
+        sectionLabel: 'Chorus',
+      ),
+      0,
+    );
   });
 }

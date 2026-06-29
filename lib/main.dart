@@ -66,6 +66,7 @@ class _LibraryScreenState extends State<LibraryScreen> {
   final _fingerprints = FingerprintRepository();
   final _fingerprintDecisions = FingerprintDecisionRepository();
   final _fingerprintSuggestions = FingerprintSuggestionRepository();
+  final _fingerprintLearning = FingerprintLearningRepository();
   late final AudioController _audio;
   late final WaveformController _waveform;
   late final AppPreferences _preferences;
@@ -839,12 +840,10 @@ class _LibraryScreenState extends State<LibraryScreen> {
 
   Future<void> _refreshFingerprintDecisions(PracticeFolder practice) async {
     final decisions = await _fingerprintDecisions.load(practice.directory.path);
-    final suggestions = await _fingerprintSuggestions.load(practice.directory.path);
-    final visibleMatches = suggestions
-        .where((match) => !decisions.ignoredKeys.contains(match.key))
-        .where((match) =>
-            decisions.accepted.every((item) => item.recordingId != match.recordingId))
-        .toList(growable: false);
+    final suggestions =
+        await _fingerprintSuggestions.load(practice.directory.path);
+    final visibleMatches =
+        _visibleFingerprintMatches(practice, suggestions, decisions);
     if (mounted && _selected?.directory.path == practice.directory.path) {
       setState(() {
         _fingerprintDecisionState = decisions;
@@ -892,8 +891,10 @@ class _LibraryScreenState extends State<LibraryScreen> {
       });
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-            content: Text(
-                _syncSummary(verb: 'Uploaded', result: result, practiceName: practice.name))));
+            content: Text(_syncSummary(
+                verb: 'Uploaded',
+                result: result,
+                practiceName: practice.name))));
       }
     } on FileSystemException catch (error) {
       if (mounted) {
@@ -908,14 +909,23 @@ class _LibraryScreenState extends State<LibraryScreen> {
     }
   }
 
-  Future<({List<SyncFileCandidate> files, bool changedOnly, bool deleteMissingFiles})?>
+  Future<
+          ({
+            List<SyncFileCandidate> files,
+            bool changedOnly,
+            bool deleteMissingFiles
+          })?>
       _confirmUploadSelection(
-      PracticeFolder practice, List<SyncFileCandidate> candidates) async {
+          PracticeFolder practice, List<SyncFileCandidate> candidates) async {
     final selectedPaths = candidates.map((item) => item.relativePath).toSet();
     var changedOnly = true;
     var deleteMissingFiles = false;
     return showDialog<
-        ({List<SyncFileCandidate> files, bool changedOnly, bool deleteMissingFiles})>(
+        ({
+          List<SyncFileCandidate> files,
+          bool changedOnly,
+          bool deleteMissingFiles
+        })>(
       context: context,
       builder: (context) => StatefulBuilder(
         builder: (context, setDialogState) {
@@ -933,27 +943,28 @@ class _LibraryScreenState extends State<LibraryScreen> {
                   Text(
                       'Select files to upload to the sync folder. All files start selected.'),
                   const SizedBox(height: 8),
-                    CheckboxListTile(
+                  CheckboxListTile(
                     dense: true,
                     contentPadding: EdgeInsets.zero,
                     value: changedOnly,
                     onChanged: (value) =>
-                      setDialogState(() => changedOnly = value ?? true),
+                        setDialogState(() => changedOnly = value ?? true),
                     title: const Text('Only copy changed files'),
-                    subtitle:
-                      Text('Estimated changed files: $changedCount/${candidates.length}'),
-                    ),
-                    CheckboxListTile(
+                    subtitle: Text(
+                        'Estimated changed files: $changedCount/${candidates.length}'),
+                  ),
+                  CheckboxListTile(
                     dense: true,
                     contentPadding: EdgeInsets.zero,
                     value: deleteMissingFiles,
                     onChanged: (value) => setDialogState(
-                      () => deleteMissingFiles = value ?? false),
-                    title: const Text('Delete files in sync folder that are missing locally'),
+                        () => deleteMissingFiles = value ?? false),
+                    title: const Text(
+                        'Delete files in sync folder that are missing locally'),
                     subtitle: const Text(
-                      'Use carefully. With partial selection, unselected files can be deleted.'),
-                    ),
-                    const SizedBox(height: 4),
+                        'Use carefully. With partial selection, unselected files can be deleted.'),
+                  ),
+                  const SizedBox(height: 4),
                   Wrap(
                     spacing: 8,
                     children: [
@@ -974,7 +985,8 @@ class _LibraryScreenState extends State<LibraryScreen> {
                             : () => setDialogState(selectedPaths.clear),
                         child: const Text('Clear all'),
                       ),
-                      Text('${selectedPaths.length}/${candidates.length} selected'),
+                      Text(
+                          '${selectedPaths.length}/${candidates.length} selected'),
                     ],
                   ),
                   const SizedBox(height: 8),
@@ -1021,13 +1033,11 @@ class _LibraryScreenState extends State<LibraryScreen> {
                             .where((item) =>
                                 selectedPaths.contains(item.relativePath))
                             .toList(growable: false);
-                      Navigator.pop(
-                          context,
-                          (
-                            files: selection,
-                            changedOnly: changedOnly,
-                            deleteMissingFiles: deleteMissingFiles,
-                          ));
+                        Navigator.pop(context, (
+                          files: selection,
+                          changedOnly: changedOnly,
+                          deleteMissingFiles: deleteMissingFiles,
+                        ));
                       },
                 child: Text('Upload ${selectedPaths.length} files'),
               ),
@@ -1106,8 +1116,10 @@ class _LibraryScreenState extends State<LibraryScreen> {
       if (currentRecording != null) await _selectRecording(currentRecording);
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-            content: Text(
-                _syncSummary(verb: 'Downloaded', result: result, practiceName: practice.name))));
+            content: Text(_syncSummary(
+                verb: 'Downloaded',
+                result: result,
+                practiceName: practice.name))));
       }
     } on FileSystemException catch (error) {
       if (mounted) {
@@ -1150,9 +1162,10 @@ class _LibraryScreenState extends State<LibraryScreen> {
                 dense: true,
                 contentPadding: EdgeInsets.zero,
                 value: deleteMissingFiles,
-                onChanged: (value) => setDialogState(
-                    () => deleteMissingFiles = value ?? false),
-                title: const Text('Delete local files missing from sync folder'),
+                onChanged: (value) =>
+                    setDialogState(() => deleteMissingFiles = value ?? false),
+                title:
+                    const Text('Delete local files missing from sync folder'),
               ),
             ],
           ),
@@ -1161,9 +1174,7 @@ class _LibraryScreenState extends State<LibraryScreen> {
                 onPressed: () => Navigator.pop(context),
                 child: const Text('Cancel')),
             FilledButton(
-                onPressed: () => Navigator.pop(
-                    context,
-                    (
+                onPressed: () => Navigator.pop(context, (
                       changedOnly: changedOnly,
                       deleteMissingFiles: deleteMissingFiles,
                     )),
@@ -1182,7 +1193,7 @@ class _LibraryScreenState extends State<LibraryScreen> {
       builder: (context) => AlertDialog(
         title: Text('Clear cache for ${practice.name}?'),
         content: const Text(
-            'Waveforms, fingerprints, and processed playback files will be regenerated when needed. Notes, sections, and audio files are not removed.'),
+            'Waveforms, processed playback files, fingerprint files, pending fingerprint suggestions, and fingerprint review decisions will be regenerated or rebuilt when needed. Notes, sections, titles, Best Take flags, audio files, and Masters learning are not removed.'),
         actions: [
           TextButton(
               onPressed: () => Navigator.pop(context, false),
@@ -1198,11 +1209,19 @@ class _LibraryScreenState extends State<LibraryScreen> {
         Directory(path.join(practice.directory.path, '.riffnotes-cache'));
     try {
       await _activity.run('Clearing practice cache', (update) async {
-        update(null, 'Removing generated cache files…');
+        update(null, 'Removing generated cache and fingerprint state…');
         if (await cache.exists()) await cache.delete(recursive: true);
+        await _fingerprintSuggestions.clear(practice.directory.path);
+        await _fingerprintDecisions.clear(practice.directory.path);
         update(1, 'Cache cleared');
       });
       _waveform.clear();
+      if (mounted && _selected?.directory.path == practice.directory.path) {
+        setState(() {
+          _fingerprintMatches = const [];
+          _fingerprintDecisionState = const FingerprintDecisions();
+        });
+      }
       final recording = _selectedRecording;
       if (recording != null) unawaited(_waveform.load(practice, recording));
     } on FileSystemException catch (error) {
@@ -1236,14 +1255,14 @@ class _LibraryScreenState extends State<LibraryScreen> {
       if (!mounted) return;
       final decisions =
           await _fingerprintDecisions.load(practice.directory.path);
-      final visibleMatches = matches
-          .where((match) => !decisions.ignoredKeys.contains(match.key))
-          .toList(growable: false);
+      final visibleMatches =
+          _visibleFingerprintMatches(practice, matches, decisions);
       setState(() {
         _fingerprintMatches = visibleMatches;
         _fingerprintDecisionState = decisions;
       });
-      await _fingerprintSuggestions.save(practice.directory.path, visibleMatches);
+      await _fingerprintSuggestions.save(
+          practice.directory.path, visibleMatches);
       ScaffoldMessenger.of(context).showSnackBar(SnackBar(
           content: Text(visibleMatches.isEmpty
               ? 'No confident fingerprint matches found.'
@@ -1261,108 +1280,21 @@ class _LibraryScreenState extends State<LibraryScreen> {
     }
   }
 
-  Future<void> _reviewFingerprintMatches() async {
-    final practice = _selected;
-    if (practice == null) return;
-    const uncertainConfidence = .72;
-    await showDialog<void>(
-      context: context,
-      builder: (context) => StatefulBuilder(
-        builder: (context, setDialogState) {
-          final matches = _fingerprintMatches.toList()
-            ..sort((a, b) {
-              final recording =
-                  a.recordingFilename.compareTo(b.recordingFilename);
-              if (recording != 0) return recording;
-              return b.confidence.compareTo(a.confidence);
-            });
-          return AlertDialog(
-            title: const Text('Review fingerprint matches'),
-            content: SizedBox(
-              width: 820,
-              child: matches.isEmpty
-                  ? const Text('No pending fingerprint matches to review.')
-                  : ListView.builder(
-                      shrinkWrap: true,
-                      itemCount: matches.length,
-                      itemBuilder: (context, index) {
-                        final match = matches[index];
-                        final recording = practice.recordings
-                            .where((item) => item.id == match.recordingId)
-                            .firstOrNull;
-                        Future<void> handleMatchAction(String action) async {
-                          switch (action) {
-                            case 'accept':
-                              if (recording != null) {
-                                await _acceptFingerprintMatch(recording, match);
-                              }
-                            case 'dontknow':
-                              await _ignoreFingerprintMatch(match);
-                          }
-                          setDialogState(() {});
-                        }
-                        return Card(
-                          child: GestureDetector(
-                            behavior: HitTestBehavior.opaque,
-                            onSecondaryTapDown: (details) async {
-                              final action = await showMenu<String>(
-                                context: context,
-                                position: RelativeRect.fromLTRB(
-                                  details.globalPosition.dx,
-                                  details.globalPosition.dy,
-                                  details.globalPosition.dx,
-                                  details.globalPosition.dy,
-                                ),
-                                items: const [
-                                  PopupMenuItem<String>(
-                                    value: 'accept',
-                                    child: Text('Accept title'),
-                                  ),
-                                  PopupMenuItem<String>(
-                                    value: 'dontknow',
-                                    child: Text("Don't know"),
-                                  ),
-                                ],
-                              );
-                              if (action == null) return;
-                              await handleMatchAction(action);
-                            },
-                            child: ListTile(
-                              leading: const Icon(Icons.fingerprint),
-                              title: Text(
-                                  '${match.recordingFilename} → ${match.displayName}'),
-                              subtitle: Text(
-                                  'Confidence ${(match.confidence * 100).round()}%${match.confidence < uncertainConfidence ? ' • low confidence' : ''}${recording?.title == null ? '' : ' • current title: ${recording!.title}'}'),
-                              trailing: Wrap(
-                                spacing: 8,
-                                children: [
-                                  TextButton(
-                                    onPressed: () => handleMatchAction('dontknow'),
-                                    child: const Text("Don't know"),
-                                  ),
-                                  FilledButton(
-                                    onPressed: recording == null
-                                        ? null
-                                        : () => handleMatchAction('accept'),
-                                    child: const Text('Accept title'),
-                                  ),
-                                ],
-                              ),
-                            ),
-                          ),
-                        );
-                      },
-                    ),
-            ),
-            actions: [
-              TextButton(
-                  onPressed: () => Navigator.pop(context),
-                  child: const Text('Done')),
-            ],
-          );
-        },
-      ),
-    );
+  List<FingerprintMatch> _visibleFingerprintMatches(
+    PracticeFolder practice,
+    List<FingerprintMatch> suggestions,
+    FingerprintDecisions decisions,
+  ) {
+    final jamRecordingIds = practice.recordings
+        .where(_isJamRecording)
+        .map((recording) => recording.id)
+        .toSet();
+    return suggestions
+        .where((match) => !jamRecordingIds.contains(match.recordingId))
+        .where((match) => !decisions.ignoredKeys.contains(match.key))
+        .where((match) => decisions.accepted
+            .every((item) => item.recordingId != match.recordingId))
+        .toList(growable: false);
   }
 
   Future<void> _acceptFingerprintMatch(
@@ -1378,6 +1310,10 @@ class _LibraryScreenState extends State<LibraryScreen> {
     );
     await _applyMasterSectionsForAcceptedMatch(recording, match);
     await _fingerprintDecisions.accept(practice.directory.path, match);
+    final mastersFolder = _resolvedMastersFolder;
+    if (mastersFolder != null) {
+      await _fingerprintLearning.recordAccepted(mastersFolder.path, match);
+    }
     final decisions = await _fingerprintDecisions.load(practice.directory.path);
     if (mounted) {
       setState(() {
@@ -1387,10 +1323,12 @@ class _LibraryScreenState extends State<LibraryScreen> {
             .toList(growable: false);
       });
     }
-    await _fingerprintSuggestions.save(practice.directory.path, _fingerprintMatches);
+    await _fingerprintSuggestions.save(
+        practice.directory.path, _fingerprintMatches);
   }
 
-  Future<void> _acceptBestFingerprintGuessForRecording(Recording recording) async {
+  Future<void> _acceptBestFingerprintGuessForRecording(
+      Recording recording) async {
     final match = _fingerprintMatches
         .where((item) => item.recordingId == recording.id)
         .toList()
@@ -1408,6 +1346,57 @@ class _LibraryScreenState extends State<LibraryScreen> {
     }
   }
 
+  Future<void> _showFingerprintInfoForRecording(Recording recording) async {
+    final matches = _fingerprintMatches
+        .where((item) => item.recordingId == recording.id)
+        .toList()
+      ..sort((a, b) => b.confidence.compareTo(a.confidence));
+    await showDialog<void>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title:
+            Text('Fingerprint info: ${recording.title ?? recording.filename}'),
+        content: SizedBox(
+          width: 720,
+          child: matches.isEmpty
+              ? Text(_isJamRecording(recording)
+                  ? 'This take is titled Jam, so it is intentionally skipped by fingerprint matching.'
+                  : 'No pending fingerprint suggestions are available for this take. Run fingerprint matching, or clear generated cache if you need to force a full re-run.')
+              : Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    const Text(
+                        'These details are useful when tuning the algorithm. Matching is two-stage: first whole-song candidates, then sections from likely songs. Confidence is the final score; raw is before learning adjustments; margin is the gap to the next candidate.'),
+                    const SizedBox(height: 12),
+                    Flexible(
+                      child: ListView.builder(
+                        shrinkWrap: true,
+                        itemCount: matches.length,
+                        itemBuilder: (context, index) {
+                          final match = matches[index];
+                          return Card(
+                            child: ListTile(
+                              leading: Text('#${index + 1}'),
+                              title: Text(match.displayName),
+                              subtitle: SelectableText(match.diagnosticDetails),
+                            ),
+                          );
+                        },
+                      ),
+                    ),
+                  ],
+                ),
+        ),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(context),
+              child: const Text('Close')),
+        ],
+      ),
+    );
+  }
+
   Future<void> _applyMasterSectionsForAcceptedMatch(
       Recording recording, FingerprintMatch match) async {
     final practice = _selected;
@@ -1418,8 +1407,8 @@ class _LibraryScreenState extends State<LibraryScreen> {
         .where((item) => item.id == match.masterRecordingId)
         .firstOrNull;
     if (masterRecording == null) return;
-    final masterSections =
-        await _sectionsRepository.load(masters.directory.path, match.masterRecordingId);
+    final masterSections = await _sectionsRepository.load(
+        masters.directory.path, match.masterRecordingId);
     if (masterSections.isEmpty) return;
     final mappedSections = await _fingerprints.alignSectionsToRecording(
       practiceFolder: practice.directory,
@@ -1443,6 +1432,10 @@ class _LibraryScreenState extends State<LibraryScreen> {
     final practice = _selected;
     if (practice == null) return;
     await _fingerprintDecisions.ignore(practice.directory.path, match);
+    final mastersFolder = _resolvedMastersFolder;
+    if (mastersFolder != null) {
+      await _fingerprintLearning.recordIgnored(mastersFolder.path, match);
+    }
     final decisions = await _fingerprintDecisions.load(practice.directory.path);
     if (mounted) {
       setState(() {
@@ -1452,7 +1445,8 @@ class _LibraryScreenState extends State<LibraryScreen> {
             .toList(growable: false);
       });
     }
-    await _fingerprintSuggestions.save(practice.directory.path, _fingerprintMatches);
+    await _fingerprintSuggestions.save(
+        practice.directory.path, _fingerprintMatches);
   }
 
   Future<void> _saveRecordingAsMaster(Recording recording) async {
@@ -1675,6 +1669,23 @@ class _LibraryScreenState extends State<LibraryScreen> {
                           setDialogState(() {});
                         },
                         child: const Text('Choose')),
+                  ),
+                  ListTile(
+                    contentPadding: EdgeInsets.zero,
+                    leading: const Icon(Icons.cleaning_services_outlined),
+                    title: const Text('Selected practice generated cache'),
+                    subtitle: Text(_selected == null
+                        ? 'Select a practice to clear waveform, playback, and fingerprint cache.'
+                        : 'Clear generated cache and force ${_selected!.name} to redo fingerprint matching.'),
+                    trailing: TextButton(
+                      onPressed: _selected == null
+                          ? null
+                          : () async {
+                              await _clearSelectedPracticeCache();
+                              setDialogState(() {});
+                            },
+                      child: const Text('Clear'),
+                    ),
                   ),
                   SwitchListTile(
                     contentPadding: EdgeInsets.zero,
@@ -2332,9 +2343,9 @@ class _LibraryScreenState extends State<LibraryScreen> {
         'Opening edit dialog for "${section.label}" ${_formatMilliseconds(section.startMs)}-${_formatMilliseconds(section.endMs)}');
     final label = TextEditingController(text: section.label);
     final start =
-      TextEditingController(text: _formatTimestampForEdit(section.startMs));
+        TextEditingController(text: _formatTimestampForEdit(section.startMs));
     final end =
-      TextEditingController(text: _formatTimestampForEdit(section.endMs));
+        TextEditingController(text: _formatTimestampForEdit(section.endMs));
     var selectedColor = section.colorIndex;
     final accepted = await showDialog<bool>(
       context: context,
@@ -2351,8 +2362,7 @@ class _LibraryScreenState extends State<LibraryScreen> {
               ),
               TextField(
                 controller: start,
-                decoration:
-                    const InputDecoration(labelText: 'Start mm:ss.mmm'),
+                decoration: const InputDecoration(labelText: 'Start mm:ss.mmm'),
               ),
               TextField(
                 controller: end,
@@ -2664,7 +2674,8 @@ class _LibraryScreenState extends State<LibraryScreen> {
   }
 
   String _normalizedSectionPrefix(String label) {
-    final cleaned = label.trim().toLowerCase().replaceAll(RegExp(r'[^a-z]+'), '');
+    final cleaned =
+        label.trim().toLowerCase().replaceAll(RegExp(r'[^a-z]+'), '');
     if (cleaned.isEmpty) return '';
     for (final prefix in const <String>[
       'intro',
@@ -2939,6 +2950,9 @@ class _LibraryScreenState extends State<LibraryScreen> {
     return sanitized.isEmpty ? 'Untitled' : sanitized;
   }
 
+  bool _isJamRecording(Recording recording) =>
+      recording.title?.trim().toLowerCase() == 'jam';
+
   Future<void> _previewAndApplyRename() async {
     final practice = _selected;
     if (practice == null) {
@@ -3143,20 +3157,6 @@ class _LibraryScreenState extends State<LibraryScreen> {
                       : _matchSelectedPracticeFingerprints,
                   icon: const Icon(Icons.fingerprint)),
               IconButton(
-                  tooltip:
-                      'Review ${_fingerprintMatches.length} fingerprint match suggestions; ${_fingerprintDecisionState.accepted.length} accepted',
-                  onPressed: _selected == null ||
-                          _selectedIsMasters ||
-                          _fingerprintMatches.isEmpty
-                      ? null
-                      : _reviewFingerprintMatches,
-                  icon: const Icon(Icons.rule_folder_outlined)),
-              IconButton(
-                  tooltip: 'Clear generated cache for selected practice',
-                  onPressed:
-                      _selected == null ? null : _clearSelectedPracticeCache,
-                  icon: const Icon(Icons.cleaning_services_outlined)),
-              IconButton(
                   tooltip: 'View logs',
                   onPressed: _showLogs,
                   icon: const Icon(Icons.article_outlined)),
@@ -3250,8 +3250,10 @@ class _LibraryScreenState extends State<LibraryScreen> {
                       setState(() => _reviewSort = value),
                   reviewNotes: _reviewNotes,
                   fingerprintMatches: _fingerprintMatches,
-                    onAcceptFingerprintGuess: _acceptBestFingerprintGuessForRecording,
-                    onDontKnowFingerprintGuess: _dontKnowFingerprintForRecording,
+                  onAcceptFingerprintGuess:
+                      _acceptBestFingerprintGuessForRecording,
+                  onDontKnowFingerprintGuess: _dontKnowFingerprintForRecording,
+                  onShowFingerprintInfo: _showFingerprintInfoForRecording,
                   onPlayReviewNote: _playReviewNote,
                   audio: _audio,
                   waveform: _waveform,
@@ -3374,6 +3376,7 @@ class _RecordingList extends StatelessWidget {
     required this.fingerprintMatches,
     required this.onAcceptFingerprintGuess,
     required this.onDontKnowFingerprintGuess,
+    required this.onShowFingerprintInfo,
     required this.onPlayReviewNote,
     required this.audio,
     required this.waveform,
@@ -3435,6 +3438,7 @@ class _RecordingList extends StatelessWidget {
   final List<FingerprintMatch> fingerprintMatches;
   final Future<void> Function(Recording recording) onAcceptFingerprintGuess;
   final Future<void> Function(Recording recording) onDontKnowFingerprintGuess;
+  final ValueChanged<Recording> onShowFingerprintInfo;
   final ValueChanged<UserAnnotation> onPlayReviewNote;
   final AudioController audio;
   final WaveformController waveform;
@@ -3596,11 +3600,14 @@ class _RecordingList extends StatelessWidget {
                     trailing: Row(
                       mainAxisSize: MainAxisSize.min,
                       children: [
-                        if (!isMasters && _bestFingerprintMatch(recording) != null)
+                        if (!isMasters &&
+                            _bestFingerprintMatch(recording) != null)
                           PopupMenuButton<String>(
                             tooltip: 'Fingerprint guess actions',
                             onSelected: (action) async {
                               switch (action) {
+                                case 'info':
+                                  onShowFingerprintInfo(recording);
                                 case 'accept':
                                   await onAcceptFingerprintGuess(recording);
                                 case 'dontknow':
@@ -3608,6 +3615,10 @@ class _RecordingList extends StatelessWidget {
                               }
                             },
                             itemBuilder: (context) => const [
+                              PopupMenuItem<String>(
+                                value: 'info',
+                                child: Text('Fingerprint info'),
+                              ),
                               PopupMenuItem<String>(
                                 value: 'accept',
                                 child: Text('Accept guessed title'),
@@ -3646,12 +3657,6 @@ class _RecordingList extends StatelessWidget {
                             tooltip: 'Delete take',
                             icon: const Icon(Icons.delete_outline),
                             onPressed: () => onDeleteTake(recording),
-                          ),
-                        if (!isMasters)
-                          IconButton(
-                            tooltip: 'Save take as new master',
-                            icon: const Icon(Icons.library_music_outlined),
-                            onPressed: () => onSaveRecordingAsMaster(recording),
                           ),
                         Text(recording.extension
                             .replaceFirst('.', '')
@@ -3719,11 +3724,15 @@ class _RecordingList extends StatelessWidget {
     final pieces = <String>[
       if (recording.title != null) recording.filename,
       _fileDetails(recording),
+      if (_isJamRecording(recording)) 'Fingerprinting skipped: Jam',
       if (_bestFingerprintMatch(recording) case final match?)
-        'Match: ${match.displayName} (${(match.confidence * 100).round()}%)',
+        'Match: ${match.displayName} (${match.scoreDetails})',
     ];
     return pieces.join(' • ');
   }
+
+  bool _isJamRecording(Recording recording) =>
+      recording.title?.trim().toLowerCase() == 'jam';
 
   FingerprintMatch? _bestFingerprintMatch(Recording recording) {
     final matches = fingerprintMatches
@@ -3886,7 +3895,8 @@ class _PlayerPanelState extends State<_PlayerPanel> {
     double viewportWidth,
     double contentWidth,
   ) {
-    if (!_waveformScrollController.hasClients || contentWidth <= viewportWidth) {
+    if (!_waveformScrollController.hasClients ||
+        contentWidth <= viewportWidth) {
       return;
     }
     final position = _waveformScrollController.position;
@@ -4096,8 +4106,7 @@ class _PlayerPanelState extends State<_PlayerPanel> {
                                               _waveformFocus.requestFocus();
                                               onWaveformSeek(
                                                 (milliseconds /
-                                                        duration
-                                                            .inMilliseconds)
+                                                        duration.inMilliseconds)
                                                     .clamp(0, 1)
                                                     .toDouble(),
                                               );
@@ -4192,20 +4201,19 @@ class _PlayerPanelState extends State<_PlayerPanel> {
                                                                 .inMilliseconds)
                                                         .round())),
                                             dragProgress:
-                                              _sectionResizePreviewMs ==
-                                                    null ||
-                                                  duration ==
-                                                    Duration.zero
-                                                ? null
-                                                : _sectionResizePreviewMs! /
-                                                  duration
-                                                    .inMilliseconds,
+                                                _sectionResizePreviewMs ==
+                                                            null ||
+                                                        duration ==
+                                                            Duration.zero
+                                                    ? null
+                                                    : _sectionResizePreviewMs! /
+                                                        duration.inMilliseconds,
                                             dragTimeLabel:
-                                              _sectionResizePreviewMs == null
-                                                ? null
-                                                : _format(Duration(
-                                                  milliseconds:
-                                                    _sectionResizePreviewMs!)),
+                                                _sectionResizePreviewMs == null
+                                                    ? null
+                                                    : _format(Duration(
+                                                        milliseconds:
+                                                            _sectionResizePreviewMs!)),
                                             highlightStartProgress:
                                                 _hoveredNote == null ||
                                                         duration ==
