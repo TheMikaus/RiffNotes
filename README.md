@@ -97,6 +97,19 @@ flutter doctor
 flutter test
 ```
 
+## Release automation
+
+Use `scripts/publish-release.ps1` to build the Windows release, zip the release folder, create a GitHub release, and upload the zip asset.
+
+Example:
+
+```powershell
+$env:GITHUB_TOKEN = 'your token here'
+.\scripts\publish-release.ps1
+```
+
+The script reads the version from `pubspec.yaml`, expects matching release notes under `docs/releases/`, and publishes the zip to the GitHub repo configured as `origin`.
+
 ### Android build
 
 ```powershell
