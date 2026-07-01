@@ -12,4 +12,5 @@ credentials.json
 token.json
 *.bandnotes
 *.riffnotes-cache
+artifacts/
 
