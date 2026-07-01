@@ -3,6 +3,7 @@ param(
   [string]$Repository,
   [string]$Token,
   [switch]$SkipBuild,
+  [switch]$DryRun,
   [switch]$Draft,
   [switch]$Prerelease,
   [switch]$NoGitTagPush
@@ -32,7 +33,15 @@ function Get-ReleaseNotesPath {
 
   $notesPath = Join-Path $PSScriptRoot "..\docs\releases\$ReleaseTag.md"
   if (-not (Test-Path $notesPath)) {
-    throw "Release notes not found: $notesPath"
+    throw @"
+Release notes not found for $ReleaseTag.
+
+Expected file:
+  $notesPath
+
+Create it before publishing, for example:
+  Copy-Item (Join-Path $PSScriptRoot '..\docs\releases\v0.0.0.md') $notesPath
+"@
   }
   return (Resolve-Path $notesPath).Path
 }
@@ -97,6 +106,16 @@ Run:
   }
 }
 
+function Test-GhAuthenticated {
+  $gh = Get-Command gh -ErrorAction SilentlyContinue
+  if (-not $gh) {
+    return $false
+  }
+
+  $null = gh auth status 2>$null
+  return ($LASTEXITCODE -eq 0)
+}
+
 if (-not $Version) {
   $Version = Get-VersionFromPubspec
 }
@@ -109,6 +128,45 @@ if ($Version.StartsWith('v')) {
 
 if (-not $Repository) {
   $Repository = Get-RepoFromRemote
+}
+
+$notesPath = Get-ReleaseNotesPath -ReleaseTag $releaseTag
+$notes = Get-Content -Raw -Path $notesPath
+$root = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
+$releaseDir = Join-Path $root 'build\windows\x64\runner\Release'
+$artifactsDir = Join-Path $root 'artifacts'
+$zipPath = Join-Path $artifactsDir (Get-AssetName -ReleaseTag $releaseTag)
+
+if ($DryRun) {
+  Push-Location $root
+  try {
+    $hasLocalTag = [bool](git tag --list $releaseTag)
+  } finally {
+    Pop-Location
+  }
+
+  $hasReleaseOutput = Test-Path $releaseDir
+  $ghAuth = Test-GhAuthenticated
+  $remoteReleaseState = 'not checked (gh not authenticated)'
+  if ($ghAuth) {
+    gh release view $releaseTag --repo $Repository --json tagName 1>$null 2>$null
+    if ($LASTEXITCODE -eq 0) {
+      $remoteReleaseState = 'exists'
+    } else {
+      $remoteReleaseState = 'missing'
+    }
+  }
+
+  Write-Host "Dry run complete."
+  Write-Host "Release tag: $releaseTag"
+  Write-Host "Repository: $Repository"
+  Write-Host "Release notes: $notesPath"
+  Write-Host "Asset path: $zipPath"
+  Write-Host "Build output present: $hasReleaseOutput"
+  Write-Host "Local tag exists: $hasLocalTag"
+  Write-Host "Remote release: $remoteReleaseState"
+  Write-Host "No build, tag push, release create, or asset upload was performed."
+  return
 }
 
 if (-not $Token) {
@@ -132,13 +190,6 @@ Use one of:
      gh auth login
 "@
 }
-
-$notesPath = Get-ReleaseNotesPath -ReleaseTag $releaseTag
-$notes = Get-Content -Raw -Path $notesPath
-$root = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
-$releaseDir = Join-Path $root 'build\windows\x64\runner\Release'
-$artifactsDir = Join-Path $root 'artifacts'
-$zipPath = Join-Path $artifactsDir (Get-AssetName -ReleaseTag $releaseTag)
 
 if (-not $SkipBuild) {
   Push-Location $root

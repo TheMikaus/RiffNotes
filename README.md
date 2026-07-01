@@ -99,16 +99,49 @@ flutter test
 
 ## Release automation
 
-Use `scripts/publish-release.ps1` to build the Windows release, zip the release folder, create a GitHub release, and upload the zip asset.
+Use `scripts/publish-release.ps1` to build the Windows release, zip the release folder, create or reuse a GitHub release, and upload the zip asset.
 
-Example:
+### Release runbook
+
+1. Dry run (no build, no tag push, no release changes):
 
 ```powershell
-$env:GITHUB_TOKEN = 'your token here'
+.\scripts\publish-release.ps1 -DryRun
+```
+
+2. Full release using version from `pubspec.yaml`:
+
+```powershell
 .\scripts\publish-release.ps1
 ```
 
-The script reads the version from `pubspec.yaml`, expects matching release notes under `docs/releases/`, and publishes the zip to the GitHub repo configured as `origin`.
+3. Re-run fast after a partial failure (skip rebuild):
+
+```powershell
+.\scripts\publish-release.ps1 -SkipBuild
+```
+
+4. Publish a prerelease:
+
+```powershell
+.\scripts\publish-release.ps1 -Prerelease
+```
+
+### Authentication and token precedence
+
+The script uses tokens in this order:
+
+1. `-Token <value>`
+2. `GITHUB_TOKEN` environment variable
+3. `gh auth token` (requires `gh` installed and logged in)
+
+If `gh` is not installed or logged in, the script prints install/login guidance.
+
+### Notes and inputs
+
+- The script reads the version from `pubspec.yaml` unless `-Version` is provided.
+- Release notes must exist at `docs/releases/vX.Y.Z.md` for the release tag being published.
+- The repository defaults to the `origin` remote unless `-Repository owner/repo` is provided.
 
 ### Android build
 
