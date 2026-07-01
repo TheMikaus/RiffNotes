@@ -1,7 +1,7 @@
 name: riffnotes
 description: Offline-first band practice review for Windows and Kindle Fire.
 publish_to: none
-version: 0.4.0+4
+version: 0.6.7+20
 
 environment:
   sdk: ">=3.3.0 <4.0.0"

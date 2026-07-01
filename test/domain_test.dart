@@ -1,4 +1,5 @@
 import 'dart:io';
+import 'dart:math';
 
 import 'package:flutter_test/flutter_test.dart';
 import 'package:riffnotes/annotations.dart';
@@ -297,6 +298,81 @@ void main() {
     expect(fingerprint.reduce((a, b) => a > b ? a : b), closeTo(1, .001));
   });
 
+  test('calculates chroma pitch-class features from PCM samples', () {
+    List<int> sinePcm(double frequency) {
+      final pcm = <int>[];
+      const sampleRate = 4000;
+      for (var i = 0; i < 1600; i += 1) {
+        final sample =
+            (sin(2 * pi * frequency * i / sampleRate) * 12000).round();
+        pcm
+          ..add(sample & 0xff)
+          ..add((sample >> 8) & 0xff);
+      }
+      return pcm;
+    }
+
+    final aFingerprint = FingerprintRepository.calculateAudioFingerprint(
+        sinePcm(440),
+        windowSamples: 800);
+    final cFingerprint = FingerprintRepository.calculateAudioFingerprint(
+        sinePcm(523.25),
+        windowSamples: 800);
+
+    expect(aFingerprint.features.keys.where((key) => key.startsWith('chroma')),
+        hasLength(12));
+    expect(aFingerprint.features['chroma9']!.reduce(max),
+        greaterThan(aFingerprint.features['chroma0']!.reduce(max)));
+    expect(cFingerprint.features['chroma0']!.reduce(max),
+        greaterThan(cFingerprint.features['chroma9']!.reduce(max)));
+  });
+
+  test('classifies exploratory fingerprint suggestions as actionable', () {
+    final repository = FingerprintRepository();
+
+    expect(
+      repository.isActionableSuggestion(const FingerprintMatch(
+        recordingId: 'take-1',
+        recordingFilename: 'take.mp3',
+        masterRecordingId: 'master-1',
+        masterFilename: 'song.wav',
+        masterTitle: 'Song',
+        sectionLabel: null,
+        confidence: .81,
+        confidenceMargin: .02,
+      )),
+      isTrue,
+    );
+    expect(
+      repository.isActionableSuggestion(const FingerprintMatch(
+        recordingId: 'take-1',
+        recordingFilename: 'take.mp3',
+        masterRecordingId: 'master-1',
+        masterFilename: 'song.wav',
+        masterTitle: 'Song',
+        sectionLabel: null,
+        confidence: .79,
+        confidenceMargin: .02,
+      )),
+      isFalse,
+    );
+    expect(
+      repository.isActionableSuggestion(const FingerprintMatch(
+        recordingId: 'take-1',
+        recordingFilename: 'take.mp3',
+        masterRecordingId: 'master-1',
+        masterFilename: 'song.wav',
+        masterTitle: 'Song',
+        sectionLabel: 'Verse',
+        confidence: .83,
+        confidenceMargin: .03,
+        songConfidence: .75,
+        targetType: FingerprintTargetType.section,
+      )),
+      isTrue,
+    );
+  });
+
   test('persists accepted and ignored fingerprint decisions', () async {
     final folder = await Directory.systemTemp.createTemp('riffnotes-fp-');
     addTearDown(() async {
@@ -372,6 +448,7 @@ void main() {
       sectionSongPenalty: .01,
       songConfidence: .81,
       matchOffsetMs: 42000,
+      tempoScale: .96,
       targetType: FingerprintTargetType.section,
       featureScores: {'energy': .8, 'attack': .63},
     );
@@ -384,7 +461,176 @@ void main() {
     expect(loaded.featureScores['energy'], closeTo(.8, .001));
     expect(loaded.scoreDetails, contains('section'));
     expect(loaded.scoreDetails, contains('song 81%'));
+    expect(loaded.scoreDetails, contains('tempo 96%'));
     expect(loaded.diagnosticDetails, contains('energy 80%'));
+  });
+
+  test('persists fingerprint correction reports', () async {
+    final folder =
+        await Directory.systemTemp.createTemp('riffnotes-fp-corrections-');
+    addTearDown(() async {
+      if (await folder.exists()) await folder.delete(recursive: true);
+    });
+    final repository = FingerprintCorrectionRepository();
+    final correction = FingerprintCorrection(
+      recordingId: 'practice-1',
+      recordingFilename: 'take.mp3',
+      recordingTitle: 'Rough Take',
+      practiceName: 'Practice',
+      practicePath: folder.path,
+      correctType: 'section',
+      correctMasterRecordingId: 'master-1',
+      correctMasterFilename: 'song.mp3',
+      correctMasterTitle: 'The Song',
+      correctSectionLabel: 'Chorus',
+      notes: 'Guessed verse, should be chorus.',
+      report: 'debug report',
+      recordedAt: DateTime.utc(2026, 1, 1),
+    );
+
+    await repository.add(folder.path, correction);
+    final loaded = await repository.load(folder.path);
+
+    expect(loaded, hasLength(1));
+    expect(loaded.single.correctType, 'section');
+    expect(loaded.single.correctSectionLabel, 'Chorus');
+    expect(loaded.single.report, 'debug report');
+  });
+
+  test('evaluates fingerprint corrections against current suggestions', () {
+    final corrections = [
+      FingerprintCorrection(
+        recordingId: 'take-1',
+        recordingFilename: 'take1.mp3',
+        recordingTitle: 'Rough',
+        practiceName: 'Practice',
+        practicePath: r'C:\Band\Practice',
+        correctType: 'whole',
+        correctMasterRecordingId: 'master-a',
+        correctMasterFilename: 'song-a.wav',
+        correctMasterTitle: 'Song A',
+        correctSectionLabel: null,
+        notes: '',
+        report: '',
+        recordedAt: DateTime.utc(2026, 1, 1),
+      ),
+      FingerprintCorrection(
+        recordingId: 'take-2',
+        recordingFilename: 'take2.mp3',
+        recordingTitle: 'Jam',
+        practiceName: 'Practice',
+        practicePath: r'C:\Band\Practice',
+        correctType: 'new',
+        correctMasterRecordingId: null,
+        correctMasterFilename: null,
+        correctMasterTitle: null,
+        correctSectionLabel: null,
+        notes: '',
+        report: '',
+        recordedAt: DateTime.utc(2026, 1, 1),
+      ),
+      FingerprintCorrection(
+        recordingId: 'take-3',
+        recordingFilename: 'take3.mp3',
+        recordingTitle: 'Section',
+        practiceName: 'Practice',
+        practicePath: r'C:\Band\Practice',
+        correctType: 'section',
+        correctMasterRecordingId: 'master-b',
+        correctMasterFilename: 'song-b.wav',
+        correctMasterTitle: 'Song B',
+        correctSectionLabel: 'Chorus',
+        notes: '',
+        report: '',
+        recordedAt: DateTime.utc(2026, 1, 1),
+      ),
+    ];
+    const matches = [
+      FingerprintMatch(
+        recordingId: 'take-1',
+        recordingFilename: 'take1.mp3',
+        masterRecordingId: 'master-a',
+        masterFilename: 'song-a.wav',
+        masterTitle: 'Song A',
+        sectionLabel: null,
+        confidence: .9,
+      ),
+      FingerprintMatch(
+        recordingId: 'take-2',
+        recordingFilename: 'take2.mp3',
+        masterRecordingId: 'master-a',
+        masterFilename: 'song-a.wav',
+        masterTitle: 'Song A',
+        sectionLabel: null,
+        confidence: .8,
+      ),
+      FingerprintMatch(
+        recordingId: 'take-3',
+        recordingFilename: 'take3.mp3',
+        masterRecordingId: 'master-b',
+        masterFilename: 'song-b.wav',
+        masterTitle: 'Song B',
+        sectionLabel: 'Verse',
+        confidence: .7,
+      ),
+    ];
+
+    final report = FingerprintEvaluation.evaluate(
+      appVersion: 'Version test',
+      practiceName: 'Practice',
+      practicePath: r'C:\Band\Practice',
+      mastersPath: r'C:\Band\Masters',
+      corrections: corrections,
+      matches: matches,
+    );
+
+    expect(report.total, 3);
+    expect(report.exactCorrect, 1);
+    expect(report.songCorrect, 1);
+    expect(report.falsePositive, 1);
+    expect(report.toText(), contains('Song-level useful: 2'));
+    expect(report.toText(), contains('new -> Song A'));
+  });
+
+  test('evaluates accepted fingerprint decisions as current answers', () {
+    final corrections = [
+      FingerprintCorrection(
+        recordingId: 'take-1',
+        recordingFilename: 'take1.mp3',
+        recordingTitle: 'Gone',
+        practiceName: 'Practice',
+        practicePath: r'C:\Band\Practice',
+        correctType: 'whole',
+        correctMasterRecordingId: 'master-gone',
+        correctMasterFilename: 'gone.wav',
+        correctMasterTitle: 'Gone',
+        correctSectionLabel: null,
+        notes: '',
+        report: '',
+        recordedAt: DateTime.utc(2026, 1, 1),
+      ),
+    ];
+    final report = FingerprintEvaluation.evaluate(
+      appVersion: 'Version test',
+      practiceName: 'Practice',
+      practicePath: r'C:\Band\Practice',
+      mastersPath: r'C:\Band\Masters',
+      corrections: corrections,
+      matches: const [],
+      acceptedDecisions: [
+        FingerprintDecision(
+          recordingId: 'take-1',
+          masterRecordingId: 'master-gone',
+          displayName: 'Gone',
+          confidence: .88,
+          decidedAt: DateTime.utc(2026, 1, 1),
+        ),
+      ],
+    );
+
+    expect(report.exactCorrect, 1);
+    expect(report.missed, 0);
+    expect(report.toText(), contains('Gone (accepted)'));
   });
 
   test(
@@ -426,6 +672,52 @@ void main() {
         sectionLabel: 'Chorus',
       ),
       0,
+    );
+  });
+
+  test('keeps fingerprint learning scoped to the exact target', () {
+    final learning = FingerprintLearning(examples: [
+      FingerprintLearningExample(
+        masterRecordingId: 'song-1',
+        sectionLabel: null,
+        accepted: true,
+        confidence: 1,
+        recordedAt: DateTime.utc(2026, 1, 1),
+      ),
+      FingerprintLearningExample(
+        masterRecordingId: 'song-1',
+        sectionLabel: 'Empty Start',
+        accepted: true,
+        confidence: 1,
+        recordedAt: DateTime.utc(2026, 1, 1),
+      ),
+      FingerprintLearningExample(
+        masterRecordingId: 'song-1',
+        sectionLabel: 'Verse',
+        accepted: false,
+        confidence: .9,
+        recordedAt: DateTime.utc(2026, 1, 1),
+      ),
+    ]);
+
+    expect(
+      learning.adjustmentFor(masterRecordingId: 'song-1', sectionLabel: null),
+      greaterThan(0),
+    );
+    expect(
+      learning.adjustmentFor(
+          masterRecordingId: 'song-1', sectionLabel: 'Chorus'),
+      0,
+    );
+    expect(
+      learning.adjustmentFor(
+          masterRecordingId: 'song-1', sectionLabel: 'Empty Start'),
+      0,
+    );
+    expect(
+      learning.adjustmentFor(
+          masterRecordingId: 'song-1', sectionLabel: 'Verse'),
+      lessThan(0),
     );
   });
 }
