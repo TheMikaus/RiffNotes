@@ -67,6 +67,7 @@ class _LibraryScreenState extends State<LibraryScreen> {
   final _fingerprintDecisions = FingerprintDecisionRepository();
   final _fingerprintSuggestions = FingerprintSuggestionRepository();
   final _fingerprintLearning = FingerprintLearningRepository();
+  final _fingerprintCorrections = FingerprintCorrectionRepository();
   late final AudioController _audio;
   late final WaveformController _waveform;
   late final AppPreferences _preferences;
@@ -81,6 +82,7 @@ class _LibraryScreenState extends State<LibraryScreen> {
   List<UserAnnotation> _reviewNotes = const [];
   List<SongSection> _sections = const [];
   final List<List<SongSection>> _sectionUndoStack = <List<SongSection>>[];
+  List<FingerprintMatch> _fingerprintRawMatches = const [];
   List<FingerprintMatch> _fingerprintMatches = const [];
   FingerprintDecisions _fingerprintDecisionState = const FingerprintDecisions();
   GoogleDriveOAuthConfig? _bundledGoogleOAuthConfig;
@@ -109,203 +111,97 @@ class _LibraryScreenState extends State<LibraryScreen> {
   void initState() {
     super.initState();
     _audio = widget.disableAudio ? AudioController.inert() : AudioController();
-    _audio.addListener(_applyPreferredAudioOutputIfPossible);
     _waveform = WaveformController();
     _preferences = AppPreferences();
-    _restorePreferences();
+    unawaited(_restorePreferences());
   }
 
   @override
   void dispose() {
-    _audio.removeListener(_applyPreferredAudioOutputIfPossible);
-    unawaited(_googleDriveCredentialSubscription?.cancel());
     unawaited(_selectedFolderWatcher?.cancel());
     _selectedFolderRefreshTimer?.cancel();
+    unawaited(_googleDriveCredentialSubscription?.cancel());
     _googleDriveConnection?.close();
     _audio.dispose();
     _waveform.dispose();
-    _log.dispose();
     super.dispose();
   }
 
-  Future<void> _chooseBandFolder() async {
-    final selection = await FilePicker.platform
-        .getDirectoryPath(dialogTitle: 'Choose your Band Folder');
-    if (selection == null) {
-      return;
+  Directory? get _resolvedMastersFolder {
+    final saved = _preferences.mastersFolder?.trim();
+    if (saved != null && saved.isNotEmpty) {
+      if (path.isAbsolute(saved)) return Directory(saved);
+      final bandFolder = _bandFolder ?? _preferences.bandFolder;
+      if (bandFolder != null && bandFolder.trim().isNotEmpty) {
+        return Directory(path.join(bandFolder, saved));
+      }
+      return Directory(saved);
     }
+    final bandFolder = _bandFolder ?? _preferences.bandFolder;
+    if (bandFolder == null || bandFolder.trim().isEmpty) return null;
+    return Directory(path.join(bandFolder, 'Masters'));
+  }
+
+  Future<void> _chooseBandFolder() async {
+    final selection = await FilePicker.platform.getDirectoryPath(
+      dialogTitle: 'Choose Band Folder',
+    );
+    if (selection == null || selection.trim().isEmpty) return;
     await _openBandFolder(selection, remember: true);
   }
 
   Future<void> _chooseSyncFolder() async {
-    final selection = await FilePicker.platform
-        .getDirectoryPath(dialogTitle: 'Choose your Google Drive sync folder');
-    if (selection == null) return;
+    final selection = await FilePicker.platform.getDirectoryPath(
+      dialogTitle: 'Choose Sync Folder',
+    );
+    if (selection == null || selection.trim().isEmpty) return;
     await _preferences.setSyncFolder(selection);
   }
 
   Future<void> _chooseMastersFolder() async {
-    final selection = await FilePicker.platform
-        .getDirectoryPath(dialogTitle: 'Choose your Masters Folder');
-    if (selection == null) return;
-    await _preferences
-        .setMastersFolder(_mastersPreferenceValueFor(Directory(selection)));
-  }
-
-  Future<Directory?> _requireMastersFolder() async {
-    final saved = _resolvedMastersFolder;
-    if (saved != null && await saved.exists()) {
-      return saved;
-    }
-    final fallback = _defaultMastersFolder;
-    if (fallback != null) {
-      await fallback.create(recursive: true);
-      await _preferences.setMastersFolder('Masters');
-      return fallback;
-    }
-    await _chooseMastersFolder();
-    final selected = _resolvedMastersFolder;
-    if (selected == null || !await selected.exists()) return null;
-    return selected;
-  }
-
-  Directory? get _defaultMastersFolder {
-    final bandFolder = _bandFolder ?? _preferences.bandFolder;
-    if (bandFolder == null) return null;
-    return Directory(path.join(bandFolder, 'Masters'));
-  }
-
-  Directory? get _resolvedMastersFolder {
-    final saved = _preferences.mastersFolder;
-    if (saved == null || saved.trim().isEmpty) return _defaultMastersFolder;
-    if (path.isAbsolute(saved)) return Directory(saved);
-    final bandFolder = _bandFolder ?? _preferences.bandFolder;
-    if (bandFolder == null) return Directory(saved);
-    return Directory(path.normalize(path.join(bandFolder, saved)));
-  }
-
-  String _mastersPreferenceValueFor(Directory directory) {
-    final bandFolder = _bandFolder ?? _preferences.bandFolder;
-    if (bandFolder == null) return directory.path;
-    final relative = path.relative(directory.path, from: bandFolder);
-    return relative.startsWith('..') || path.isAbsolute(relative)
-        ? directory.path
-        : relative;
+    final selection = await FilePicker.platform.getDirectoryPath(
+      dialogTitle: 'Choose Masters Folder',
+    );
+    if (selection == null || selection.trim().isEmpty) return;
+    await _preferences.setMastersFolder(selection);
+    await _refreshMastersList();
   }
 
   Future<Directory?> _requireSyncFolder() async {
-    final saved = _preferences.syncFolder;
-    if (saved != null && await Directory(saved).exists()) {
-      return Directory(saved);
+    final saved = _preferences.syncFolder?.trim();
+    if (saved != null && saved.isNotEmpty) return Directory(saved);
+    if (mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+          content: Text('Choose a Google Drive sync folder in Preferences.')));
     }
-    await _chooseSyncFolder();
-    final selected = _preferences.syncFolder;
-    if (selected == null || !await Directory(selected).exists()) return null;
-    return Directory(selected);
+    return null;
   }
 
-  Future<GoogleDriveConnection> _requireGoogleDriveConnection() async {
-    final existing = _googleDriveConnection;
-    if (existing != null) return existing;
-    final bundledConfig = _bundledGoogleOAuthConfig;
-    final clientId = bundledConfig?.clientId ?? _preferences.googleClientId;
-    final clientSecret =
-        bundledConfig?.clientSecret ?? _preferences.googleClientSecret;
-    if (clientId == null || clientId.trim().isEmpty) {
-      throw StateError(
-          'This build does not include a Google OAuth client yet. Add one in Preferences for testing, or ship assets/google_oauth.json with the app.');
+  Future<Directory?> _requireMastersFolder() async {
+    final resolved = _resolvedMastersFolder;
+    if (resolved != null) return resolved;
+    if (mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+          content: Text('Choose or create a Masters folder in Preferences.')));
     }
-    final connection =
-        await _activity.run('Connecting Google Drive', (update) async {
-      update(null, 'Opening Google sign-in…');
-      final result = await _googleDriveSync.connect(
-        clientId: clientId,
-        clientSecret: clientSecret,
-        savedCredentialsJson: _preferences.googleDriveCredentials,
-      );
-      update(1, 'Google Drive connected');
-      return result;
-    });
-    await _googleDriveCredentialSubscription?.cancel();
-    _googleDriveCredentialSubscription =
-        connection.credentialUpdates.listen((credentials) {
-      unawaited(_preferences
-          .setGoogleDriveCredentials(jsonEncode(credentials.toJson())));
-    });
-    await _preferences.setGoogleDriveCredentials(connection.credentialsJson);
-    _googleDriveConnection = connection;
-    return connection;
-  }
-
-  Future<void> _editGoogleClientConfig() async {
-    final clientIdController =
-        TextEditingController(text: _preferences.googleClientId ?? '');
-    final clientSecretController =
-        TextEditingController(text: _preferences.googleClientSecret ?? '');
-    final saved = await showDialog<bool>(
-      context: context,
-      builder: (context) => AlertDialog(
-        title: const Text('Google Drive OAuth client'),
-        content: SizedBox(
-          width: 560,
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              const Text(
-                  'Use a Google Cloud OAuth 2.0 Desktop client. RiffNotes uses it to ask for Drive access in your browser.'),
-              const SizedBox(height: 12),
-              TextField(
-                controller: clientIdController,
-                decoration: const InputDecoration(labelText: 'Client ID'),
-              ),
-              const SizedBox(height: 8),
-              TextField(
-                controller: clientSecretController,
-                decoration: const InputDecoration(labelText: 'Client secret'),
-                obscureText: true,
-              ),
-            ],
-          ),
-        ),
-        actions: [
-          TextButton(
-              onPressed: () => Navigator.pop(context, false),
-              child: const Text('Cancel')),
-          FilledButton(
-              onPressed: () => Navigator.pop(context, true),
-              child: const Text('Save')),
-        ],
-      ),
-    );
-    if (saved == true) {
-      await _preferences.setGoogleClientConfig(
-        clientId: clientIdController.text,
-        clientSecret: clientSecretController.text,
-      );
-      await _preferences.clearGoogleDriveConnection();
-      await _googleDriveCredentialSubscription?.cancel();
-      _googleDriveCredentialSubscription = null;
-      _googleDriveConnection?.close();
-      _googleDriveConnection = null;
-    }
-    clientIdController.dispose();
-    clientSecretController.dispose();
+    return null;
   }
 
   Future<void> _importGoogleOAuthJson() async {
-    final selection = await FilePicker.platform.pickFiles(
-      dialogTitle: 'Choose Google OAuth JSON',
-      type: FileType.custom,
-      allowedExtensions: const ['json'],
-      withData: false,
-    );
-    final filePath = selection?.files.single.path;
-    if (filePath == null) return;
     try {
-      final config = GoogleDriveOAuthConfig.fromJsonContent(
-          await File(filePath).readAsString());
+      final picked = await FilePicker.platform.pickFiles(
+        dialogTitle: 'Choose Google OAuth JSON',
+        type: FileType.custom,
+        allowedExtensions: const ['json'],
+        withData: true,
+      );
+      final file = picked?.files.firstOrNull;
+      if (file == null) return;
+      final bytes = file.bytes ?? await File(file.path!).readAsBytes();
+      final content = utf8.decode(bytes);
+      final config = GoogleDriveOAuthConfig.fromJsonContent(content);
       if (config == null || !config.isConfigured) {
-        throw const FormatException('No client_id was found in the JSON file.');
+        throw const FormatException('Missing client_id in OAuth JSON.');
       }
       await _preferences.setGoogleClientConfig(
         clientId: config.clientId,
@@ -326,6 +222,81 @@ class _LibraryScreenState extends State<LibraryScreen> {
         _showCopyableError('Could not import Google OAuth JSON: $error');
       }
     }
+  }
+
+  Future<void> _editGoogleClientConfig() async {
+    final clientIdController =
+        TextEditingController(text: _preferences.googleClientId ?? '');
+    final clientSecretController =
+        TextEditingController(text: _preferences.googleClientSecret ?? '');
+    final saved = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Google OAuth client'),
+        content: SizedBox(
+          width: 560,
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              TextField(
+                controller: clientIdController,
+                autofocus: true,
+                decoration: const InputDecoration(labelText: 'Client ID'),
+              ),
+              const SizedBox(height: 12),
+              TextField(
+                controller: clientSecretController,
+                decoration: const InputDecoration(
+                    labelText: 'Client secret (optional)'),
+              ),
+            ],
+          ),
+        ),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(context, false),
+              child: const Text('Cancel')),
+          FilledButton(
+              onPressed: () => Navigator.pop(context, true),
+              child: const Text('Save')),
+        ],
+      ),
+    );
+    if (saved == true) {
+      await _preferences.setGoogleClientConfig(
+        clientId: clientIdController.text,
+        clientSecret: clientSecretController.text,
+      );
+      await _disconnectGoogleDrive();
+    }
+    clientIdController.dispose();
+    clientSecretController.dispose();
+  }
+
+  Future<GoogleDriveConnection> _requireGoogleDriveConnection() async {
+    final existing = _googleDriveConnection;
+    if (existing != null) return existing;
+    final bundled = _bundledGoogleOAuthConfig;
+    final clientId = _preferences.googleClientId ?? bundled?.clientId;
+    final clientSecret =
+        _preferences.googleClientSecret ?? bundled?.clientSecret;
+    if (clientId == null || clientId.trim().isEmpty) {
+      throw StateError('Import OAuth JSON in Preferences before connecting.');
+    }
+    final connection = await _googleDriveSync.connect(
+      clientId: clientId,
+      clientSecret: clientSecret,
+      savedCredentialsJson: _preferences.googleDriveCredentials,
+    );
+    await _googleDriveCredentialSubscription?.cancel();
+    _googleDriveCredentialSubscription =
+        connection.credentialUpdates.listen((credentials) {
+      unawaited(_preferences
+          .setGoogleDriveCredentials(jsonEncode(credentials.toJson())));
+    });
+    await _preferences.setGoogleDriveCredentials(connection.credentialsJson);
+    _googleDriveConnection = connection;
+    return connection;
   }
 
   Future<void> _connectGoogleDrive() async {
@@ -394,6 +365,10 @@ class _LibraryScreenState extends State<LibraryScreen> {
     final packageInfo = await PackageInfo.fromPlatform();
     _bundledGoogleOAuthConfig = bundledGoogleOAuthConfig;
     _packageInfo = packageInfo;
+    if (_preferences.fingerprintFeatureWeights.isNotEmpty) {
+      _fingerprints
+          .setFeatureWeightProfile(_preferences.fingerprintFeatureWeights);
+    }
     if (mounted) {
       setState(() => _playerPanelCollapsed = _preferences.playerPanelCollapsed);
     }
@@ -523,6 +498,7 @@ class _LibraryScreenState extends State<LibraryScreen> {
       _sectionRecordingId = null;
       _reviewRecordingFilter = null;
       _showPracticeReview = false;
+      _fingerprintRawMatches = const [];
       _fingerprintMatches = const [];
       _fingerprintDecisionState = const FingerprintDecisions();
       _reviewNotes = const [];
@@ -820,6 +796,128 @@ class _LibraryScreenState extends State<LibraryScreen> {
     return 'Version ${info.version}+${info.buildNumber}';
   }
 
+  String _recordingDisplayName(Recording recording) {
+    final title = recording.title?.trim();
+    if (title == null || title.isEmpty) return recording.filename;
+    return '$title (${recording.filename})';
+  }
+
+  List<String> _quickSongTitlesForPractice(PracticeFolder practice) {
+    final titles = <String>{
+      ..._preferences.fingerprintSongTitlesForPractice(practice.directory.path),
+      ...(_mastersPractice?.recordings
+              .map((item) => item.title?.trim())
+              .whereType<String>()
+              .where((item) => item.isNotEmpty) ??
+          const <String>[]),
+      ...practice.recordings
+          .map((item) => item.title?.trim())
+          .whereType<String>()
+          .where((item) => item.isNotEmpty),
+    };
+    final result = titles.toList(growable: false)
+      ..sort((a, b) => a.toLowerCase().compareTo(b.toLowerCase()));
+    return result;
+  }
+
+  Future<void> _quickSetRecordingTitle(
+      Recording recording, String title) async {
+    final cleaned = title.trim();
+    if (cleaned.isEmpty) return;
+    await _updateRecording(
+      recording,
+      title: cleaned,
+      isBestTake: recording.isBestTake,
+    );
+    await _teachFingerprintGuessFromQuickTitle(recording, cleaned);
+  }
+
+  Future<void> _teachFingerprintGuessFromQuickTitle(
+      Recording recording, String title) async {
+    final practice = _selected;
+    if (practice == null) return;
+    final matches = _fingerprintRawMatches
+        .where((item) => item.recordingId == recording.id)
+        .toList()
+      ..sort((a, b) => b.confidence.compareTo(a.confidence));
+    final mastersFolder = _resolvedMastersFolder;
+    if (mastersFolder != null && matches.isNotEmpty) {
+      await _fingerprintCorrections.add(
+        mastersFolder.path,
+        FingerprintCorrection(
+          recordingId: recording.id,
+          recordingFilename: recording.filename,
+          recordingTitle: title,
+          practiceName: practice.name,
+          practicePath: practice.directory.path,
+          correctType: 'new',
+          correctMasterRecordingId: null,
+          correctMasterFilename: null,
+          correctMasterTitle: null,
+          correctSectionLabel: null,
+          notes: '',
+          report: _fingerprintCorrectionReport(
+            recording: recording,
+            matches: matches,
+            correctType: 'new',
+            correctMaster: null,
+            correctSectionLabel: null,
+            newSongTitle: title,
+            notes: '',
+          ),
+          recordedAt: DateTime.now().toUtc(),
+        ),
+      );
+    }
+    await _clearFingerprintGuessForRecording(recording.id);
+    await _preferences.rememberFingerprintSongTitle(
+        practice.directory.path, title);
+  }
+
+  Future<void> _clearFingerprintGuessForRecording(String recordingId) async {
+    final remainingRaw =
+        _fingerprintRawMatches.where((item) => item.recordingId != recordingId);
+    final remainingVisible =
+        _fingerprintMatches.where((item) => item.recordingId != recordingId);
+    if (mounted) {
+      setState(() {
+        _fingerprintRawMatches = remainingRaw.toList(growable: false);
+        _fingerprintMatches = remainingVisible.toList(growable: false);
+      });
+    }
+    final practice = _selected;
+    if (practice != null) {
+      await _fingerprintSuggestions.save(
+          practice.directory.path, _fingerprintRawMatches);
+    }
+  }
+
+  Map<String, double> _currentFingerprintWeightProfile() {
+    final defaults = FingerprintRepository.defaultFeatureWeightProfile();
+    final current = _fingerprints.featureWeightProfile();
+    return {
+      for (final entry in defaults.entries)
+        entry.key: current[entry.key] ?? entry.value,
+    };
+  }
+
+  Future<void> _applyFingerprintWeightProfile(
+      Map<String, double> profile) async {
+    _fingerprints.setFeatureWeightProfile(profile);
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+        content: Text('Fingerprint weight profile applied for this session.')));
+  }
+
+  Future<void> _saveFingerprintWeightProfile(
+      Map<String, double> profile) async {
+    _fingerprints.setFeatureWeightProfile(profile);
+    await _preferences.setFingerprintFeatureWeights(profile);
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Fingerprint weight profile saved.')));
+  }
+
   Future<void> _refreshNotes(Recording recording) async {
     final practice = _selected;
     if (practice == null) return;
@@ -844,9 +942,17 @@ class _LibraryScreenState extends State<LibraryScreen> {
         await _fingerprintSuggestions.load(practice.directory.path);
     final visibleMatches =
         _visibleFingerprintMatches(practice, suggestions, decisions);
+    _logFingerprintState(
+      practicePath: practice.directory.path,
+      phase: 'refresh',
+      suggestions: suggestions,
+      decisions: decisions,
+      visibleMatches: visibleMatches,
+    );
     if (mounted && _selected?.directory.path == practice.directory.path) {
       setState(() {
         _fingerprintDecisionState = decisions;
+        _fingerprintRawMatches = suggestions;
         _fingerprintMatches = visibleMatches;
       });
     }
@@ -1211,13 +1317,13 @@ class _LibraryScreenState extends State<LibraryScreen> {
       await _activity.run('Clearing practice cache', (update) async {
         update(null, 'Removing generated cache and fingerprint state…');
         if (await cache.exists()) await cache.delete(recursive: true);
-        await _fingerprintSuggestions.clear(practice.directory.path);
-        await _fingerprintDecisions.clear(practice.directory.path);
+        await _clearFingerprintState(practice.directory.path);
         update(1, 'Cache cleared');
       });
       _waveform.clear();
       if (mounted && _selected?.directory.path == practice.directory.path) {
         setState(() {
+          _fingerprintRawMatches = const [];
           _fingerprintMatches = const [];
           _fingerprintDecisionState = const FingerprintDecisions();
         });
@@ -1232,6 +1338,68 @@ class _LibraryScreenState extends State<LibraryScreen> {
     }
   }
 
+  Future<void> _clearMastersCache() async {
+    final mastersFolder = _resolvedMastersFolder;
+    if (mastersFolder == null) return;
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Clear Masters cache?'),
+        content: Text(
+            'Generated waveform and fingerprint files in ${mastersFolder.path} will be regenerated when needed. Master recordings, sections, learning, and correction reports are not removed.'),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(context, false),
+              child: const Text('Cancel')),
+          FilledButton(
+              onPressed: () => Navigator.pop(context, true),
+              child: const Text('Clear Masters cache')),
+        ],
+      ),
+    );
+    if (confirmed != true) return;
+    final cache = Directory(path.join(mastersFolder.path, '.riffnotes-cache'));
+    try {
+      await _activity.run('Clearing Masters cache', (update) async {
+        update(null,
+            'Removing generated Masters cache and current fingerprint review state…');
+        if (await cache.exists()) await cache.delete(recursive: true);
+        final selectedPractice = _selected;
+        if (selectedPractice != null) {
+          await _clearFingerprintState(selectedPractice.directory.path);
+        }
+        update(1, 'Masters cache cleared');
+      });
+      _waveform.clear();
+      final selectedPractice = _selected;
+      final recording = _selectedRecording;
+      if (mounted) {
+        setState(() {
+          _fingerprintRawMatches = const [];
+          _fingerprintMatches = const [];
+          _fingerprintDecisionState = const FingerprintDecisions();
+        });
+      }
+      if (selectedPractice != null &&
+          recording != null &&
+          selectedPractice.directory.path == mastersFolder.path) {
+        unawaited(_waveform.load(selectedPractice, recording));
+      }
+    } on FileSystemException catch (error) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+            content: Text('Masters cache clear failed: ${error.message}')));
+      }
+    }
+  }
+
+  Future<void> _clearFingerprintState(String practicePath) async {
+    _logFingerprintState(practicePath: practicePath, phase: 'before-clear');
+    await _fingerprintSuggestions.clear(practicePath);
+    await _fingerprintDecisions.clear(practicePath);
+    _logFingerprintState(practicePath: practicePath, phase: 'after-clear');
+  }
+
   Future<void> _matchSelectedPracticeFingerprints() async {
     final practice = _selected;
     if (practice == null) return;
@@ -1243,11 +1411,17 @@ class _LibraryScreenState extends State<LibraryScreen> {
         update(null, 'Fingerprinting masters and ${practice.name}…');
         final decisions =
             await _fingerprintDecisions.load(practice.directory.path);
-        final result = await _fingerprints.matchPractice(
-          practice: practice,
-          mastersFolder: mastersFolder,
+        _log.info(
+          'fingerprint',
+          'Starting run for ${practice.name}; skipAccepted=${decisions.accepted.length}; weights=${_fingerprints.featureWeightProfile()}',
+        );
+        final result = await _fingerprints.matchPracticeInBackground(
+          practicePath: practice.directory.path,
+          mastersPath: mastersFolder.path,
+          weightProfile: _fingerprints.featureWeightProfile(),
           skipRecordingIds:
               decisions.accepted.map((item) => item.recordingId).toSet(),
+          actionableOnly: false,
         );
         update(1, 'Fingerprint matching complete');
         return result;
@@ -1258,11 +1432,24 @@ class _LibraryScreenState extends State<LibraryScreen> {
       final visibleMatches =
           _visibleFingerprintMatches(practice, matches, decisions);
       setState(() {
+        _fingerprintRawMatches = matches;
         _fingerprintMatches = visibleMatches;
         _fingerprintDecisionState = decisions;
       });
-      await _fingerprintSuggestions.save(
-          practice.directory.path, visibleMatches);
+      try {
+        _logFingerprintRunSummary(practice, matches, visibleMatches, decisions);
+      } catch (error) {
+        _log.warning(
+            'fingerprint', 'Run summary logging failed: ${error.toString()}');
+      }
+      await _fingerprintSuggestions.save(practice.directory.path, matches);
+      _logFingerprintState(
+        practicePath: practice.directory.path,
+        phase: 'after-save',
+        suggestions: matches,
+        decisions: decisions,
+        visibleMatches: visibleMatches,
+      );
       ScaffoldMessenger.of(context).showSnackBar(SnackBar(
           content: Text(visibleMatches.isEmpty
               ? 'No confident fingerprint matches found.'
@@ -1280,6 +1467,1266 @@ class _LibraryScreenState extends State<LibraryScreen> {
     }
   }
 
+  void _logFingerprintRunSummary(
+    PracticeFolder practice,
+    List<FingerprintMatch> rawMatches,
+    List<FingerprintMatch> visibleMatches,
+    FingerprintDecisions decisions,
+  ) {
+    final rawByRecording = <String, List<FingerprintMatch>>{};
+    for (final match in rawMatches) {
+      rawByRecording.putIfAbsent(match.recordingId, () => []).add(match);
+    }
+    final visibleByRecording = <String, List<FingerprintMatch>>{};
+    for (final match in visibleMatches) {
+      visibleByRecording.putIfAbsent(match.recordingId, () => []).add(match);
+    }
+    _log.info('fingerprint',
+        'Run complete for ${practice.name}: raw=${rawMatches.length}, visible=${visibleMatches.length}, accepted=${decisions.accepted.length}, ignored=${decisions.ignoredKeys.length}');
+    _log.info(
+      'fingerprint',
+      'Run distribution: recordingsWithRaw=${rawByRecording.length}, recordingsWithVisible=${visibleByRecording.length}, totalRecordings=${practice.recordings.length}',
+    );
+    for (final recording in practice.recordings) {
+      if (_isJamRecording(recording)) {
+        _log.info('fingerprint',
+            '${recording.filename}: skipped because title is Jam');
+        continue;
+      }
+      final rawForRecording =
+          (rawByRecording[recording.id] ?? const <FingerprintMatch>[])
+              .toList(growable: true);
+      final visibleForRecording =
+          (visibleByRecording[recording.id] ?? const <FingerprintMatch>[])
+              .toList(growable: true);
+      if (rawForRecording.isEmpty && visibleForRecording.isEmpty) {
+        _log.info('fingerprint',
+            '${recording.filename}: no raw or visible suggestions');
+        continue;
+      }
+      rawForRecording.sort((a, b) => b.confidence.compareTo(a.confidence));
+      visibleForRecording.sort((a, b) => b.confidence.compareTo(a.confidence));
+      final rawBest = rawForRecording.firstOrNull;
+      final visibleBest = visibleForRecording.firstOrNull;
+      _log.info('fingerprint',
+          '${recording.filename}: rawCount=${rawForRecording.length}, visibleCount=${visibleForRecording.length}, rawBest=${rawBest?.displayName ?? 'none'} (${rawBest?.scoreDetails ?? 'n/a'}); visibleBest=${visibleBest?.displayName ?? 'none'} (${visibleBest?.scoreDetails ?? 'n/a'})');
+      final topCount = rawForRecording.length < 2 ? rawForRecording.length : 2;
+      for (var index = 0; index < topCount; index += 1) {
+        final candidate = rawForRecording[index];
+        _log.info(
+          'fingerprint-candidate',
+          '${recording.filename} #${index + 1}: ${candidate.displayName} | ${candidate.scoreDetails} | groupDeltas=${_featureGroupDeltaSummary(candidate)} | ${_fingerprints.actionabilitySummary(candidate)}',
+        );
+      }
+    }
+  }
+
+  String _featureGroupDeltaSummary(FingerprintMatch match) {
+    const groups = <String>[
+      'chroma',
+      'energy',
+      'attack',
+      'lowMotion',
+      'highMotion',
+      'zeroCrossing',
+      'peaks',
+    ];
+    final parts = <String>[];
+    for (final group in groups) {
+      final agreement = _featureGroupAgreement(match, group);
+      final delta = (1.0 - agreement).clamp(0.0, 1.0).toDouble();
+      parts.add('$group ${(delta * 100).toStringAsFixed(1)}%');
+    }
+    return parts.join(', ');
+  }
+
+  double _featureGroupAgreement(FingerprintMatch match, String group) {
+    if (group == 'chroma') {
+      var total = 0.0;
+      var count = 0;
+      for (var index = 0; index < 12; index += 1) {
+        final value = match.featureScores['chroma$index'];
+        if (value == null) continue;
+        total += value;
+        count += 1;
+      }
+      if (count == 0) return 0;
+      return (total / count).clamp(0.0, 1.0).toDouble();
+    }
+    return (match.featureScores[group] ?? 0).clamp(0.0, 1.0).toDouble();
+  }
+
+  Future<void> _logFingerprintState({
+    required String practicePath,
+    required String phase,
+    List<FingerprintMatch>? suggestions,
+    FingerprintDecisions? decisions,
+    List<FingerprintMatch>? visibleMatches,
+  }) async {
+    final suggestionsFile = File(
+        path.join(practicePath, '.riffnotes.fingerprint-suggestions.json'));
+    final decisionsFile =
+        File(path.join(practicePath, '.riffnotes.fingerprint-decisions.json'));
+    final suggestionsExists = await suggestionsFile.exists();
+    final decisionsExists = await decisionsFile.exists();
+    final loadedSuggestions =
+        suggestions ?? await _fingerprintSuggestions.load(practicePath);
+    final loadedDecisions =
+        decisions ?? await _fingerprintDecisions.load(practicePath);
+    _log.info(
+      'fingerprint-state',
+      '[$phase] suggestionsFile=${suggestionsExists ? 'present' : 'missing'}; decisionsFile=${decisionsExists ? 'present' : 'missing'}; suggestions=${loadedSuggestions.length}; accepted=${loadedDecisions.accepted.length}; ignored=${loadedDecisions.ignoredKeys.length}; visible=${visibleMatches?.length ?? 'n/a'}',
+    );
+  }
+
+  Future<void> _evaluateFingerprintCorrections() async {
+    final practice = _selected;
+    final mastersFolder = _resolvedMastersFolder;
+    if (practice == null || mastersFolder == null) return;
+    final reportFuture =
+        _buildFingerprintEvaluationReport(practice, mastersFolder);
+    await showDialog<void>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Fingerprint evaluation'),
+        content: FutureBuilder<String>(
+          future: reportFuture,
+          builder: (context, snapshot) {
+            if (snapshot.connectionState != ConnectionState.done) {
+              return const SizedBox(
+                width: 520,
+                child: Row(
+                  children: [
+                    SizedBox(
+                      width: 22,
+                      height: 22,
+                      child: CircularProgressIndicator(strokeWidth: 2.5),
+                    ),
+                    SizedBox(width: 16),
+                    Expanded(
+                      child: Text(
+                          'Calculating evaluation from fresh fingerprint data. This can take a while on larger practices…'),
+                    ),
+                  ],
+                ),
+              );
+            }
+            if (snapshot.hasError) {
+              return SizedBox(
+                width: 680,
+                child: SelectableText(
+                    'Evaluation failed: ${snapshot.error ?? 'Unknown error'}'),
+              );
+            }
+            final reportText = snapshot.data ?? '';
+            return SizedBox(
+              width: 760,
+              height: 520,
+              child: reportText.contains('Corrections evaluated: 0')
+                  ? SelectableText(
+                      'No fingerprint corrections found for ${practice.name}.\n\nUse “Teach correct match” on a few takes, then run this evaluation again.')
+                  : SingleChildScrollView(child: SelectableText(reportText)),
+            );
+          },
+        ),
+        actions: [
+          FutureBuilder<String>(
+            future: reportFuture,
+            builder: (context, snapshot) => TextButton.icon(
+                onPressed: snapshot.connectionState == ConnectionState.done &&
+                        snapshot.hasData
+                    ? () async {
+                        final reportText = snapshot.data ?? '';
+                        await Clipboard.setData(
+                            ClipboardData(text: reportText));
+                        if (context.mounted) Navigator.pop(context);
+                        if (mounted) {
+                          ScaffoldMessenger.of(this.context).showSnackBar(
+                              const SnackBar(
+                                  content: Text(
+                                      'Fingerprint evaluation report copied')));
+                        }
+                      }
+                    : null,
+                icon: const Icon(Icons.copy),
+                label: const Text('Copy report')),
+          ),
+          TextButton(
+              onPressed: () => Navigator.pop(context),
+              child: const Text('Close')),
+        ],
+      ),
+    );
+  }
+
+  Future<void> _showFingerprintFeatureChartDialog() async {
+    final practice = _selected;
+    if (practice == null) return;
+    final masters =
+        _mastersPractice ?? await _loadMastersPractice(create: true);
+    if (masters == null) return;
+    if (practice.recordings.isEmpty || masters.recordings.isEmpty) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+            content: Text(
+                'Feature chart needs at least one recording and one master.')));
+      }
+      return;
+    }
+
+    final practiceCandidates = practice.recordings
+        .where((recording) => !_isJamRecording(recording))
+        .toList(growable: false);
+    final practicePool =
+        practiceCandidates.isEmpty ? practice.recordings : practiceCandidates;
+    var selectedRecordingId = (_selectedRecording != null &&
+            practicePool.any((item) => item.id == _selectedRecording!.id))
+        ? _selectedRecording!.id
+        : practicePool.first.id;
+    var weightProfile = _currentFingerprintWeightProfile();
+    const weightRanges = <String, (double, double)>{
+      'chroma': (0.0, 0.25),
+      'energy': (0.0, 2.0),
+      'attack': (0.0, 2.0),
+      'lowMotion': (0.0, 2.0),
+      'highMotion': (0.0, 2.0),
+      'zeroCrossing': (0.0, 2.0),
+      'peaks': (0.0, 1.0),
+    };
+    Future<_FingerprintFeatureChartData> chartFuture() {
+      final recording =
+          practicePool.firstWhere((item) => item.id == selectedRecordingId);
+      return _buildFingerprintFeatureChartData(
+        practice: practice,
+        masters: masters,
+        recording: recording,
+      );
+    }
+
+    var future = chartFuture();
+    await showDialog<void>(
+      context: context,
+      builder: (context) => StatefulBuilder(
+        builder: (context, setDialogState) => AlertDialog(
+          title: const Text('Fingerprint feature chart'),
+          content: SizedBox(
+            width: 920,
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                DropdownButtonFormField<String>(
+                  value: selectedRecordingId,
+                  decoration:
+                      const InputDecoration(labelText: 'Practice recording'),
+                  items: [
+                    for (final recording in practicePool)
+                      DropdownMenuItem(
+                        value: recording.id,
+                        child: Text(_recordingDisplayName(recording)),
+                      ),
+                  ],
+                  onChanged: (value) {
+                    if (value == null) return;
+                    setDialogState(() {
+                      selectedRecordingId = value;
+                      future = chartFuture();
+                    });
+                  },
+                ),
+                const SizedBox(height: 12),
+                FutureBuilder<_FingerprintFeatureChartData>(
+                  future: future,
+                  builder: (context, snapshot) {
+                    if (snapshot.connectionState != ConnectionState.done) {
+                      return const Padding(
+                        padding: EdgeInsets.symmetric(vertical: 24),
+                        child: Row(
+                          children: [
+                            SizedBox(
+                              width: 20,
+                              height: 20,
+                              child:
+                                  CircularProgressIndicator(strokeWidth: 2.5),
+                            ),
+                            SizedBox(width: 12),
+                            Expanded(
+                                child: Text(
+                                    'Loading cached fingerprints and building feature comparison…')),
+                          ],
+                        ),
+                      );
+                    }
+                    if (snapshot.hasError || !snapshot.hasData) {
+                      return SelectableText(
+                          'Could not build feature chart: ${snapshot.error ?? 'Unknown error'}');
+                    }
+                    final data = snapshot.data!;
+                    final featureColumns =
+                        _tableColumnsForProfile(weightProfile, maxColumns: 7);
+                    final tableRows = _tableRowsForProfile(
+                        data, weightProfile, featureColumns);
+                    return SizedBox(
+                      height: 560,
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text('Practice song: ${data.recordingLabel}'),
+                          const SizedBox(height: 4),
+                          Text(
+                              'All masters compared against the selected practice song.'),
+                          const SizedBox(height: 10),
+                          Container(
+                            padding: const EdgeInsets.all(10),
+                            decoration: BoxDecoration(
+                              color: Theme.of(context)
+                                  .colorScheme
+                                  .surfaceContainerHighest
+                                  .withOpacity(.25),
+                              borderRadius: BorderRadius.circular(12),
+                            ),
+                            child: Row(
+                              children: [
+                                Expanded(
+                                  child: Text(
+                                      'Feature table sorted by lowest total weighted delta. Hover A-G to see feature names.'),
+                                ),
+                                TextButton.icon(
+                                  onPressed: () async {
+                                    await _exportFingerprintFeatureChartSnapshot(
+                                        data, weightProfile);
+                                  },
+                                  icon: const Icon(Icons.download_outlined),
+                                  label: const Text('Export snapshot'),
+                                ),
+                              ],
+                            ),
+                          ),
+                          const SizedBox(height: 8),
+                          Expanded(
+                            child: ClipRect(
+                              child: SingleChildScrollView(
+                                child: SingleChildScrollView(
+                                  scrollDirection: Axis.horizontal,
+                                  child: DataTable(
+                                    columnSpacing: 18,
+                                    columns: [
+                                      const DataColumn(
+                                          label: Text('Master Song Name')),
+                                      DataColumn(
+                                          label: Tooltip(
+                                              message: featureColumns
+                                                      .elementAtOrNull(0) ??
+                                                  'n/a',
+                                              child: const Text('A'))),
+                                      DataColumn(
+                                          label: Tooltip(
+                                              message: featureColumns
+                                                      .elementAtOrNull(1) ??
+                                                  'n/a',
+                                              child: const Text('B'))),
+                                      DataColumn(
+                                          label: Tooltip(
+                                              message: featureColumns
+                                                      .elementAtOrNull(2) ??
+                                                  'n/a',
+                                              child: const Text('C'))),
+                                      DataColumn(
+                                          label: Tooltip(
+                                              message: featureColumns
+                                                      .elementAtOrNull(3) ??
+                                                  'n/a',
+                                              child: const Text('D'))),
+                                      DataColumn(
+                                          label: Tooltip(
+                                              message: featureColumns
+                                                      .elementAtOrNull(4) ??
+                                                  'n/a',
+                                              child: const Text('E'))),
+                                      DataColumn(
+                                          label: Tooltip(
+                                              message: featureColumns
+                                                      .elementAtOrNull(5) ??
+                                                  'n/a',
+                                              child: const Text('F'))),
+                                      DataColumn(
+                                          label: Tooltip(
+                                              message: featureColumns
+                                                      .elementAtOrNull(6) ??
+                                                  'n/a',
+                                              child: const Text('G'))),
+                                      const DataColumn(
+                                          label: Text('Confidence')),
+                                      const DataColumn(
+                                          label:
+                                              Text('Total Delta after weight')),
+                                    ],
+                                    rows: [
+                                      for (final row in tableRows)
+                                        DataRow(cells: [
+                                          DataCell(Tooltip(
+                                              message: row.masterFilename,
+                                              child: Text(row.masterLabel))),
+                                          DataCell(Text(_percent(row
+                                                  .featureDeltas
+                                                  .elementAtOrNull(0) ??
+                                              0))),
+                                          DataCell(Text(_percent(row
+                                                  .featureDeltas
+                                                  .elementAtOrNull(1) ??
+                                              0))),
+                                          DataCell(Text(_percent(row
+                                                  .featureDeltas
+                                                  .elementAtOrNull(2) ??
+                                              0))),
+                                          DataCell(Text(_percent(row
+                                                  .featureDeltas
+                                                  .elementAtOrNull(3) ??
+                                              0))),
+                                          DataCell(Text(_percent(row
+                                                  .featureDeltas
+                                                  .elementAtOrNull(4) ??
+                                              0))),
+                                          DataCell(Text(_percent(row
+                                                  .featureDeltas
+                                                  .elementAtOrNull(5) ??
+                                              0))),
+                                          DataCell(Text(_percent(row
+                                                  .featureDeltas
+                                                  .elementAtOrNull(6) ??
+                                              0))),
+                                          DataCell(
+                                              Text(_percent(row.confidence))),
+                                          DataCell(Text(_percent(
+                                              row.totalWeightedDelta))),
+                                        ]),
+                                    ],
+                                  ),
+                                ),
+                              ),
+                            ),
+                          ),
+                          const SizedBox(height: 12),
+                          const Divider(height: 1),
+                          const SizedBox(height: 10),
+                          const Text('Weight adjusters'),
+                          const SizedBox(height: 6),
+                          SizedBox(
+                            height: 170,
+                            child: SingleChildScrollView(
+                              child: Wrap(
+                                spacing: 12,
+                                runSpacing: 10,
+                                children: [
+                                  for (final entry in weightRanges.entries)
+                                    SizedBox(
+                                      width: 280,
+                                      child: Column(
+                                        crossAxisAlignment:
+                                            CrossAxisAlignment.start,
+                                        children: [
+                                          Text(
+                                              '${entry.key}: ${(weightProfile[entry.key] ?? 0).toStringAsFixed(2)}'),
+                                          Slider(
+                                            min: entry.value.$1,
+                                            max: entry.value.$2,
+                                            divisions: 40,
+                                            value:
+                                                (weightProfile[entry.key] ?? 0)
+                                                    .clamp(entry.value.$1,
+                                                        entry.value.$2),
+                                            label:
+                                                (weightProfile[entry.key] ?? 0)
+                                                    .toStringAsFixed(2),
+                                            onChanged: (value) {
+                                              setDialogState(() {
+                                                weightProfile = {
+                                                  ...weightProfile,
+                                                  entry.key: value,
+                                                };
+                                              });
+                                            },
+                                          ),
+                                        ],
+                                      ),
+                                    ),
+                                ],
+                              ),
+                            ),
+                          ),
+                        ],
+                      ),
+                    );
+                  },
+                ),
+              ],
+            ),
+          ),
+          actions: [
+            TextButton(
+                onPressed: () {
+                  setDialogState(() {
+                    weightProfile =
+                        FingerprintRepository.defaultFeatureWeightProfile();
+                  });
+                },
+                child: const Text('Reset draft')),
+            TextButton(
+                onPressed: () async {
+                  final defaults =
+                      FingerprintRepository.defaultFeatureWeightProfile();
+                  setDialogState(() {
+                    weightProfile = defaults;
+                  });
+                  await _saveFingerprintWeightProfile(defaults);
+                },
+                child: const Text('Reset saved')),
+            TextButton(
+                onPressed: () async {
+                  await _applyFingerprintWeightProfile(weightProfile);
+                },
+                child: const Text('Apply')),
+            FilledButton(
+                onPressed: () async {
+                  await _saveFingerprintWeightProfile(weightProfile);
+                },
+                child: const Text('Save profile')),
+            TextButton(
+                onPressed: () => Navigator.pop(context),
+                child: const Text('Close')),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Future<_FingerprintFeatureChartData> _buildFingerprintFeatureChartData({
+    required PracticeFolder practice,
+    required PracticeFolder masters,
+    required Recording recording,
+  }) async {
+    final recordingFingerprint = await _fingerprints.loadOrGenerateFingerprint(
+        practice.directory, recording);
+    final masterSnapshots = <_MasterFeatureSnapshot>[];
+    for (final master in masters.recordings) {
+      final fingerprint = await _fingerprints.loadOrGenerateFingerprint(
+          masters.directory, master);
+      masterSnapshots.add(_MasterFeatureSnapshot(
+        recording: master,
+        fingerprint: fingerprint,
+      ));
+    }
+    const featureGroups = <String>[
+      'chroma',
+      'energy',
+      'attack',
+      'lowMotion',
+      'highMotion',
+      'zeroCrossing',
+      'peaks',
+    ];
+    final masterRows = <_MasterDeltaRow>[];
+    for (final snapshot in masterSnapshots) {
+      final featureDeltasByGroup = <String, double>{
+        for (final feature in featureGroups)
+          feature: (_groupFeatureAverage(recordingFingerprint, feature) -
+                  _groupFeatureAverage(snapshot.fingerprint, feature))
+              .abs(),
+      };
+      masterRows.add(_MasterDeltaRow(
+        masterLabel: _recordingSongName(snapshot.recording),
+        masterFilename: snapshot.recording.filename,
+        featureDeltasByGroup: featureDeltasByGroup,
+      ));
+    }
+    return _FingerprintFeatureChartData(
+      recordingLabel: _recordingDisplayName(recording),
+      masterRows: masterRows,
+      recordingId: recording.id,
+      generatedAt: DateTime.now().toUtc(),
+    );
+  }
+
+  String _recordingSongName(Recording recording) {
+    final title = recording.title?.trim();
+    if (title != null && title.isNotEmpty) return title;
+    return path.basenameWithoutExtension(recording.filename);
+  }
+
+  List<String> _tableColumnsForProfile(
+    Map<String, double> weightProfile, {
+    int maxColumns = 6,
+  }) {
+    const featureGroups = <String>[
+      'chroma',
+      'energy',
+      'attack',
+      'lowMotion',
+      'highMotion',
+      'zeroCrossing',
+      'peaks',
+    ];
+    final sorted = featureGroups
+        .where((feature) => feature != 'chroma')
+        .toList(growable: false)
+      ..sort((a, b) {
+        final byWeight = (_featureWeightForChart(b, weightProfile))
+            .compareTo(_featureWeightForChart(a, weightProfile));
+        return byWeight != 0 ? byWeight : a.compareTo(b);
+      });
+    if (maxColumns <= 0) return const <String>[];
+    final columns = <String>['chroma'];
+    columns.addAll(sorted.take(maxColumns - 1));
+    return columns;
+  }
+
+  List<_MasterDeltaRow> _tableRowsForProfile(
+    _FingerprintFeatureChartData data,
+    Map<String, double> weightProfile,
+    List<String> columns,
+  ) {
+    final rows = data.masterRows
+        .map((row) => row.withComputedValues(
+              columns: columns,
+              weightProfile: weightProfile,
+            ))
+        .toList(growable: false)
+      ..sort((a, b) => a.totalWeightedDelta.compareTo(b.totalWeightedDelta));
+    return rows;
+  }
+
+  double _groupFeatureAverage(AudioFingerprint fingerprint, String feature) {
+    if (feature == 'chroma') {
+      var total = 0.0;
+      var count = 0;
+      for (var index = 0; index < 12; index += 1) {
+        total += _featureAverage(fingerprint.features['chroma$index']);
+        count += 1;
+      }
+      if (count == 0) return 0;
+      return (total / count).clamp(0.0, 1.0).toDouble();
+    }
+    return _featureAverage(fingerprint.features[feature]);
+  }
+
+  String _percent(double value) => '${(value * 100).toStringAsFixed(1)}%';
+
+  Future<void> _exportFingerprintFeatureChartSnapshot(
+      _FingerprintFeatureChartData data,
+      Map<String, double> weightProfile) async {
+    final featureColumns =
+        _tableColumnsForProfile(weightProfile, maxColumns: 7);
+    final tableRows = _tableRowsForProfile(data, weightProfile, featureColumns);
+    final baseName = _filenameSafe(
+        'Fingerprint_${data.recordingLabel}_${DateTime.now().toIso8601String()}');
+    final selectedPath = await FilePicker.platform.saveFile(
+      dialogTitle: 'Export fingerprint snapshot',
+      fileName: '$baseName.json',
+      type: FileType.custom,
+      allowedExtensions: const ['json', 'md'],
+    );
+    if (selectedPath == null) return;
+    final output = File(selectedPath);
+    await output.parent.create(recursive: true);
+    final payload = <String, dynamic>{
+      'recordingLabel': data.recordingLabel,
+      'recordingId': data.recordingId,
+      'generatedAt': data.generatedAt.toIso8601String(),
+      'featureColumns': featureColumns,
+      'weightProfile': weightProfile,
+      'masterRows':
+          tableRows.map((row) => row.toJson()).toList(growable: false),
+    };
+    final ext = path.extension(output.path).toLowerCase();
+    if (ext == '.md') {
+      await output.writeAsString(_fingerprintSnapshotMarkdown(payload),
+          flush: true);
+    } else {
+      await output.writeAsString(
+          const JsonEncoder.withIndent('  ').convert(payload),
+          flush: true);
+    }
+    if (mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+          content: Text(
+              'Exported fingerprint snapshot to ${path.basename(output.path)}')));
+    }
+  }
+
+  String _fingerprintSnapshotMarkdown(Map<String, dynamic> payload) {
+    final buffer = StringBuffer()
+      ..writeln('# Fingerprint Snapshot')
+      ..writeln()
+      ..writeln('- Recording: ${payload['recordingLabel']}')
+      ..writeln('- Generated: ${payload['generatedAt']}')
+      ..writeln();
+    final columns = (payload['featureColumns'] as List<dynamic>).cast<String>();
+    final masterRows =
+        (payload['masterRows'] as List<dynamic>).cast<Map<String, dynamic>>();
+    buffer
+      ..writeln('## Master Comparison Table')
+      ..writeln()
+      ..writeln(
+          '| Master Song Name | A (${columns.elementAtOrNull(0) ?? 'n/a'}) | B (${columns.elementAtOrNull(1) ?? 'n/a'}) | C (${columns.elementAtOrNull(2) ?? 'n/a'}) | D (${columns.elementAtOrNull(3) ?? 'n/a'}) | E (${columns.elementAtOrNull(4) ?? 'n/a'}) | F (${columns.elementAtOrNull(5) ?? 'n/a'}) | G (${columns.elementAtOrNull(6) ?? 'n/a'}) | Confidence | Total Delta after weight |')
+      ..writeln('|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|');
+    for (final row in masterRows) {
+      final deltas = (row['featureDeltas'] as List<dynamic>)
+          .map((item) => (item as num).toDouble())
+          .toList(growable: false);
+      buffer.writeln(
+          '| ${row['masterLabel']} | ${_percent(deltas.elementAtOrNull(0) ?? 0)} | ${_percent(deltas.elementAtOrNull(1) ?? 0)} | ${_percent(deltas.elementAtOrNull(2) ?? 0)} | ${_percent(deltas.elementAtOrNull(3) ?? 0)} | ${_percent(deltas.elementAtOrNull(4) ?? 0)} | ${_percent(deltas.elementAtOrNull(5) ?? 0)} | ${_percent(deltas.elementAtOrNull(6) ?? 0)} | ${_percent((row['confidence'] as num?)?.toDouble() ?? 0)} | ${_percent((row['totalWeightedDelta'] as num).toDouble())} |');
+    }
+    return buffer.toString();
+  }
+
+  double _featureWeightForChart(String feature, Map<String, double> profile) {
+    if (feature.startsWith('chroma')) return profile['chroma'] ?? 0;
+    return profile[feature] ?? 0;
+  }
+
+  double _featureAverage(List<double>? values) {
+    if (values == null || values.isEmpty) return 0;
+    var total = 0.0;
+    for (final value in values) {
+      total += value;
+    }
+    return (total / values.length).clamp(0.0, 1.0).toDouble();
+  }
+
+  Future<String> _buildFingerprintEvaluationReport(
+    PracticeFolder practice,
+    Directory mastersFolder,
+  ) async {
+    final corrections = await _fingerprintCorrections.load(mastersFolder.path);
+    final evaluationData =
+        await _activity.run('Refreshing evaluation data', (update) async {
+      update(null, 'Running a fresh fingerprint match for evaluation…');
+      final freshMatches = await _fingerprints.matchPracticeInBackground(
+        practicePath: practice.directory.path,
+        mastersPath: mastersFolder.path,
+        weightProfile: _fingerprints.featureWeightProfile(),
+        actionableOnly: false,
+      );
+      update(.75, 'Loading current fingerprint review decisions…');
+      final decisions =
+          await _fingerprintDecisions.load(practice.directory.path);
+      update(1, 'Evaluation data refreshed');
+      return (matches: freshMatches, decisions: decisions);
+    });
+    if (mounted) {
+      final visibleMatches = _visibleFingerprintMatches(
+        practice,
+        evaluationData.matches,
+        evaluationData.decisions,
+      );
+      setState(() {
+        _fingerprintRawMatches = evaluationData.matches;
+        _fingerprintMatches = visibleMatches;
+        _fingerprintDecisionState = evaluationData.decisions;
+      });
+    }
+    await _fingerprintSuggestions.save(
+        practice.directory.path, evaluationData.matches);
+    final report = FingerprintEvaluation.evaluate(
+      appVersion: _appVersionLabel(),
+      practiceName: practice.name,
+      practicePath: practice.directory.path,
+      mastersPath: mastersFolder.path,
+      corrections: corrections,
+      matches: evaluationData.matches,
+      acceptedDecisions: evaluationData.decisions.accepted,
+    );
+    final reportText = report.toText();
+    final tuningAppendix = _buildFingerprintEvaluationTuningAppendix(
+      corrections: corrections,
+      matches: evaluationData.matches,
+      acceptedDecisions: evaluationData.decisions.accepted,
+      weightProfile: _fingerprints.featureWeightProfile(),
+    );
+    return '$reportText\n\n$tuningAppendix';
+  }
+
+  String _buildFingerprintEvaluationTuningAppendix({
+    required List<FingerprintCorrection> corrections,
+    required List<FingerprintMatch> matches,
+    required List<FingerprintDecision> acceptedDecisions,
+    required Map<String, double> weightProfile,
+  }) {
+    final latestCorrections = <String, FingerprintCorrection>{};
+    for (final correction in corrections) {
+      final existing = latestCorrections[correction.recordingId];
+      if (existing == null ||
+          correction.recordedAt.isAfter(existing.recordedAt)) {
+        latestCorrections[correction.recordingId] = correction;
+      }
+    }
+    final matchesByRecording = <String, List<FingerprintMatch>>{};
+    for (final match in matches) {
+      matchesByRecording.putIfAbsent(
+          match.recordingId, () => <FingerprintMatch>[])
+        ..add(match);
+    }
+    for (final recordingMatches in matchesByRecording.values) {
+      recordingMatches.sort((a, b) => b.confidence.compareTo(a.confidence));
+    }
+    final acceptedByRecording = <String, FingerprintDecision>{
+      for (final item in acceptedDecisions) item.recordingId: item,
+    };
+
+    final rows = latestCorrections.values.toList()
+      ..sort((a, b) => a.recordingFilename.compareTo(b.recordingFilename));
+
+    final buffer = StringBuffer()
+      ..writeln('Tuning diagnostics')
+      ..writeln('  Active weight profile: $weightProfile')
+      ..writeln('  Evaluated corrections: ${rows.length}')
+      ..writeln(
+          '  Accepted decisions at eval time: ${acceptedDecisions.length}')
+      ..writeln(
+          '  Historical tuner scoring ignores accepted decisions and scores raw matcher output only.')
+      ..writeln('')
+      ..writeln('Per-recording candidate diagnostics');
+
+    for (final correction in rows) {
+      final recordingMatches = matchesByRecording[correction.recordingId] ??
+          const <FingerprintMatch>[];
+      final accepted = acceptedByRecording[correction.recordingId];
+      final expected = _expectedDisplayForCorrection(correction);
+      buffer
+        ..writeln('- ${correction.recordingFilename}')
+        ..writeln('    expected: $expected')
+        ..writeln('    corrected-as: ${correction.correctType}')
+        ..writeln('    candidateCount: ${recordingMatches.length}')
+        ..writeln(
+            '    acceptedDecision: ${accepted == null ? 'none' : '${accepted.displayName} (${(accepted.confidence * 100).toStringAsFixed(1)}%)'}');
+
+      if (recordingMatches.isEmpty) {
+        buffer.writeln('    topCandidates: none');
+        continue;
+      }
+
+      final topCandidates = recordingMatches.take(2).toList(growable: false);
+      for (var index = 0; index < topCandidates.length; index += 1) {
+        final candidate = topCandidates[index];
+        buffer
+          ..writeln('    #${index + 1}: ${candidate.displayName}')
+          ..writeln('      score: ${candidate.scoreDetails}')
+          ..writeln(
+              '      gate: ${_fingerprints.actionabilitySummary(candidate)}')
+          ..writeln(
+              '      groupDeltas: ${_featureGroupDeltaSummary(candidate)}')
+          ..writeln(
+              '      featureScores: ${_compactFeatureScores(candidate.featureScores)}');
+      }
+    }
+
+    return buffer.toString();
+  }
+
+  String _expectedDisplayForCorrection(FingerprintCorrection correction) {
+    final expectsNoMaster = correction.correctType == 'new' ||
+        correction.correctType == 'jam' ||
+        correction.correctType == 'unknown';
+    if (expectsNoMaster) return correction.correctType;
+    final song = correction.correctMasterTitle ??
+        correction.correctMasterFilename ??
+        correction.correctMasterRecordingId ??
+        'unknown master';
+    final section = correction.correctSectionLabel?.trim();
+    if (section == null || section.isEmpty) return song;
+    return '$song / $section';
+  }
+
+  String _compactFeatureScores(Map<String, double> featureScores) {
+    if (featureScores.isEmpty) return 'none';
+    final keys = featureScores.keys.toList(growable: false)..sort();
+    final parts = <String>[];
+    for (final key in keys) {
+      final value = featureScores[key] ?? 0;
+      parts.add('$key ${(value * 100).toStringAsFixed(1)}%');
+    }
+    return parts.join(', ');
+  }
+
+  Future<void> _reEvaluateFingerprintWeightsFromHistory() async {
+    final mastersFolder = await _requireMastersFolder();
+    if (mastersFolder == null) return;
+    try {
+      final outcome = await _activity.run('Re-evaluating fingerprint tuning',
+          (update) async {
+        final startedAt = DateTime.now();
+        update(0, 'Loading correction history…');
+        final corrections =
+            await _fingerprintCorrections.load(mastersFolder.path);
+        if (corrections.isEmpty) {
+          throw StateError(
+              'No fingerprint corrections were found. Use Teach correct match first, then re-evaluate tuning.');
+        }
+
+        final byPractice = <String, List<FingerprintCorrection>>{};
+        for (final correction in corrections) {
+          final practicePath = correction.practicePath;
+          if (practicePath == null || practicePath.trim().isEmpty) continue;
+          byPractice
+              .putIfAbsent(practicePath, () => <FingerprintCorrection>[])
+              .add(correction);
+        }
+        if (byPractice.isEmpty) {
+          throw StateError(
+              'Corrections are missing practice paths, so historical re-evaluation cannot run yet.');
+        }
+
+        final practiceInputs = <_TuningPracticeInput>[];
+        final practiceEntries = byPractice.entries.toList()
+          ..sort((a, b) => a.key.compareTo(b.key));
+        for (final entry in practiceEntries) {
+          final pathValue = entry.key;
+          final directory = Directory(pathValue);
+          if (!await directory.exists()) {
+            _log.warning('fingerprint-tune',
+                'Skipping missing practice path in corrections: $pathValue');
+            continue;
+          }
+          final decisions = await _fingerprintDecisions.load(pathValue);
+          final latestByRecording = <String, FingerprintCorrection>{};
+          for (final correction in entry.value) {
+            final existing = latestByRecording[correction.recordingId];
+            if (existing == null ||
+                correction.recordedAt.isAfter(existing.recordedAt)) {
+              latestByRecording[correction.recordingId] = correction;
+            }
+          }
+          final practiceName = entry.value
+                  .map((item) => item.practiceName)
+                  .whereType<String>()
+                  .where((value) => value.trim().isNotEmpty)
+                  .lastOrNull ??
+              directory.uri.pathSegments
+                  .where((segment) => segment.trim().isNotEmpty)
+                  .lastOrNull ??
+              path.basename(pathValue);
+          practiceInputs.add(_TuningPracticeInput(
+            practicePath: pathValue,
+            practiceName: practiceName,
+            acceptedDecisions: decisions.accepted,
+            correctionCount: latestByRecording.length,
+          ));
+        }
+        if (practiceInputs.isEmpty) {
+          throw StateError(
+              'No correction practice folders exist on disk anymore, so re-evaluation cannot run.');
+        }
+
+        final currentProfile = _currentFingerprintWeightProfile();
+        final candidates =
+            _candidateProfilesForHistoricalTuning(currentProfile);
+        _log.info('fingerprint-tune',
+            'Starting historical tuning: practices=${practiceInputs.length}, candidates=${candidates.length}, masters=${mastersFolder.path}');
+
+        final totalSteps = candidates.length * practiceInputs.length;
+        var completedSteps = 0;
+        final summaries = <_ProfileEvaluationSummary>[];
+
+        for (final candidate in candidates) {
+          final reports = <String, FingerprintEvaluationReport>{};
+          for (final practice in practiceInputs) {
+            completedSteps += 1;
+            final progress = totalSteps == 0
+                ? 1.0
+                : (completedSteps / totalSteps).clamp(0.0, 1.0);
+            update(progress,
+                'Evaluating ${candidate.label} on ${practice.practiceName} ($completedSteps/$totalSteps)…');
+            final matches = await _fingerprints.matchPracticeInBackground(
+              practicePath: practice.practicePath,
+              mastersPath: mastersFolder.path,
+              actionableOnly: false,
+              weightProfile: candidate.profile,
+            );
+            final report = FingerprintEvaluation.evaluate(
+              appVersion: _appVersionLabel(),
+              practiceName: practice.practiceName,
+              practicePath: practice.practicePath,
+              mastersPath: mastersFolder.path,
+              corrections: corrections,
+              matches: matches,
+              acceptedDecisions: const <FingerprintDecision>[],
+            );
+            reports[practice.practicePath] = report;
+          }
+          final summary = _summarizeProfileEvaluation(candidate, reports);
+          _log.info('fingerprint-tune', summary.logLine());
+          summaries.add(summary);
+        }
+
+        final baseline = summaries
+            .where((summary) => summary.profile.label == 'Current profile')
+            .firstOrNull;
+        if (baseline == null) {
+          throw StateError('Could not compute baseline for current profile.');
+        }
+
+        final noRegression = summaries
+            .where((summary) =>
+                !_isRegressionComparedToBaseline(summary, baseline))
+            .toList(growable: false);
+        final ranked = (noRegression.isEmpty ? summaries : noRegression)
+          ..sort((a, b) {
+            final byScore = b.score.compareTo(a.score);
+            if (byScore != 0) return byScore;
+            final bySong = b.songAccuracy.compareTo(a.songAccuracy);
+            if (bySong != 0) return bySong;
+            return b.exactAccuracy.compareTo(a.exactAccuracy);
+          });
+        final recommended = ranked.first;
+        final elapsed = DateTime.now().difference(startedAt);
+        _log.info('fingerprint-tune',
+            'Re-evaluation complete in ${elapsed.inSeconds}s. Recommended=${recommended.profile.label}; score=${recommended.score.toStringAsFixed(2)}; songAcc=${(recommended.songAccuracy * 100).toStringAsFixed(1)}%; exact=${(recommended.exactAccuracy * 100).toStringAsFixed(1)}%');
+        update(1, 'Re-evaluation complete');
+        return _FingerprintTuningOutcome(
+          generatedAt: DateTime.now().toUtc(),
+          baseline: baseline,
+          recommended: recommended,
+          allSummaries: summaries,
+          noRegressionCount: noRegression.length,
+        );
+      });
+
+      if (!mounted) return;
+      await _showFingerprintTuningOutcomeDialog(outcome);
+    } on ProcessException {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+            content: Text(
+                'FFmpeg is required for historical fingerprint re-evaluation.')));
+      }
+    } on StateError catch (error) {
+      if (mounted) {
+        ScaffoldMessenger.of(context)
+            .showSnackBar(SnackBar(content: Text(error.message)));
+      }
+    }
+  }
+
+  List<_NamedWeightProfile> _candidateProfilesForHistoricalTuning(
+      Map<String, double> currentProfile) {
+    final defaults = FingerprintRepository.defaultFeatureWeightProfile();
+    const ranges = <String, (double, double)>{
+      'chroma': (0.0, 0.25),
+      'energy': (0.0, 2.0),
+      'attack': (0.0, 2.0),
+      'lowMotion': (0.0, 2.0),
+      'highMotion': (0.0, 2.0),
+      'zeroCrossing': (0.0, 2.0),
+      'peaks': (0.0, 1.0),
+    };
+
+    Map<String, double> normalize(Map<String, double> profile) {
+      final next = <String, double>{};
+      for (final entry in defaults.entries) {
+        final range = ranges[entry.key] ?? (0.0, 2.5);
+        final value = profile[entry.key] ?? entry.value;
+        next[entry.key] = value.clamp(range.$1, range.$2).toDouble();
+      }
+      return next;
+    }
+
+    String keyFor(Map<String, double> profile) {
+      final keys = profile.keys.toList(growable: false)..sort();
+      return keys
+          .map((key) => '$key=${(profile[key] ?? 0).toStringAsFixed(4)}')
+          .join('|');
+    }
+
+    final output = <_NamedWeightProfile>[];
+    final seen = <String>{};
+    void add(String label, Map<String, double> profile) {
+      final normalized = normalize(profile);
+      final signature = keyFor(normalized);
+      if (!seen.add(signature)) return;
+      output.add(_NamedWeightProfile(label: label, profile: normalized));
+    }
+
+    add('Current profile', currentProfile);
+    add('Default profile', defaults);
+
+    for (final entry in defaults.entries) {
+      final key = entry.key;
+      final step = switch (key) {
+        'chroma' => 0.02,
+        'peaks' => 0.05,
+        _ => 0.15,
+      };
+
+      add('$key +1 step (from current)', {
+        ...currentProfile,
+        key: (currentProfile[key] ?? entry.value) + step,
+      });
+      add('$key -1 step (from current)', {
+        ...currentProfile,
+        key: (currentProfile[key] ?? entry.value) - step,
+      });
+      add('$key +1 step (from default)', {
+        ...defaults,
+        key: entry.value + step,
+      });
+      add('$key -1 step (from default)', {
+        ...defaults,
+        key: entry.value - step,
+      });
+    }
+
+    return output;
+  }
+
+  _ProfileEvaluationSummary _summarizeProfileEvaluation(
+    _NamedWeightProfile profile,
+    Map<String, FingerprintEvaluationReport> reports,
+  ) {
+    var total = 0;
+    var exact = 0;
+    var songCorrect = 0;
+    var wrong = 0;
+    var notSuggested = 0;
+    var missed = 0;
+    var falsePositiveActionable = 0;
+    var falsePositiveNonActionable = 0;
+
+    for (final report in reports.values) {
+      total += report.total;
+      exact += report.exactCorrect;
+      songCorrect += report.songCorrect;
+      wrong += report.wrong;
+      notSuggested += report.notSuggested;
+      missed += report.missed;
+      falsePositiveActionable += report.falsePositiveActionable;
+      falsePositiveNonActionable += report.falsePositiveNonActionable;
+    }
+
+    final useful = exact + songCorrect;
+    final songAccuracy = total == 0 ? 0.0 : useful / total;
+    final exactAccuracy = total == 0 ? 0.0 : exact / total;
+    final score = (exact * 4.0) +
+        (songCorrect * 2.5) -
+        (wrong * 6.0) -
+        (notSuggested * 3.0) -
+        (missed * 3.5) -
+        (falsePositiveActionable * 4.0) -
+        (falsePositiveNonActionable * 1.8);
+
+    return _ProfileEvaluationSummary(
+      profile: profile,
+      reportsByPractice: reports,
+      total: total,
+      exact: exact,
+      songCorrect: songCorrect,
+      wrong: wrong,
+      notSuggested: notSuggested,
+      missed: missed,
+      falsePositiveActionable: falsePositiveActionable,
+      falsePositiveNonActionable: falsePositiveNonActionable,
+      songAccuracy: songAccuracy,
+      exactAccuracy: exactAccuracy,
+      score: score,
+    );
+  }
+
+  bool _isRegressionComparedToBaseline(
+    _ProfileEvaluationSummary candidate,
+    _ProfileEvaluationSummary baseline,
+  ) {
+    if (candidate.songAccuracy + 1e-9 < baseline.songAccuracy) return true;
+    if (candidate.wrong > baseline.wrong) return true;
+    if (candidate.falsePositiveActionable > baseline.falsePositiveActionable) {
+      return true;
+    }
+    return false;
+  }
+
+  Future<void> _showFingerprintTuningOutcomeDialog(
+      _FingerprintTuningOutcome outcome) async {
+    final reportText = _fingerprintTuningOutcomeText(outcome);
+    await showDialog<void>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Fingerprint tuning re-evaluation'),
+        content: SizedBox(
+          width: 820,
+          height: 520,
+          child: SingleChildScrollView(
+            child: SelectableText(reportText),
+          ),
+        ),
+        actions: [
+          TextButton.icon(
+            onPressed: () async {
+              await Clipboard.setData(ClipboardData(text: reportText));
+              if (context.mounted) Navigator.pop(context);
+              if (mounted) {
+                ScaffoldMessenger.of(this.context).showSnackBar(
+                    const SnackBar(content: Text('Tuning report copied')));
+              }
+            },
+            icon: const Icon(Icons.copy),
+            label: const Text('Copy report'),
+          ),
+          TextButton(
+            onPressed: () async {
+              await _applyFingerprintWeightProfile(
+                  outcome.recommended.profile.profile);
+            },
+            child: const Text('Apply recommendation'),
+          ),
+          FilledButton(
+            onPressed: () async {
+              await _saveFingerprintWeightProfile(
+                  outcome.recommended.profile.profile);
+            },
+            child: const Text('Save recommendation'),
+          ),
+          TextButton(
+              onPressed: () => Navigator.pop(context),
+              child: const Text('Close')),
+        ],
+      ),
+    );
+  }
+
+  String _fingerprintTuningOutcomeText(_FingerprintTuningOutcome outcome) {
+    final baseline = outcome.baseline;
+    final recommended = outcome.recommended;
+    final top = outcome.allSummaries.toList(growable: false)
+      ..sort((a, b) {
+        final byScore = b.score.compareTo(a.score);
+        if (byScore != 0) return byScore;
+        return b.songAccuracy.compareTo(a.songAccuracy);
+      });
+    final buffer = StringBuffer()
+      ..writeln('RiffNotes fingerprint tuning re-evaluation')
+      ..writeln('Generated: ${outcome.generatedAt.toIso8601String()}')
+      ..writeln('Candidate profiles evaluated: ${outcome.allSummaries.length}')
+      ..writeln('No-regression candidates: ${outcome.noRegressionCount}')
+      ..writeln('')
+      ..writeln('Recommended profile')
+      ..writeln('  Label: ${recommended.profile.label}')
+      ..writeln('  Weights: ${recommended.profile.profile}')
+      ..writeln(
+          '  Score: ${recommended.score.toStringAsFixed(2)} | songAcc ${_percent(recommended.songAccuracy)} | exact ${_percent(recommended.exactAccuracy)}')
+      ..writeln('')
+      ..writeln('Baseline profile')
+      ..writeln('  Label: ${baseline.profile.label}')
+      ..writeln('  Weights: ${baseline.profile.profile}')
+      ..writeln(
+          '  Score: ${baseline.score.toStringAsFixed(2)} | songAcc ${_percent(baseline.songAccuracy)} | exact ${_percent(baseline.exactAccuracy)}')
+      ..writeln('')
+      ..writeln('Top profiles');
+
+    for (final summary in top.take(8)) {
+      buffer.writeln(
+          '  - ${summary.profile.label}: score ${summary.score.toStringAsFixed(2)} | songAcc ${_percent(summary.songAccuracy)} | exact ${_percent(summary.exactAccuracy)} | wrong ${summary.wrong} | notSuggested ${summary.notSuggested} | missed ${summary.missed} | fpA ${summary.falsePositiveActionable} | fpN ${summary.falsePositiveNonActionable}');
+    }
+    return buffer.toString();
+  }
+
   List<FingerprintMatch> _visibleFingerprintMatches(
     PracticeFolder practice,
     List<FingerprintMatch> suggestions,
@@ -1289,12 +2736,43 @@ class _LibraryScreenState extends State<LibraryScreen> {
         .where(_isJamRecording)
         .map((recording) => recording.id)
         .toSet();
-    return suggestions
+    final eligible = suggestions
         .where((match) => !jamRecordingIds.contains(match.recordingId))
         .where((match) => !decisions.ignoredKeys.contains(match.key))
         .where((match) => decisions.accepted
             .every((item) => item.recordingId != match.recordingId))
         .toList(growable: false);
+    final byRecording = <String, List<FingerprintMatch>>{};
+    for (final match in eligible) {
+      byRecording.putIfAbsent(match.recordingId, () => <FingerprintMatch>[])
+        ..add(match);
+    }
+
+    final visible = <FingerprintMatch>[];
+    for (final entry in byRecording.entries) {
+      final candidates = entry.value.toList(growable: true)
+        ..sort((a, b) => b.confidence.compareTo(a.confidence));
+      final actionable = candidates
+          .where(_fingerprints.isActionableSuggestion)
+          .toList(growable: false);
+      if (actionable.isNotEmpty) {
+        visible.addAll(actionable);
+        continue;
+      }
+
+      final best = candidates.firstOrNull;
+      if (best == null) continue;
+      final includeFallback = switch (best.targetType) {
+        FingerprintTargetType.song =>
+          best.confidence >= .80 && (best.rawConfidence ?? 0) >= .84,
+        FingerprintTargetType.section =>
+          best.confidence >= .80 && (best.songConfidence ?? 0) >= .74,
+      };
+      if (includeFallback) {
+        visible.add(best);
+      }
+    }
+    return visible;
   }
 
   Future<void> _acceptFingerprintMatch(
@@ -1318,18 +2796,21 @@ class _LibraryScreenState extends State<LibraryScreen> {
     if (mounted) {
       setState(() {
         _fingerprintDecisionState = decisions;
+        _fingerprintRawMatches = _fingerprintRawMatches
+            .where((item) => item.recordingId != match.recordingId)
+            .toList(growable: false);
         _fingerprintMatches = _fingerprintMatches
             .where((item) => item.recordingId != match.recordingId)
             .toList(growable: false);
       });
     }
     await _fingerprintSuggestions.save(
-        practice.directory.path, _fingerprintMatches);
+        practice.directory.path, _fingerprintRawMatches);
   }
 
   Future<void> _acceptBestFingerprintGuessForRecording(
       Recording recording) async {
-    final match = _fingerprintMatches
+    final match = _fingerprintRawMatches
         .where((item) => item.recordingId == recording.id)
         .toList()
       ..sort((a, b) => b.confidence.compareTo(a.confidence));
@@ -1338,7 +2819,7 @@ class _LibraryScreenState extends State<LibraryScreen> {
   }
 
   Future<void> _dontKnowFingerprintForRecording(Recording recording) async {
-    final matches = _fingerprintMatches
+    final matches = _fingerprintRawMatches
         .where((item) => item.recordingId == recording.id)
         .toList(growable: false);
     for (final match in matches) {
@@ -1351,6 +2832,7 @@ class _LibraryScreenState extends State<LibraryScreen> {
         .where((item) => item.recordingId == recording.id)
         .toList()
       ..sort((a, b) => b.confidence.compareTo(a.confidence));
+    final report = _fingerprintDebugReport(recording, matches);
     await showDialog<void>(
       context: context,
       builder: (context) => AlertDialog(
@@ -1361,7 +2843,7 @@ class _LibraryScreenState extends State<LibraryScreen> {
           child: matches.isEmpty
               ? Text(_isJamRecording(recording)
                   ? 'This take is titled Jam, so it is intentionally skipped by fingerprint matching.'
-                  : 'No pending fingerprint suggestions are available for this take. Run fingerprint matching, or clear generated cache if you need to force a full re-run.')
+                  : 'No pending fingerprint suggestions are available for this take. Run fingerprint matching, or clear generated cache if you need to force a full re-run. Use Copy report if this seems wrong.')
               : Column(
                   mainAxisSize: MainAxisSize.min,
                   crossAxisAlignment: CrossAxisAlignment.start,
@@ -1389,12 +2871,413 @@ class _LibraryScreenState extends State<LibraryScreen> {
                 ),
         ),
         actions: [
+          TextButton.icon(
+              onPressed: () async {
+                await Clipboard.setData(ClipboardData(text: report));
+                if (context.mounted) Navigator.pop(context);
+                if (mounted) {
+                  ScaffoldMessenger.of(this.context).showSnackBar(
+                      const SnackBar(
+                          content: Text('Fingerprint report copied')));
+                }
+              },
+              icon: const Icon(Icons.copy),
+              label: const Text('Copy report')),
           TextButton(
               onPressed: () => Navigator.pop(context),
               child: const Text('Close')),
         ],
       ),
     );
+  }
+
+  Future<void> _teachFingerprintCorrectionForRecording(
+      Recording recording) async {
+    final practice = _selected;
+    if (practice == null) return;
+    final masters =
+        _mastersPractice ?? await _loadMastersPractice(create: true);
+    final mastersFolder = _resolvedMastersFolder;
+    if (masters == null || mastersFolder == null) return;
+    final matches = _fingerprintMatches
+        .where((item) => item.recordingId == recording.id)
+        .toList()
+      ..sort((a, b) => b.confidence.compareTo(a.confidence));
+    final sectionMap = <String, List<SongSection>>{};
+    for (final master in masters.recordings) {
+      sectionMap[master.id] =
+          await _sectionsRepository.load(masters.directory.path, master.id);
+    }
+    final notes = TextEditingController();
+    final songTitleController = TextEditingController(
+        text: _preferences
+                .fingerprintSongTitlesForPractice(practice.directory.path)
+                .firstOrNull ??
+            '');
+    var correctType = 'whole';
+    String? selectedMasterId =
+        masters.recordings.isEmpty ? null : masters.recordings.first.id;
+    String? selectedSectionLabel;
+    final saved = await showDialog<bool>(
+      context: context,
+      builder: (context) => StatefulBuilder(
+        builder: (context, setDialogState) {
+          final needsMaster = correctType == 'whole' ||
+              correctType == 'partial' ||
+              correctType == 'section';
+          final masterDropdownValue = needsMaster ? selectedMasterId : null;
+          final selectedMaster = masters.recordings
+              .where((item) => item.id == masterDropdownValue)
+              .firstOrNull;
+          final sections = masterDropdownValue == null
+              ? const <SongSection>[]
+              : sectionMap[masterDropdownValue] ?? const <SongSection>[];
+          final recentSongTitles = <String>{
+            ...masters.recordings
+                .map((item) => item.title?.trim())
+                .whereType<String>()
+                .where((item) => item.isNotEmpty),
+            ..._preferences
+                .fingerprintSongTitlesForPractice(practice.directory.path),
+          }.toList(growable: false)
+            ..sort((a, b) => a.toLowerCase().compareTo(b.toLowerCase()));
+          return AlertDialog(
+            title: Text(
+                'Teach fingerprint: ${recording.title ?? recording.filename}'),
+            content: SizedBox(
+              width: 720,
+              child: SingleChildScrollView(
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      matches.isEmpty
+                          ? 'No guess is pending for this take. Tell RiffNotes what it should have known.'
+                          : 'Current best guess: ${matches.first.displayName} (${matches.first.scoreDetails})',
+                    ),
+                    const SizedBox(height: 12),
+                    DropdownButtonFormField<String>(
+                      value: correctType,
+                      decoration:
+                          const InputDecoration(labelText: 'Actual result'),
+                      items: const [
+                        DropdownMenuItem(
+                            value: 'whole', child: Text('Whole song')),
+                        DropdownMenuItem(
+                            value: 'partial', child: Text('Partial song')),
+                        DropdownMenuItem(
+                            value: 'section', child: Text('Specific section')),
+                        DropdownMenuItem(
+                            value: 'new',
+                            child: Text('New song / not in Masters')),
+                        DropdownMenuItem(
+                            value: 'jam',
+                            child: Text('Jam / ignore fingerprinting')),
+                        DropdownMenuItem(
+                            value: 'unknown', child: Text('Unknown right now')),
+                      ],
+                      onChanged: (value) {
+                        if (value == null) return;
+                        setDialogState(() {
+                          correctType = value;
+                          final nowNeedsMaster = correctType == 'whole' ||
+                              correctType == 'partial' ||
+                              correctType == 'section';
+                          if (!nowNeedsMaster) {
+                            selectedMasterId = null;
+                            selectedSectionLabel = null;
+                          } else {
+                            selectedMasterId ??= masters.recordings.isEmpty
+                                ? null
+                                : masters.recordings.first.id;
+                          }
+                          if (correctType != 'section') {
+                            selectedSectionLabel = null;
+                          }
+                        });
+                      },
+                    ),
+                    const SizedBox(height: 12),
+                    DropdownButtonFormField<String>(
+                      value: masterDropdownValue,
+                      decoration: const InputDecoration(
+                          labelText: 'Correct master song'),
+                      items: [
+                        for (final master in masters.recordings)
+                          DropdownMenuItem(
+                            value: master.id,
+                            child: Text(master.title ?? master.filename),
+                          ),
+                      ],
+                      onChanged: needsMaster
+                          ? (value) => setDialogState(() {
+                                selectedMasterId = value;
+                                selectedSectionLabel = null;
+                              })
+                          : null,
+                    ),
+                    const SizedBox(height: 12),
+                    if (correctType == 'new') ...[
+                      DropdownButtonFormField<String>(
+                        value: songTitleController.text.trim().isEmpty
+                            ? null
+                            : songTitleController.text.trim(),
+                        decoration: const InputDecoration(
+                            labelText: 'Quick select remembered title'),
+                        items: [
+                          for (final title in recentSongTitles)
+                            DropdownMenuItem(
+                              value: title,
+                              child: Text(title),
+                            ),
+                        ],
+                        onChanged: (value) {
+                          if (value == null) return;
+                          setDialogState(() {
+                            songTitleController.text = value;
+                          });
+                        },
+                      ),
+                      const SizedBox(height: 12),
+                      TextField(
+                        controller: songTitleController,
+                        decoration: const InputDecoration(
+                          labelText: 'New song title',
+                          hintText:
+                              'Type the song name here and RiffNotes will remember it for this practice.',
+                        ),
+                        onChanged: (_) => setDialogState(() {}),
+                      ),
+                      const SizedBox(height: 12),
+                    ],
+                    DropdownButtonFormField<String?>(
+                      value: selectedSectionLabel,
+                      decoration:
+                          const InputDecoration(labelText: 'Correct section'),
+                      items: [
+                        const DropdownMenuItem<String?>(
+                            value: null, child: Text('No specific section')),
+                        for (final section in sections)
+                          DropdownMenuItem<String?>(
+                            value: section.label,
+                            child: Text(section.label),
+                          ),
+                      ],
+                      onChanged: correctType == 'section'
+                          ? (value) =>
+                              setDialogState(() => selectedSectionLabel = value)
+                          : null,
+                    ),
+                    const SizedBox(height: 12),
+                    TextField(
+                      controller: notes,
+                      maxLines: 4,
+                      decoration: const InputDecoration(
+                        labelText: 'Notes for Codex / tuning',
+                        hintText:
+                            'Example: should be chorus of The Song, starts around 1:10, guessed the wrong song.',
+                      ),
+                    ),
+                    if (needsMaster && masters.recordings.isEmpty) ...[
+                      const SizedBox(height: 12),
+                      Text(
+                        'No master recordings are available yet.',
+                        style: TextStyle(
+                            color: Theme.of(context).colorScheme.error),
+                      ),
+                    ],
+                    if (correctType == 'new' &&
+                        songTitleController.text.trim().isEmpty) ...[
+                      const SizedBox(height: 12),
+                      Text(
+                        'Enter a title so it can be remembered for this practice.',
+                        style: TextStyle(
+                            color: Theme.of(context).colorScheme.error),
+                      ),
+                    ],
+                  ],
+                ),
+              ),
+            ),
+            actions: [
+              TextButton(
+                  onPressed: () => Navigator.pop(context, false),
+                  child: const Text('Cancel')),
+              FilledButton(
+                onPressed: (needsMaster && selectedMaster == null) ||
+                        (correctType == 'new' &&
+                            songTitleController.text.trim().isEmpty)
+                    ? null
+                    : () => Navigator.pop(context, true),
+                child: const Text('Save + copy report'),
+              ),
+            ],
+          );
+        },
+      ),
+    );
+    if (saved != true) {
+      notes.dispose();
+      return;
+    }
+    final needsMaster = correctType == 'whole' ||
+        correctType == 'partial' ||
+        correctType == 'section';
+    final newSongTitle = correctType == 'new'
+        ? _sanitizeRememberedTitle(songTitleController.text)
+        : null;
+    final selectedMaster = masters.recordings
+        .where((item) => needsMaster && item.id == selectedMasterId)
+        .firstOrNull;
+    final report = _fingerprintCorrectionReport(
+      recording: recording,
+      matches: matches,
+      correctType: correctType,
+      correctMaster: selectedMaster,
+      correctSectionLabel: selectedSectionLabel,
+      newSongTitle: newSongTitle,
+      notes: notes.text.trim(),
+    );
+    await _fingerprintCorrections.add(
+      mastersFolder.path,
+      FingerprintCorrection(
+        recordingId: recording.id,
+        recordingFilename: recording.filename,
+        recordingTitle: recording.title,
+        practiceName: practice.name,
+        practicePath: practice.directory.path,
+        correctType: correctType,
+        correctMasterRecordingId: selectedMaster?.id,
+        correctMasterFilename: selectedMaster?.filename,
+        correctMasterTitle: selectedMaster?.title,
+        correctSectionLabel: selectedSectionLabel,
+        notes: notes.text.trim(),
+        report: report,
+        recordedAt: DateTime.now().toUtc(),
+      ),
+    );
+    await _clearFingerprintGuessForRecording(recording.id);
+    if (newSongTitle != null) {
+      await _updateRecording(
+        recording,
+        title: newSongTitle,
+        isBestTake: recording.isBestTake,
+      );
+      await _preferences.rememberFingerprintSongTitle(
+          practice.directory.path, newSongTitle);
+    }
+    if (needsMaster && selectedMaster != null) {
+      final syntheticMatch = FingerprintMatch(
+        recordingId: recording.id,
+        recordingFilename: recording.filename,
+        masterRecordingId: selectedMaster.id,
+        masterFilename: selectedMaster.filename,
+        masterTitle: selectedMaster.title,
+        sectionLabel: selectedSectionLabel,
+        confidence: 1,
+      );
+      await _fingerprintLearning.recordAccepted(
+          mastersFolder.path, syntheticMatch);
+      final wrongBest = matches.firstOrNull;
+      if (wrongBest != null && wrongBest.key != syntheticMatch.key) {
+        await _fingerprintLearning.recordIgnored(mastersFolder.path, wrongBest);
+      }
+    } else {
+      for (final match in matches) {
+        await _fingerprintLearning.recordIgnored(mastersFolder.path, match);
+      }
+    }
+    await Clipboard.setData(ClipboardData(text: report));
+    notes.dispose();
+    songTitleController.dispose();
+    if (mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Correction saved and report copied')));
+    }
+  }
+
+  String _fingerprintDebugReport(
+      Recording recording, List<FingerprintMatch> matches) {
+    final practice = _selected;
+    final buffer = StringBuffer()
+      ..writeln('RiffNotes fingerprint debug report')
+      ..writeln('Generated: ${DateTime.now().toIso8601String()}')
+      ..writeln('App: ${_appVersionLabel()}')
+      ..writeln('Practice: ${practice?.name ?? 'none'}')
+      ..writeln('Practice path: ${practice?.directory.path ?? 'none'}')
+      ..writeln('Masters path: ${_resolvedMastersFolder?.path ?? 'none'}')
+      ..writeln('Recording id: ${recording.id}')
+      ..writeln('Recording file: ${recording.filename}')
+      ..writeln('Recording title: ${recording.title ?? 'none'}')
+      ..writeln('Jam excluded: ${_isJamRecording(recording)}')
+      ..writeln('Pending visible matches for take: ${matches.length}')
+      ..writeln(
+          'Accepted decisions in practice: ${_fingerprintDecisionState.accepted.length}')
+      ..writeln(
+          'Ignored decisions in practice: ${_fingerprintDecisionState.ignoredKeys.length}')
+      ..writeln('');
+    if (matches.isEmpty) {
+      buffer
+        ..writeln('No visible matches are pending for this recording.')
+        ..writeln(
+            'If matching was just run and this should have matched, clear generated cache from Preferences and re-run matching, then copy this report again.');
+      return buffer.toString();
+    }
+    for (var index = 0; index < matches.length; index += 1) {
+      final match = matches[index];
+      buffer
+        ..writeln('Candidate ${index + 1}')
+        ..writeln('  Display: ${match.displayName}')
+        ..writeln('  Type: ${match.targetType.name}')
+        ..writeln('  Master id: ${match.masterRecordingId}')
+        ..writeln('  Master file: ${match.masterFilename}')
+        ..writeln('  Master title: ${match.masterTitle ?? 'none'}')
+        ..writeln('  Section: ${match.sectionLabel ?? 'whole song'}')
+        ..writeln('  Score: ${match.scoreDetails}')
+        ..writeln('  Key: ${match.key}');
+      if (match.featureScores.isNotEmpty) {
+        final featureEntries = match.featureScores.entries.toList()
+          ..sort((a, b) => a.key.compareTo(b.key));
+        buffer.writeln('  Feature scores:');
+        for (final entry in featureEntries) {
+          buffer.writeln(
+              '    ${entry.key}: ${(entry.value * 100).toStringAsFixed(1)}%');
+        }
+      }
+      buffer.writeln('');
+    }
+    return buffer.toString();
+  }
+
+  String _fingerprintCorrectionReport({
+    required Recording recording,
+    required List<FingerprintMatch> matches,
+    required String correctType,
+    required Recording? correctMaster,
+    required String? correctSectionLabel,
+    required String? newSongTitle,
+    required String notes,
+  }) {
+    final buffer = StringBuffer()
+      ..writeln('RiffNotes fingerprint correction report')
+      ..writeln('')
+      ..writeln('Ground truth')
+      ..writeln('  Actual result: $correctType')
+      ..writeln(
+          '  Correct master: ${correctMaster == null ? 'none' : '${correctMaster.title ?? correctMaster.filename} (${correctMaster.filename})'}')
+      ..writeln('  Correct master id: ${correctMaster?.id ?? 'none'}')
+      ..writeln('  Correct section: ${correctSectionLabel ?? 'none'}')
+      ..writeln('  New song title: ${newSongTitle ?? 'none'}')
+      ..writeln('  Notes: ${notes.isEmpty ? 'none' : notes}')
+      ..writeln('')
+      ..write(_fingerprintDebugReport(recording, matches));
+    return buffer.toString();
+  }
+
+  String? _sanitizeRememberedTitle(String value) {
+    final cleaned = value.trim();
+    return cleaned.isEmpty ? null : cleaned;
   }
 
   Future<void> _applyMasterSectionsForAcceptedMatch(
@@ -1446,7 +3329,7 @@ class _LibraryScreenState extends State<LibraryScreen> {
       });
     }
     await _fingerprintSuggestions.save(
-        practice.directory.path, _fingerprintMatches);
+        practice.directory.path, _fingerprintRawMatches);
   }
 
   Future<void> _saveRecordingAsMaster(Recording recording) async {
@@ -1557,17 +3440,38 @@ class _LibraryScreenState extends State<LibraryScreen> {
       builder: (context) => StatefulBuilder(
         builder: (context, setDialogState) {
           final driveConnected = _preferences.googleDriveCredentials != null;
+          Widget sectionHeader(String title, String subtitle) => Padding(
+                padding: const EdgeInsets.only(top: 34, bottom: 22),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      title,
+                      style: Theme.of(context).textTheme.titleLarge?.copyWith(
+                            fontWeight: FontWeight.w700,
+                          ),
+                    ),
+                    const SizedBox(height: 8),
+                    Text(
+                      subtitle,
+                      style: Theme.of(context)
+                          .textTheme
+                          .bodyMedium
+                          ?.copyWith(height: 1.25),
+                    ),
+                    const SizedBox(height: 18),
+                    const Divider(height: 1),
+                  ],
+                ),
+              );
           return AlertDialog(
             title: const Text('Preferences'),
             content: SizedBox(
               width: 760,
               child: SingleChildScrollView(
                 child: Column(mainAxisSize: MainAxisSize.min, children: [
-                  ListTile(
-                    contentPadding: EdgeInsets.zero,
-                    title: const Text('Remembered Band Folder'),
-                    subtitle: Text(_preferences.bandFolder ?? 'None selected'),
-                  ),
+                  sectionHeader('Most Used',
+                      'Common controls you are likely to use while working in the app.'),
                   ListTile(
                     contentPadding: EdgeInsets.zero,
                     leading: const Icon(Icons.person_outline),
@@ -1580,6 +3484,181 @@ class _LibraryScreenState extends State<LibraryScreen> {
                         },
                         child: const Text('Edit')),
                   ),
+                  SwitchListTile(
+                    contentPadding: EdgeInsets.zero,
+                    title: const Text('Play when I select a take'),
+                    value: _preferences.autoPlayOnTakeSelection,
+                    onChanged: (value) async {
+                      await _preferences.setAutoPlayOnTakeSelection(value);
+                      setDialogState(() {});
+                    },
+                  ),
+                  SwitchListTile(
+                    contentPadding: EdgeInsets.zero,
+                    title: const Text('Play first take when I open a practice'),
+                    value: _preferences.autoPlayOnPracticeSelection,
+                    onChanged: (value) async {
+                      await _preferences.setAutoPlayOnPracticeSelection(value);
+                      setDialogState(() {});
+                    },
+                  ),
+                  ListTile(
+                    contentPadding: EdgeInsets.zero,
+                    leading: const Icon(Icons.speaker_outlined),
+                    title: const Text('Audio output device'),
+                    subtitle: Text(_audioOutputSubtitle()),
+                    trailing: PopupMenuButton<AudioDevice>(
+                      tooltip: 'Choose output device',
+                      onSelected: (device) async {
+                        await _setAudioOutputDevice(device);
+                        setDialogState(() {});
+                      },
+                      itemBuilder: (context) => [
+                        for (final device in _audio.audioDevices)
+                          PopupMenuItem(
+                            value: device,
+                            child: Text(_audioDeviceLabel(device)),
+                          ),
+                      ],
+                      child: const Padding(
+                        padding:
+                            EdgeInsets.symmetric(horizontal: 8, vertical: 6),
+                        child: Text('Choose'),
+                      ),
+                    ),
+                  ),
+                  sectionHeader('Fingerprinting',
+                      'Matching, tuning, weights, evaluation, and cache control.'),
+                  ListTile(
+                    contentPadding: EdgeInsets.zero,
+                    leading: const Icon(Icons.analytics_outlined),
+                    title: const Text('Evaluate fingerprint corrections'),
+                    subtitle: Text(_selected == null
+                        ? 'Select a practice to compare current guesses against saved corrections.'
+                        : 'Compare current visible suggestions for ${_selected!.name} against saved correction reports.'),
+                    trailing: TextButton(
+                      onPressed:
+                          _selected == null || _resolvedMastersFolder == null
+                              ? null
+                              : () async {
+                                  await _evaluateFingerprintCorrections();
+                                  setDialogState(() {});
+                                },
+                      child: const Text('Evaluate'),
+                    ),
+                  ),
+                  ListTile(
+                    contentPadding: EdgeInsets.zero,
+                    leading: const Icon(Icons.tune_outlined),
+                    title: const Text('Re-evaluate fingerprint tuning'),
+                    subtitle: Text(_resolvedMastersFolder == null
+                        ? 'Choose or create a Masters folder before tuning from historical evaluations.'
+                        : 'Run a historical profile search across saved correction evaluations. Does not auto-apply unless you choose Apply/Save.'),
+                    trailing: TextButton(
+                      onPressed: _resolvedMastersFolder == null
+                          ? null
+                          : () async {
+                              Navigator.pop(context);
+                              await _reEvaluateFingerprintWeightsFromHistory();
+                            },
+                      child: const Text('Re-evaluate'),
+                    ),
+                  ),
+                  ListTile(
+                    contentPadding: EdgeInsets.zero,
+                    leading: const Icon(Icons.stacked_bar_chart_outlined),
+                    title: const Text('Fingerprint feature chart'),
+                    subtitle: Text(_selected == null
+                        ? 'Select a practice to compare one recording against one master.'
+                        : 'Inspect feature averages and current weights for ${_selected!.name}.'),
+                    trailing: TextButton(
+                      onPressed:
+                          _selected == null || _resolvedMastersFolder == null
+                              ? null
+                              : () async {
+                                  await _showFingerprintFeatureChartDialog();
+                                  setDialogState(() {});
+                                },
+                      child: const Text('View'),
+                    ),
+                  ),
+                  ListTile(
+                    contentPadding: EdgeInsets.zero,
+                    leading: const Icon(Icons.tune),
+                    title: const Text('Fingerprint weight profile'),
+                    subtitle: Text(
+                        'Current profile: ${_currentFingerprintWeightProfile()}'),
+                    trailing: Wrap(
+                      spacing: 8,
+                      children: [
+                        TextButton(
+                          onPressed: () async {
+                            final defaults = FingerprintRepository
+                                .defaultFeatureWeightProfile();
+                            await _applyFingerprintWeightProfile(defaults);
+                            setDialogState(() {});
+                          },
+                          child: const Text('Apply defaults'),
+                        ),
+                        TextButton(
+                          onPressed: () async {
+                            final defaults = FingerprintRepository
+                                .defaultFeatureWeightProfile();
+                            await _saveFingerprintWeightProfile(defaults);
+                            setDialogState(() {});
+                          },
+                          child: const Text('Reset saved'),
+                        ),
+                      ],
+                    ),
+                  ),
+                  ListTile(
+                    contentPadding: EdgeInsets.zero,
+                    leading: const Icon(Icons.cleaning_services_outlined),
+                    title: const Text('Selected practice generated cache'),
+                    subtitle: Text(_selected == null
+                        ? 'Select a practice to clear waveform, playback, and fingerprint cache.'
+                        : 'Clear generated cache and force ${_selected!.name} to redo fingerprint matching.'),
+                    trailing: TextButton(
+                      onPressed: _selected == null
+                          ? null
+                          : () async {
+                              await _clearSelectedPracticeCache();
+                              setDialogState(() {});
+                            },
+                      child: const Text('Clear'),
+                    ),
+                  ),
+                  ListTile(
+                    contentPadding: EdgeInsets.zero,
+                    leading: const Icon(Icons.library_music_outlined),
+                    title: const Text('Masters generated cache'),
+                    subtitle: Text(_resolvedMastersFolder == null
+                        ? 'Choose or create a Masters folder before clearing its generated cache.'
+                        : 'Clear generated waveforms and fingerprints for ${_resolvedMastersFolder!.path}.'),
+                    trailing: TextButton(
+                      onPressed: _resolvedMastersFolder == null
+                          ? null
+                          : () async {
+                              await _clearMastersCache();
+                              setDialogState(() {});
+                            },
+                      child: const Text('Clear'),
+                    ),
+                  ),
+                  ListTile(
+                    contentPadding: EdgeInsets.zero,
+                    title: const Text('Masters Folder'),
+                    subtitle: Text(_mastersFolderLabel()),
+                    trailing: TextButton(
+                        onPressed: () async {
+                          await _chooseMastersFolder();
+                          setDialogState(() {});
+                        },
+                        child: const Text('Choose')),
+                  ),
+                  sectionHeader('Sync And Cloud',
+                      'Band sync, Google Drive connection, and remote folder settings.'),
                   ListTile(
                     contentPadding: EdgeInsets.zero,
                     title: const Text('Google Drive sync folder'),
@@ -1659,76 +3738,12 @@ class _LibraryScreenState extends State<LibraryScreen> {
                       ],
                     ),
                   ),
+                  sectionHeader('Folders And App',
+                      'Less frequently changed root folder settings and app information.'),
                   ListTile(
                     contentPadding: EdgeInsets.zero,
-                    title: const Text('Masters Folder'),
-                    subtitle: Text(_mastersFolderLabel()),
-                    trailing: TextButton(
-                        onPressed: () async {
-                          await _chooseMastersFolder();
-                          setDialogState(() {});
-                        },
-                        child: const Text('Choose')),
-                  ),
-                  ListTile(
-                    contentPadding: EdgeInsets.zero,
-                    leading: const Icon(Icons.cleaning_services_outlined),
-                    title: const Text('Selected practice generated cache'),
-                    subtitle: Text(_selected == null
-                        ? 'Select a practice to clear waveform, playback, and fingerprint cache.'
-                        : 'Clear generated cache and force ${_selected!.name} to redo fingerprint matching.'),
-                    trailing: TextButton(
-                      onPressed: _selected == null
-                          ? null
-                          : () async {
-                              await _clearSelectedPracticeCache();
-                              setDialogState(() {});
-                            },
-                      child: const Text('Clear'),
-                    ),
-                  ),
-                  SwitchListTile(
-                    contentPadding: EdgeInsets.zero,
-                    title: const Text('Play when I select a take'),
-                    value: _preferences.autoPlayOnTakeSelection,
-                    onChanged: (value) async {
-                      await _preferences.setAutoPlayOnTakeSelection(value);
-                      setDialogState(() {});
-                    },
-                  ),
-                  SwitchListTile(
-                    contentPadding: EdgeInsets.zero,
-                    title: const Text('Play first take when I open a practice'),
-                    value: _preferences.autoPlayOnPracticeSelection,
-                    onChanged: (value) async {
-                      await _preferences.setAutoPlayOnPracticeSelection(value);
-                      setDialogState(() {});
-                    },
-                  ),
-                  ListTile(
-                    contentPadding: EdgeInsets.zero,
-                    leading: const Icon(Icons.speaker_outlined),
-                    title: const Text('Audio output device'),
-                    subtitle: Text(_audioOutputSubtitle()),
-                    trailing: PopupMenuButton<AudioDevice>(
-                      tooltip: 'Choose output device',
-                      onSelected: (device) async {
-                        await _setAudioOutputDevice(device);
-                        setDialogState(() {});
-                      },
-                      itemBuilder: (context) => [
-                        for (final device in _audio.audioDevices)
-                          PopupMenuItem(
-                            value: device,
-                            child: Text(_audioDeviceLabel(device)),
-                          ),
-                      ],
-                      child: const Padding(
-                        padding:
-                            EdgeInsets.symmetric(horizontal: 8, vertical: 6),
-                        child: Text('Choose'),
-                      ),
-                    ),
+                    title: const Text('Remembered Band Folder'),
+                    subtitle: Text(_preferences.bandFolder ?? 'None selected'),
                   ),
                   ListTile(
                     contentPadding: EdgeInsets.zero,
@@ -1881,6 +3896,9 @@ class _LibraryScreenState extends State<LibraryScreen> {
       final deletedSelected = _selectedRecording?.id == recording.id;
       setState(() {
         _replaceSelectedPractice(updatedPractice);
+        _fingerprintRawMatches = _fingerprintRawMatches
+            .where((item) => item.recordingId != recording.id)
+            .toList(growable: false);
         _fingerprintMatches = _fingerprintMatches
             .where((item) => item.recordingId != recording.id)
             .toList(growable: false);
@@ -3186,11 +5204,16 @@ class _LibraryScreenState extends State<LibraryScreen> {
                   bandFolder: _bandFolder,
                   isMasters: _selectedIsMasters,
                   selected: _selectedRecording,
+                  quickSongTitles: _selected == null
+                      ? const <String>[]
+                      : _quickSongTitlesForPractice(_selected!),
                   onSelect: (recording) => _selectRecording(
                     recording,
                     autoPlay: _preferences.autoPlayOnTakeSelection,
                   ),
                   onEditTitle: _editTitle,
+                  onQuickSetTitle: _quickSetRecordingTitle,
+                  onTypeCustomTitle: _editTitle,
                   onDeleteTake: _deleteTake,
                   onToggleBest: (recording, isBestTake) => _updateRecording(
                     recording,
@@ -3249,11 +5272,14 @@ class _LibraryScreenState extends State<LibraryScreen> {
                   onSetReviewSort: (value) =>
                       setState(() => _reviewSort = value),
                   reviewNotes: _reviewNotes,
+                  fingerprintRawMatches: _fingerprintRawMatches,
                   fingerprintMatches: _fingerprintMatches,
                   onAcceptFingerprintGuess:
                       _acceptBestFingerprintGuessForRecording,
                   onDontKnowFingerprintGuess: _dontKnowFingerprintForRecording,
                   onShowFingerprintInfo: _showFingerprintInfoForRecording,
+                  onTeachFingerprintCorrection:
+                      _teachFingerprintCorrectionForRecording,
                   onPlayReviewNote: _playReviewNote,
                   audio: _audio,
                   waveform: _waveform,
@@ -3330,8 +5356,11 @@ class _RecordingList extends StatelessWidget {
     required this.bandFolder,
     required this.isMasters,
     required this.selected,
+    required this.quickSongTitles,
     required this.onSelect,
     required this.onEditTitle,
+    required this.onQuickSetTitle,
+    required this.onTypeCustomTitle,
     required this.onDeleteTake,
     required this.onToggleBest,
     required this.onBatchRename,
@@ -3373,10 +5402,12 @@ class _RecordingList extends StatelessWidget {
     required this.onSetReviewRecordingFilter,
     required this.onSetReviewSort,
     required this.reviewNotes,
+    required this.fingerprintRawMatches,
     required this.fingerprintMatches,
     required this.onAcceptFingerprintGuess,
     required this.onDontKnowFingerprintGuess,
     required this.onShowFingerprintInfo,
+    required this.onTeachFingerprintCorrection,
     required this.onPlayReviewNote,
     required this.audio,
     required this.waveform,
@@ -3387,8 +5418,12 @@ class _RecordingList extends StatelessWidget {
   final String? bandFolder;
   final bool isMasters;
   final Recording? selected;
+  final List<String> quickSongTitles;
   final ValueChanged<Recording> onSelect;
   final ValueChanged<Recording> onEditTitle;
+  final Future<void> Function(Recording recording, String title)
+      onQuickSetTitle;
+  final ValueChanged<Recording> onTypeCustomTitle;
   final ValueChanged<Recording> onDeleteTake;
   final Future<void> Function(Recording recording, bool isBestTake)
       onToggleBest;
@@ -3435,10 +5470,12 @@ class _RecordingList extends StatelessWidget {
   final ValueChanged<String?> onSetReviewRecordingFilter;
   final ValueChanged<_ReviewSort> onSetReviewSort;
   final List<UserAnnotation> reviewNotes;
+  final List<FingerprintMatch> fingerprintRawMatches;
   final List<FingerprintMatch> fingerprintMatches;
   final Future<void> Function(Recording recording) onAcceptFingerprintGuess;
   final Future<void> Function(Recording recording) onDontKnowFingerprintGuess;
   final ValueChanged<Recording> onShowFingerprintInfo;
+  final ValueChanged<Recording> onTeachFingerprintCorrection;
   final ValueChanged<UserAnnotation> onPlayReviewNote;
   final AudioController audio;
   final WaveformController waveform;
@@ -3594,43 +5631,90 @@ class _RecordingList extends StatelessWidget {
                             ? Colors.amber
                             : null),
                     title: Text(recording.title ?? recording.filename),
-                    subtitle: Text(
-                      _recordingSubtitle(recording),
-                    ),
+                    subtitle: _recordingSubtitleWidget(context, recording),
                     trailing: Row(
                       mainAxisSize: MainAxisSize.min,
                       children: [
-                        if (!isMasters &&
-                            _bestFingerprintMatch(recording) != null)
+                        if (!isMasters)
                           PopupMenuButton<String>(
-                            tooltip: 'Fingerprint guess actions',
+                            tooltip: 'Fingerprint info and guess actions',
                             onSelected: (action) async {
                               switch (action) {
                                 case 'info':
                                   onShowFingerprintInfo(recording);
+                                case 'teach':
+                                  onTeachFingerprintCorrection(recording);
                                 case 'accept':
                                   await onAcceptFingerprintGuess(recording);
                                 case 'dontknow':
                                   await onDontKnowFingerprintGuess(recording);
                               }
                             },
-                            itemBuilder: (context) => const [
-                              PopupMenuItem<String>(
-                                value: 'info',
-                                child: Text('Fingerprint info'),
+                            itemBuilder: (context) {
+                              final hasMatch =
+                                  _bestFingerprintMatch(recording) != null;
+                              return [
+                                const PopupMenuItem<String>(
+                                  value: 'info',
+                                  child: Text('Fingerprint info'),
+                                ),
+                                const PopupMenuItem<String>(
+                                  value: 'teach',
+                                  child: Text('Teach correct match'),
+                                ),
+                                if (hasMatch) ...const [
+                                  PopupMenuDivider(),
+                                  PopupMenuItem<String>(
+                                    value: 'accept',
+                                    child: Text('Accept guessed title'),
+                                  ),
+                                  PopupMenuItem<String>(
+                                    value: 'dontknow',
+                                    child: Text("Don't know"),
+                                  ),
+                                ],
+                              ];
+                            },
+                            child: Padding(
+                              padding: EdgeInsets.symmetric(horizontal: 4),
+                              child: Icon(
+                                Icons.fingerprint,
+                                color: _bestFingerprintMatch(recording) == null
+                                    ? Theme.of(context)
+                                        .colorScheme
+                                        .outline
+                                        .withValues(alpha: .72)
+                                    : null,
                               ),
-                              PopupMenuItem<String>(
-                                value: 'accept',
-                                child: Text('Accept guessed title'),
-                              ),
-                              PopupMenuItem<String>(
-                                value: 'dontknow',
-                                child: Text("Don't know"),
+                            ),
+                          ),
+                        if (!isMasters)
+                          PopupMenuButton<String>(
+                            tooltip: 'Quick set song title',
+                            onSelected: (value) async {
+                              if (value == '__type__') {
+                                onTypeCustomTitle(recording);
+                                return;
+                              }
+                              await onQuickSetTitle(recording, value);
+                            },
+                            itemBuilder: (context) => [
+                              for (final title in quickSongTitles.take(14))
+                                PopupMenuItem<String>(
+                                  value: title,
+                                  child: Text(title),
+                                ),
+                              if (quickSongTitles.isNotEmpty)
+                                const PopupMenuDivider(),
+                              const PopupMenuItem<String>(
+                                value: '__type__',
+                                child: Text('Type custom title...'),
                               ),
                             ],
                             child: const Padding(
                               padding: EdgeInsets.symmetric(horizontal: 4),
-                              child: Icon(Icons.fingerprint),
+                              child: Icon(
+                                  Icons.playlist_add_check_circle_outlined),
                             ),
                           ),
                         if (!isMasters)
@@ -3720,22 +5804,48 @@ class _RecordingList extends StatelessWidget {
     }
   }
 
-  String _recordingSubtitle(Recording recording) {
-    final pieces = <String>[
-      if (recording.title != null) recording.filename,
-      _fileDetails(recording),
-      if (_isJamRecording(recording)) 'Fingerprinting skipped: Jam',
-      if (_bestFingerprintMatch(recording) case final match?)
-        'Match: ${match.displayName} (${match.scoreDetails})',
+  Widget _recordingSubtitleWidget(BuildContext context, Recording recording) {
+    final baseStyle = Theme.of(context).textTheme.bodyMedium;
+    final match = _bestFingerprintMatch(recording);
+    final pieces = <TextSpan>[
+      if (recording.title != null) TextSpan(text: recording.filename),
+      TextSpan(text: _fileDetails(recording)),
+      if (_isJamRecording(recording))
+        const TextSpan(text: 'Fingerprinting skipped: Jam'),
+      if (match != null)
+        TextSpan(
+          text: 'Match: ${match.displayName} (${match.scoreDetails})',
+          style: baseStyle?.copyWith(
+            color: _fingerprintConfidenceColor(context, match.confidence),
+            fontWeight: FontWeight.w600,
+          ),
+        ),
     ];
-    return pieces.join(' • ');
+    final spans = <InlineSpan>[];
+    for (var index = 0; index < pieces.length; index += 1) {
+      if (index > 0) spans.add(TextSpan(text: ' • ', style: baseStyle));
+      spans.add(pieces[index]);
+    }
+    return Text.rich(
+      TextSpan(style: baseStyle, children: spans),
+      maxLines: 2,
+      overflow: TextOverflow.ellipsis,
+    );
+  }
+
+  Color _fingerprintConfidenceColor(BuildContext context, double confidence) {
+    final colors = Theme.of(context).colorScheme;
+    if (confidence >= .90) return colors.primary;
+    if (confidence >= .80) return colors.tertiary;
+    if (confidence >= .70) return colors.secondary;
+    return colors.error;
   }
 
   bool _isJamRecording(Recording recording) =>
       recording.title?.trim().toLowerCase() == 'jam';
 
   FingerprintMatch? _bestFingerprintMatch(Recording recording) {
-    final matches = fingerprintMatches
+    final matches = fingerprintRawMatches
         .where((item) => item.recordingId == recording.id)
         .toList()
       ..sort((a, b) => b.confidence.compareTo(a.confidence));
@@ -4569,6 +6679,154 @@ class _PlayerPanelState extends State<_PlayerPanel> {
 
   String _zoomLabel(double zoom) =>
       '${zoom == zoom.roundToDouble() ? zoom.toStringAsFixed(0) : zoom.toStringAsFixed(1)}x';
+}
+
+class _FingerprintFeatureChartData {
+  const _FingerprintFeatureChartData({
+    required this.recordingLabel,
+    required this.masterRows,
+    required this.recordingId,
+    required this.generatedAt,
+  });
+
+  final String recordingLabel;
+  final List<_MasterDeltaRow> masterRows;
+  final String recordingId;
+  final DateTime generatedAt;
+}
+
+class _TuningPracticeInput {
+  const _TuningPracticeInput({
+    required this.practicePath,
+    required this.practiceName,
+    required this.acceptedDecisions,
+    required this.correctionCount,
+  });
+
+  final String practicePath;
+  final String practiceName;
+  final List<FingerprintDecision> acceptedDecisions;
+  final int correctionCount;
+}
+
+class _NamedWeightProfile {
+  const _NamedWeightProfile({required this.label, required this.profile});
+
+  final String label;
+  final Map<String, double> profile;
+}
+
+class _ProfileEvaluationSummary {
+  const _ProfileEvaluationSummary({
+    required this.profile,
+    required this.reportsByPractice,
+    required this.total,
+    required this.exact,
+    required this.songCorrect,
+    required this.wrong,
+    required this.notSuggested,
+    required this.missed,
+    required this.falsePositiveActionable,
+    required this.falsePositiveNonActionable,
+    required this.songAccuracy,
+    required this.exactAccuracy,
+    required this.score,
+  });
+
+  final _NamedWeightProfile profile;
+  final Map<String, FingerprintEvaluationReport> reportsByPractice;
+  final int total;
+  final int exact;
+  final int songCorrect;
+  final int wrong;
+  final int notSuggested;
+  final int missed;
+  final int falsePositiveActionable;
+  final int falsePositiveNonActionable;
+  final double songAccuracy;
+  final double exactAccuracy;
+  final double score;
+
+  String logLine() =>
+      '${profile.label}: score=${score.toStringAsFixed(2)}, total=$total, exact=$exact, songCorrect=$songCorrect, wrong=$wrong, notSuggested=$notSuggested, missed=$missed, fpA=$falsePositiveActionable, fpN=$falsePositiveNonActionable, songAcc=${(songAccuracy * 100).toStringAsFixed(1)}%, exactAcc=${(exactAccuracy * 100).toStringAsFixed(1)}%';
+}
+
+class _FingerprintTuningOutcome {
+  const _FingerprintTuningOutcome({
+    required this.generatedAt,
+    required this.baseline,
+    required this.recommended,
+    required this.allSummaries,
+    required this.noRegressionCount,
+  });
+
+  final DateTime generatedAt;
+  final _ProfileEvaluationSummary baseline;
+  final _ProfileEvaluationSummary recommended;
+  final List<_ProfileEvaluationSummary> allSummaries;
+  final int noRegressionCount;
+}
+
+class _MasterDeltaRow {
+  const _MasterDeltaRow({
+    required this.masterLabel,
+    required this.masterFilename,
+    required this.featureDeltasByGroup,
+    this.featureDeltas = const <double>[],
+    this.totalWeightedDelta = 0,
+    this.confidence = 0,
+  });
+
+  final String masterLabel;
+  final String masterFilename;
+  final Map<String, double> featureDeltasByGroup;
+  final List<double> featureDeltas;
+  final double totalWeightedDelta;
+  final double confidence;
+
+  _MasterDeltaRow withComputedValues({
+    required List<String> columns,
+    required Map<String, double> weightProfile,
+  }) {
+    final deltas =
+        columns.map((column) => featureDeltasByGroup[column] ?? 0).toList();
+    var total = 0.0;
+    for (final entry in featureDeltasByGroup.entries) {
+      total += entry.value * (weightProfile[entry.key] ?? 0);
+    }
+    final totalWeight = featureDeltasByGroup.keys
+        .map((key) => weightProfile[key] ?? 0)
+        .fold(0.0, (sum, item) => sum + item);
+    final normalizedDelta = totalWeight <= 0
+        ? 1.0
+        : (total / totalWeight).clamp(0.0, 1.0).toDouble();
+    return _MasterDeltaRow(
+      masterLabel: masterLabel,
+      masterFilename: masterFilename,
+      featureDeltasByGroup: featureDeltasByGroup,
+      featureDeltas: deltas,
+      totalWeightedDelta: total,
+      confidence: (1.0 - normalizedDelta).clamp(0.0, 1.0).toDouble(),
+    );
+  }
+
+  Map<String, dynamic> toJson() => <String, dynamic>{
+        'masterLabel': masterLabel,
+        'masterFilename': masterFilename,
+        'featureDeltas': featureDeltas,
+        'confidence': confidence,
+        'totalWeightedDelta': totalWeightedDelta,
+      };
+}
+
+class _MasterFeatureSnapshot {
+  const _MasterFeatureSnapshot({
+    required this.recording,
+    required this.fingerprint,
+  });
+
+  final Recording recording;
+  final AudioFingerprint fingerprint;
 }
 
 class _GoogleDriveFolderBrowser extends StatefulWidget {
