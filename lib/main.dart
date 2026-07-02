@@ -466,6 +466,16 @@ class _LibraryScreenState extends State<LibraryScreen> {
     }
   }
 
+  Future<void> _togglePracticeReviewed(PracticeFolder practice) async {
+    final practicePath = practice.directory.path;
+    final user = _preferences.displayName;
+    final reviewed = !_preferences.isPracticeReviewed(practicePath, user: user);
+    await _preferences.setPracticeReviewed(practicePath, reviewed, user: user);
+    if (mounted) {
+      setState(() {});
+    }
+  }
+
   Future<PracticeFolder?> _loadMastersPractice({bool create = false}) async {
     final directory = _resolvedMastersFolder;
     if (directory == null) return null;
@@ -3431,6 +3441,13 @@ class _LibraryScreenState extends State<LibraryScreen> {
       ),
     );
     await _clearFingerprintGuessForRecording(recording.id);
+    if (correctType == 'jam') {
+      await _updateRecording(
+        recording,
+        title: 'Jam',
+        isBestTake: recording.isBestTake,
+      );
+    }
     if (newSongTitle != null) {
       await _updateRecording(
         recording,
@@ -5500,7 +5517,11 @@ class _LibraryScreenState extends State<LibraryScreen> {
                       selected: _selected,
                       selectedIsMasters: _selectedIsMasters,
                       onSelectMasters: _selectMastersLibrary,
-                      onSelect: _selectPractice)),
+                      onSelect: _selectPractice,
+                      isReviewed: (practice) => _preferences.isPracticeReviewed(
+                          practice.directory.path,
+                          user: _preferences.displayName),
+                      onToggleReviewed: _togglePracticeReviewed)),
               const VerticalDivider(width: 1),
               Expanded(
                 child: _RecordingList(
@@ -5611,6 +5632,8 @@ class _PracticeList extends StatelessWidget {
     required this.selectedIsMasters,
     required this.onSelectMasters,
     required this.onSelect,
+    required this.isReviewed,
+    required this.onToggleReviewed,
   });
   final List<PracticeFolder> practices;
   final PracticeFolder? masters;
@@ -5618,6 +5641,8 @@ class _PracticeList extends StatelessWidget {
   final bool selectedIsMasters;
   final VoidCallback onSelectMasters;
   final ValueChanged<PracticeFolder> onSelect;
+  final bool Function(PracticeFolder practice) isReviewed;
+  final Future<void> Function(PracticeFolder practice) onToggleReviewed;
 
   @override
   Widget build(BuildContext context) => ListView(
@@ -5639,13 +5664,29 @@ class _PracticeList extends StatelessWidget {
           if (practices.isEmpty && masters == null)
             const ListTile(title: Text('Choose a Band Folder to begin.')),
           for (final practice in practices)
-            ListTile(
-              selected: practice == selected,
-              leading: const Icon(Icons.queue_music),
-              title: Text(practice.name),
-              subtitle: Text('${practice.recordings.length} takes'),
-              onTap: () => onSelect(practice),
-            ),
+            Builder(builder: (context) {
+              final reviewed = isReviewed(practice);
+              return ListTile(
+                selected: practice == selected,
+                leading: Icon(
+                  reviewed ? Icons.check_circle_outline : Icons.queue_music,
+                  color: reviewed ? Colors.greenAccent : null,
+                ),
+                title: Text(practice.name),
+                subtitle: Text(reviewed
+                    ? '${practice.recordings.length} takes • reviewed'
+                    : '${practice.recordings.length} takes'),
+                trailing: IconButton(
+                  tooltip: reviewed ? 'Mark unreviewed' : 'Mark reviewed',
+                  icon: Icon(
+                    reviewed ? Icons.verified : Icons.verified_outlined,
+                    color: reviewed ? Colors.greenAccent : null,
+                  ),
+                  onPressed: () => onToggleReviewed(practice),
+                ),
+                onTap: () => onSelect(practice),
+              );
+            }),
         ],
       );
 }
