@@ -377,6 +377,7 @@ class _LibraryScreenState extends State<LibraryScreen> {
     if (savedFolder != null && await Directory(savedFolder).exists()) {
       await _openBandFolder(savedFolder);
     }
+    _preferences.load(); // Ensure preferences are loaded
   }
 
   Future<void> _openBandFolder(String selection,
@@ -1465,6 +1466,137 @@ class _LibraryScreenState extends State<LibraryScreen> {
             .showSnackBar(SnackBar(content: Text(error.message)));
       }
     }
+  }
+
+  String _songTitleKey(String? value) {
+    final trimmed = value?.trim();
+    if (trimmed == null || trimmed.isEmpty) return '';
+    return trimmed.toLowerCase();
+  }
+
+  Future<void> _bulkLabelSectionsForSelectedPractice() async {
+    final practice = _selected;
+    if (practice == null || _selectedIsMasters) return;
+    final masters =
+        _mastersPractice ?? await _loadMastersPractice(create: true);
+    if (masters == null) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+            content: Text('Choose or create a Masters folder first.')));
+      }
+      return;
+    }
+
+    final titlesByKey = <String, String>{};
+    for (final recording in practice.recordings) {
+      if (_isJamRecording(recording)) continue;
+      final title = recording.title?.trim();
+      final key = _songTitleKey(title);
+      if (key.isEmpty) continue;
+      titlesByKey.putIfAbsent(key, () => title!);
+    }
+    if (titlesByKey.isEmpty) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+            content: Text('No titled takes found in this practice yet.')));
+      }
+      return;
+    }
+
+    final labeledByRecording = await _activity.run(
+      'Bulk labeling sections in practice',
+      (update) async {
+        final result = <String, List<SongSection>>{};
+        final titles = titlesByKey.values.toList(growable: false);
+        for (var index = 0; index < titles.length; index += 1) {
+          final title = titles[index];
+          update(
+            index / titles.length,
+            'Aligning sections for "$title" (${index + 1}/${titles.length})…',
+          );
+          final encoded = await _fingerprints.labelSectionsForSongInBackground(
+            practicePath: practice.directory.path,
+            mastersPath: masters.directory.path,
+            songTitle: title,
+            minimumSectionConfidence: _preferences.fingerprintSectionConfidence,
+          );
+          for (final entry in encoded.entries) {
+            result[entry.key] = entry.value
+                .map((item) => SongSection.fromJson(item))
+                .toList(growable: false);
+          }
+        }
+        update(1, 'Bulk section labeling complete');
+        return result;
+      },
+    );
+
+    if (labeledByRecording.isEmpty) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+            content:
+                Text('No sections could be labeled for this practice yet.')));
+      }
+      return;
+    }
+
+    final selectedRecording = _selectedRecording;
+    if (selectedRecording != null &&
+        labeledByRecording.containsKey(selectedRecording.id)) {
+      _rememberSectionUndo();
+    }
+
+    for (final entry in labeledByRecording.entries) {
+      await _sectionsRepository.saveAll(
+          practice.directory.path, entry.key, entry.value);
+    }
+
+    if (selectedRecording != null &&
+        labeledByRecording.containsKey(selectedRecording.id)) {
+      await _refreshSections(selectedRecording);
+    }
+
+    if (mounted) {
+      final count = labeledByRecording.length;
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+          content: Text(
+              'Labeled sections for $count take${count == 1 ? '' : 's'} in ${practice.name}.')));
+    }
+  }
+
+  Future<void> _handleTopFingerprintAction(String action) async {
+    switch (action) {
+      case 'match':
+        await _matchSelectedPracticeFingerprints();
+        break;
+      case 'bulk-sections':
+        await _bulkLabelSectionsForSelectedPractice();
+        break;
+    }
+  }
+
+  Future<void> _showTopFingerprintMenu(Offset globalPosition) async {
+    final overlayBox =
+        Overlay.of(context).context.findRenderObject() as RenderBox;
+    final selected = await showMenu<String>(
+      context: context,
+      position: RelativeRect.fromRect(
+        Rect.fromLTWH(globalPosition.dx, globalPosition.dy, 0, 0),
+        Offset.zero & overlayBox.size,
+      ),
+      items: const [
+        PopupMenuItem<String>(
+          value: 'match',
+          child: Text('Match selected practice against Masters'),
+        ),
+        PopupMenuItem<String>(
+          value: 'bulk-sections',
+          child: Text('Bulk label sections for all titled takes'),
+        ),
+      ],
+    );
+    if (selected == null) return;
+    await _handleTopFingerprintAction(selected);
   }
 
   void _logFingerprintRunSummary(
@@ -2818,6 +2950,147 @@ class _LibraryScreenState extends State<LibraryScreen> {
     await _acceptFingerprintMatch(recording, match.first);
   }
 
+  Future<Map<String, List<SongSection>>> _labelSectionsForSong(
+    Recording recording, {
+    bool bulk = false,
+    String? preferredMasterRecordingId,
+    bool enforceUniqueSectionLabels = true,
+  }) async {
+    final practice = _selected;
+    if (practice == null || _selectedIsMasters) {
+      return const <String, List<SongSection>>{};
+    }
+    final title = recording.title?.trim();
+    if (title == null || title.isEmpty) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+            content:
+                Text('Set or accept a song title before labeling sections.')));
+      }
+      return const <String, List<SongSection>>{};
+    }
+
+    final masters =
+        _mastersPractice ?? await _loadMastersPractice(create: true);
+    if (masters == null) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+            content: Text('Choose or create a Masters folder first.')));
+      }
+      return const <String, List<SongSection>>{};
+    }
+
+    final recordingIds = bulk ? const <String>[] : <String>[recording.id];
+    final encoded = await _activity.run(
+      bulk ? 'Bulk labeling sections' : 'Labeling sections',
+      (update) async {
+        update(
+          null,
+          bulk
+              ? 'Aligning sections for all takes of "$title"…'
+              : 'Aligning sections for "$title"…',
+        );
+        final result = await _fingerprints.labelSectionsForSongInBackground(
+          practicePath: practice.directory.path,
+          mastersPath: masters.directory.path,
+          songTitle: title,
+          minimumSectionConfidence: _preferences.fingerprintSectionConfidence,
+          recordingIds: recordingIds,
+          preferredMasterRecordingId: preferredMasterRecordingId,
+          enforceUniqueSectionLabels: enforceUniqueSectionLabels,
+        );
+        update(
+            1, bulk ? 'Bulk labeling complete' : 'Section labeling complete');
+        return result;
+      },
+    );
+    if (encoded.isEmpty) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+            content: Text(bulk
+                ? 'No sections could be labeled for any matching takes yet.'
+                : 'No sections could be labeled for this take yet.')));
+      }
+      return const <String, List<SongSection>>{};
+    }
+    return encoded.map((recordingId, sectionsJson) => MapEntry(
+          recordingId,
+          sectionsJson
+              .map((item) => SongSection.fromJson(item))
+              .toList(growable: false),
+        ));
+  }
+
+  Future<void> _applyLabeledSections(
+    Recording recording,
+    Map<String, List<SongSection>> sectionsByRecording, {
+    required bool bulk,
+  }) async {
+    final practice = _selected;
+    if (practice == null) return;
+    if (sectionsByRecording.isEmpty) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+            content: Text(bulk
+                ? 'No matching takes were labeled.'
+                : 'No section boundaries could be aligned for this take.')));
+      }
+      return;
+    }
+
+    final labeledRecordingIds = sectionsByRecording.keys.toSet();
+    if (labeledRecordingIds.contains(recording.id) &&
+        _selectedRecording?.id == recording.id) {
+      _rememberSectionUndo();
+    }
+
+    for (final entry in sectionsByRecording.entries) {
+      await _sectionsRepository.saveAll(
+          practice.directory.path, entry.key, entry.value);
+    }
+
+    if (_selectedRecording != null &&
+        labeledRecordingIds.contains(_selectedRecording!.id)) {
+      await _refreshSections(_selectedRecording!);
+    }
+
+    if (mounted) {
+      final count = sectionsByRecording.length;
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+          content: Text(bulk
+              ? 'Labeled sections for $count matching take${count == 1 ? '' : 's'}.'
+              : 'Labeled ${sectionsByRecording[recording.id]?.length ?? 0} sections for this take.')));
+    }
+  }
+
+  Future<void> _labelSectionsFromSelectedSong(Recording recording) async {
+    final labeled = await _labelSectionsForSong(
+      recording,
+      bulk: false,
+      enforceUniqueSectionLabels: true,
+    );
+    await _applyLabeledSections(recording, labeled, bulk: false);
+  }
+
+  Future<void> _labelSectionsFromSelectedSongAllowRepeats(
+      Recording recording) async {
+    final labeled = await _labelSectionsForSong(
+      recording,
+      bulk: false,
+      enforceUniqueSectionLabels: false,
+    );
+    await _applyLabeledSections(recording, labeled, bulk: false);
+  }
+
+  Future<void> _bulkLabelSectionsFromSelectedSong(Recording recording) async {
+    final labeled = await _labelSectionsForSong(
+      recording,
+      bulk: true,
+      enforceUniqueSectionLabels: true,
+    );
+    await _applyLabeledSections(recording, labeled, bulk: true);
+  }
+
   Future<void> _dontKnowFingerprintForRecording(Recording recording) async {
     final matches = _fingerprintRawMatches
         .where((item) => item.recordingId == recording.id)
@@ -3166,6 +3439,14 @@ class _LibraryScreenState extends State<LibraryScreen> {
       );
       await _preferences.rememberFingerprintSongTitle(
           practice.directory.path, newSongTitle);
+    } else if (needsMaster && selectedMaster != null) {
+      final correctedTitle = selectedMaster.title ??
+          path.basenameWithoutExtension(selectedMaster.filename);
+      await _updateRecording(
+        recording,
+        title: correctedTitle,
+        isBestTake: recording.isBestTake,
+      );
     }
     if (needsMaster && selectedMaster != null) {
       final syntheticMatch = FingerprintMatch(
@@ -3284,31 +3565,12 @@ class _LibraryScreenState extends State<LibraryScreen> {
       Recording recording, FingerprintMatch match) async {
     final practice = _selected;
     if (practice == null) return;
-    final masters = _mastersPractice ?? await _loadMastersPractice();
-    if (masters == null) return;
-    final masterRecording = masters.recordings
-        .where((item) => item.id == match.masterRecordingId)
-        .firstOrNull;
-    if (masterRecording == null) return;
-    final masterSections = await _sectionsRepository.load(
-        masters.directory.path, match.masterRecordingId);
-    if (masterSections.isEmpty) return;
-    final mappedSections = await _fingerprints.alignSectionsToRecording(
-      practiceFolder: practice.directory,
-      recording: recording,
-      mastersFolder: masters.directory,
-      masterRecording: masterRecording,
-      masterSections: masterSections,
+    final labeled = await _labelSectionsForSong(
+      recording,
+      bulk: false,
+      preferredMasterRecordingId: match.masterRecordingId,
     );
-    if (mappedSections.isEmpty) return;
-    if (_selectedRecording?.id == recording.id) {
-      _rememberSectionUndo();
-    }
-    await _sectionsRepository.saveAll(
-        practice.directory.path, recording.id, mappedSections);
-    if (_selectedRecording?.id == recording.id) {
-      await _refreshSections(recording);
-    }
+    await _applyLabeledSections(recording, labeled, bulk: false);
   }
 
   Future<void> _ignoreFingerprintMatch(FingerprintMatch match) async {
@@ -3608,6 +3870,34 @@ class _LibraryScreenState extends State<LibraryScreen> {
                             setDialogState(() {});
                           },
                           child: const Text('Reset saved'),
+                        ),
+                      ],
+                    ),
+                  ),
+                  Padding(
+                    padding: const EdgeInsets.symmetric(vertical: 8),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          'Section labeling confidence: ${(_preferences.fingerprintSectionConfidence * 100).round()}%',
+                        ),
+                        Slider(
+                          value: _preferences.fingerprintSectionConfidence,
+                          min: .35,
+                          max: .85,
+                          divisions: 50,
+                          label:
+                              '${(_preferences.fingerprintSectionConfidence * 100).round()}%',
+                          onChanged: (value) async {
+                            await _preferences
+                                .setFingerprintSectionConfidence(value);
+                            setDialogState(() {});
+                          },
+                        ),
+                        Text(
+                          'Lower values label sections more aggressively. Higher values are stricter.',
+                          style: Theme.of(context).textTheme.bodySmall,
                         ),
                       ],
                     ),
@@ -5168,12 +5458,26 @@ class _LibraryScreenState extends State<LibraryScreen> {
                       ? null
                       : _downloadSelectedPractice,
                   icon: const Icon(Icons.cloud_download_outlined)),
-              IconButton(
-                  tooltip: 'Match selected practice against Masters',
-                  onPressed: _selected == null || _selectedIsMasters
-                      ? null
-                      : _matchSelectedPracticeFingerprints,
-                  icon: const Icon(Icons.fingerprint)),
+              Builder(builder: (context) {
+                final enabled = _selected != null && !_selectedIsMasters;
+                return GestureDetector(
+                  onSecondaryTapDown: enabled
+                      ? (details) =>
+                          _showTopFingerprintMenu(details.globalPosition)
+                      : null,
+                  onLongPressStart: enabled
+                      ? (details) =>
+                          _showTopFingerprintMenu(details.globalPosition)
+                      : null,
+                  child: IconButton(
+                    tooltip:
+                        'Match selected practice against Masters (right-click for more)',
+                    onPressed:
+                        enabled ? _matchSelectedPracticeFingerprints : null,
+                    icon: const Icon(Icons.fingerprint),
+                  ),
+                );
+              }),
               IconButton(
                   tooltip: 'View logs',
                   onPressed: _showLogs,
@@ -5280,6 +5584,12 @@ class _LibraryScreenState extends State<LibraryScreen> {
                   onShowFingerprintInfo: _showFingerprintInfoForRecording,
                   onTeachFingerprintCorrection:
                       _teachFingerprintCorrectionForRecording,
+                  onLabelSectionsFromSelectedSong:
+                      _labelSectionsFromSelectedSong,
+                  onLabelSectionsFromSelectedSongAllowRepeats:
+                      _labelSectionsFromSelectedSongAllowRepeats,
+                  onBulkLabelSectionsFromSelectedSong:
+                      _bulkLabelSectionsFromSelectedSong,
                   onPlayReviewNote: _playReviewNote,
                   audio: _audio,
                   waveform: _waveform,
@@ -5408,6 +5718,9 @@ class _RecordingList extends StatelessWidget {
     required this.onDontKnowFingerprintGuess,
     required this.onShowFingerprintInfo,
     required this.onTeachFingerprintCorrection,
+    required this.onLabelSectionsFromSelectedSong,
+    required this.onLabelSectionsFromSelectedSongAllowRepeats,
+    required this.onBulkLabelSectionsFromSelectedSong,
     required this.onPlayReviewNote,
     required this.audio,
     required this.waveform,
@@ -5476,6 +5789,12 @@ class _RecordingList extends StatelessWidget {
   final Future<void> Function(Recording recording) onDontKnowFingerprintGuess;
   final ValueChanged<Recording> onShowFingerprintInfo;
   final ValueChanged<Recording> onTeachFingerprintCorrection;
+  final Future<void> Function(Recording recording)
+      onLabelSectionsFromSelectedSong;
+  final Future<void> Function(Recording recording)
+      onLabelSectionsFromSelectedSongAllowRepeats;
+  final Future<void> Function(Recording recording)
+      onBulkLabelSectionsFromSelectedSong;
   final ValueChanged<UserAnnotation> onPlayReviewNote;
   final AudioController audio;
   final WaveformController waveform;
@@ -5642,17 +5961,35 @@ class _RecordingList extends StatelessWidget {
                               switch (action) {
                                 case 'info':
                                   onShowFingerprintInfo(recording);
+                                  break;
                                 case 'teach':
                                   onTeachFingerprintCorrection(recording);
+                                  break;
+                                case 'labelSections':
+                                  await onLabelSectionsFromSelectedSong(
+                                      recording);
+                                  break;
+                                case 'labelSectionsAllowRepeats':
+                                  await onLabelSectionsFromSelectedSongAllowRepeats(
+                                      recording);
+                                  break;
+                                case 'labelSectionsBulk':
+                                  await onBulkLabelSectionsFromSelectedSong(
+                                      recording);
+                                  break;
                                 case 'accept':
                                   await onAcceptFingerprintGuess(recording);
+                                  break;
                                 case 'dontknow':
                                   await onDontKnowFingerprintGuess(recording);
+                                  break;
                               }
                             },
                             itemBuilder: (context) {
                               final hasMatch =
                                   _bestFingerprintMatch(recording) != null;
+                              final hasTitle =
+                                  (recording.title?.trim().isNotEmpty ?? false);
                               return [
                                 const PopupMenuItem<String>(
                                   value: 'info',
@@ -5661,6 +5998,24 @@ class _RecordingList extends StatelessWidget {
                                 const PopupMenuItem<String>(
                                   value: 'teach',
                                   child: Text('Teach correct match'),
+                                ),
+                                PopupMenuItem<String>(
+                                  value: 'labelSections',
+                                  enabled: hasTitle,
+                                  child: const Text(
+                                      'Label sections (unique labels)'),
+                                ),
+                                PopupMenuItem<String>(
+                                  value: 'labelSectionsAllowRepeats',
+                                  enabled: hasTitle,
+                                  child: const Text(
+                                      'Label sections (allow repeats)'),
+                                ),
+                                PopupMenuItem<String>(
+                                  value: 'labelSectionsBulk',
+                                  enabled: hasTitle,
+                                  child: const Text(
+                                      'Label sections for all matching takes'),
                                 ),
                                 if (hasMatch) ...const [
                                   PopupMenuDivider(),
