@@ -25,6 +25,8 @@ class AppPreferences extends ChangeNotifier {
   static const _googleDriveRootFolderNameKey = 'google_drive_root_folder_name';
   static const _playerPanelCollapsedKey = 'player_panel_collapsed';
   static const _fingerprintFeatureWeightsKey = 'fingerprint_feature_weights';
+  static const _fingerprintSectionConfidenceKey =
+      'fingerprint_section_confidence';
   static const _fingerprintSongTitlesByPracticeKey =
       'fingerprint_song_titles_by_practice';
 
@@ -47,6 +49,7 @@ class AppPreferences extends ChangeNotifier {
   String? _googleDriveRootFolderId;
   String? _googleDriveRootFolderName;
   bool _playerPanelCollapsed = false;
+  double _fingerprintSectionConfidence = .52;
   Map<String, double> _fingerprintFeatureWeights = <String, double>{};
   Map<String, List<String>> _fingerprintSongTitlesByPractice =
       <String, List<String>>{};
@@ -72,6 +75,7 @@ class AppPreferences extends ChangeNotifier {
   String? get googleDriveRootFolderId => _googleDriveRootFolderId;
   String? get googleDriveRootFolderName => _googleDriveRootFolderName;
   bool get playerPanelCollapsed => _playerPanelCollapsed;
+  double get fingerprintSectionConfidence => _fingerprintSectionConfidence;
   Map<String, double> get fingerprintFeatureWeights =>
       Map<String, double>.from(_fingerprintFeatureWeights);
   List<String> fingerprintSongTitlesForPractice(String practicePath) =>
@@ -108,11 +112,16 @@ class AppPreferences extends ChangeNotifier {
         _fingerprintFeatureWeights = <String, double>{};
       }
     }
+    _fingerprintSectionConfidence =
+        (store.getDouble(_fingerprintSectionConfidenceKey) ?? .52)
+            .clamp(0.0, 1.0)
+            .toDouble();
     final fingerprintSongTitles =
         store.getString(_fingerprintSongTitlesByPracticeKey);
     if (fingerprintSongTitles != null) {
       try {
-        final decoded = jsonDecode(fingerprintSongTitles) as Map<String, dynamic>;
+        final decoded =
+            jsonDecode(fingerprintSongTitles) as Map<String, dynamic>;
         _fingerprintSongTitlesByPractice = decoded.map((key, value) => MapEntry(
             key,
             (value as List<dynamic>)
@@ -329,15 +338,22 @@ class AppPreferences extends ChangeNotifier {
     notifyListeners();
   }
 
-  Future<void> setFingerprintFeatureWeights(
-      Map<String, double> weights) async {
+  Future<void> setFingerprintSectionConfidence(double value) async {
+    _fingerprintSectionConfidence = value.clamp(0.0, 1.0).toDouble();
+    final store = await SharedPreferences.getInstance();
+    await store.setDouble(
+        _fingerprintSectionConfidenceKey, _fingerprintSectionConfidence);
+    notifyListeners();
+  }
+
+  Future<void> setFingerprintFeatureWeights(Map<String, double> weights) async {
     _fingerprintFeatureWeights = Map<String, double>.from(weights);
     final store = await SharedPreferences.getInstance();
     if (_fingerprintFeatureWeights.isEmpty) {
       await store.remove(_fingerprintFeatureWeightsKey);
     } else {
-      await store.setString(
-          _fingerprintFeatureWeightsKey, jsonEncode(_fingerprintFeatureWeights));
+      await store.setString(_fingerprintFeatureWeightsKey,
+          jsonEncode(_fingerprintFeatureWeights));
     }
     notifyListeners();
   }
@@ -352,7 +368,8 @@ class AppPreferences extends ChangeNotifier {
       ...(_fingerprintSongTitlesByPractice[practicePath] ?? const <String>[]),
     };
     existing.removeWhere((item) => item.toLowerCase() == cleaned.toLowerCase());
-    final next = <String>[cleaned, ...existing].take(12).toList(growable: false);
+    final next =
+        <String>[cleaned, ...existing].take(12).toList(growable: false);
     _fingerprintSongTitlesByPractice[practicePath] = next;
     final store = await SharedPreferences.getInstance();
     await store.setString(_fingerprintSongTitlesByPracticeKey,

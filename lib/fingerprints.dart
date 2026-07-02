@@ -304,6 +304,154 @@ class FingerprintRepository {
     );
   }
 
+  Future<FingerprintMatch?> bestSongMatchForRecording({
+    required Directory practiceFolder,
+    required Recording recording,
+    required Directory mastersFolder,
+    required List<Recording> candidateMasters,
+    double minimumConfidence = .45,
+  }) async {
+    if (candidateMasters.isEmpty) return null;
+    final learning = await _learning.load(mastersFolder.path);
+    final recordingFingerprint =
+        await loadOrGenerateFingerprint(practiceFolder, recording);
+    if (recordingFingerprint.windowCount < 8) return null;
+
+    final candidates = <FingerprintMatch>[];
+    for (final master in candidateMasters) {
+      if (_isJamRecording(master)) continue;
+      final masterFingerprint =
+          await loadOrGenerateFingerprint(mastersFolder, master);
+      if (masterFingerprint.windowCount < 8) continue;
+      final alignment =
+          _bestSubsequenceAlignment(recordingFingerprint, masterFingerprint);
+      if (alignment == null) continue;
+      final adjustment = learning.adjustmentFor(
+        masterRecordingId: master.id,
+        sectionLabel: null,
+      );
+      final chromaPenalty = _chromaPenalty(
+        alignment.featureScores,
+        targetType: FingerprintTargetType.song,
+      );
+      final tempoPenalty = _tempoPenalty(alignment.tempoScale);
+      final adjustedConfidence =
+          (alignment.confidence + adjustment - chromaPenalty - tempoPenalty)
+              .clamp(0.0, 1.0)
+              .toDouble();
+      final match = FingerprintMatch(
+        recordingId: recording.id,
+        recordingFilename: recording.filename,
+        masterRecordingId: master.id,
+        masterFilename: master.filename,
+        masterTitle: master.title,
+        sectionLabel: null,
+        confidence: adjustedConfidence,
+        rawConfidence: alignment.confidence,
+        learningAdjustment: adjustment,
+        matchOffsetMs:
+            _windowToMs(alignment.targetStartWindow, alignment.scaledTarget),
+        tempoScale: alignment.tempoScale,
+        targetType: FingerprintTargetType.song,
+        featureScores: alignment.featureScores,
+      );
+      candidates.add(match);
+    }
+
+    if (candidates.isEmpty) return null;
+    candidates.sort((a, b) => b.confidence.compareTo(a.confidence));
+    final best = candidates.first;
+    if (best.confidence < minimumConfidence) return null;
+    final nextConfidence =
+        candidates.length > 1 ? candidates[1].confidence : 0.0;
+    final margin = (best.confidence - nextConfidence).clamp(0.0, 1.0);
+    return best.copyWith(confidenceMargin: margin);
+  }
+
+  Future<Map<String, List<Map<String, dynamic>>>>
+      labelSectionsForSongInBackground({
+    required String practicePath,
+    required String mastersPath,
+    required String songTitle,
+    required double minimumSectionConfidence,
+    List<String> recordingIds = const <String>[],
+    String? preferredMasterRecordingId,
+    bool enforceUniqueSectionLabels = true,
+  }) async {
+    final selectedRecordingIds = recordingIds.toList(growable: false);
+    return Isolate.run(() async {
+      final repository = FingerprintRepository();
+      final practice =
+          await PracticeRepository().openPractice(Directory(practicePath));
+      final masters =
+          await PracticeRepository().openPractice(Directory(mastersPath));
+      final normalizedTitle = _normalizedSongTitle(songTitle);
+      if (normalizedTitle.isEmpty) {
+        return const <String, List<Map<String, dynamic>>>{};
+      }
+
+      final candidateMasters = <Recording>[];
+      final sectionsByMaster = <String, List<SongSection>>{};
+      for (final master in masters.recordings) {
+        if (repository._isJamRecording(master)) continue;
+        if (preferredMasterRecordingId != null &&
+            master.id != preferredMasterRecordingId) {
+          continue;
+        }
+        if (_normalizedSongTitle(master.title) != normalizedTitle) continue;
+        final sections = await SongSectionRepository()
+            .load(masters.directory.path, master.id);
+        if (sections.isEmpty) continue;
+        candidateMasters.add(master);
+        sectionsByMaster[master.id] = sections;
+      }
+      if (candidateMasters.isEmpty) {
+        return const <String, List<Map<String, dynamic>>>{};
+      }
+
+      final targetRecordingIds =
+          selectedRecordingIds.isEmpty ? null : selectedRecordingIds.toSet();
+      final encodedResults = <String, List<Map<String, dynamic>>>{};
+      for (final recording in practice.recordings) {
+        if (repository._isJamRecording(recording)) continue;
+        if (_normalizedSongTitle(recording.title) != normalizedTitle) continue;
+        if (targetRecordingIds != null &&
+            !targetRecordingIds.contains(recording.id)) {
+          continue;
+        }
+
+        final bestSongMatch = await repository.bestSongMatchForRecording(
+          practiceFolder: practice.directory,
+          recording: recording,
+          mastersFolder: masters.directory,
+          candidateMasters: candidateMasters,
+        );
+        if (bestSongMatch == null) continue;
+        final bestMaster = candidateMasters
+            .where((item) => item.id == bestSongMatch.masterRecordingId)
+            .firstOrNull;
+        if (bestMaster == null) continue;
+        final masterSections = sectionsByMaster[bestMaster.id] ?? const [];
+        if (masterSections.isEmpty) continue;
+
+        final mappedSections = await repository.alignSectionsToRecording(
+          practiceFolder: practice.directory,
+          recording: recording,
+          mastersFolder: masters.directory,
+          masterRecording: bestMaster,
+          masterSections: masterSections,
+          minimumSectionConfidence: minimumSectionConfidence,
+          enforceUniqueSectionLabels: enforceUniqueSectionLabels,
+        );
+        if (mappedSections.isEmpty) continue;
+        encodedResults[recording.id] = mappedSections
+            .map((section) => section.toJson())
+            .toList(growable: false);
+      }
+      return encodedResults;
+    });
+  }
+
   Future<List<SongSection>> alignSectionsToRecording({
     required Directory practiceFolder,
     required Recording recording,
@@ -311,6 +459,8 @@ class FingerprintRepository {
     required Recording masterRecording,
     required List<SongSection> masterSections,
     double minimumSectionConfidence = .52,
+    double maxSectionDurationMultiplier = 1.30,
+    bool enforceUniqueSectionLabels = true,
   }) async {
     if (masterSections.isEmpty) return const <SongSection>[];
     final recordingFingerprint =
@@ -321,48 +471,465 @@ class FingerprintRepository {
         masterFingerprint.windowCount < 8) {
       return const <SongSection>[];
     }
-    final candidates = <_AlignedSectionCandidate>[];
+    final alignment =
+        _bestSubsequenceAlignment(recordingFingerprint, masterFingerprint);
+    if (alignment == null || alignment.confidence < minimumSectionConfidence) {
+      return const <SongSection>[];
+    }
+
+    final projected = <SongSection>[];
+    final alignedTargetStart = alignment.targetStartWindow;
+    final alignedTargetEnd = alignment.targetEndWindow;
     for (final section in masterSections) {
-      final sectionFingerprint = _sliceFingerprint(masterFingerprint, section);
-      if (sectionFingerprint.windowCount < 8) continue;
-      final score = _similarity(recordingFingerprint, sectionFingerprint);
-      if (score.confidence < minimumSectionConfidence || score.offset == null) {
-        continue;
+      final range = _sectionWindowRange(alignment.scaledTarget, section);
+      if (range.length < 2) continue;
+      final overlapStart = max(range.start, alignedTargetStart);
+      final overlapEnd = min(range.end, alignedTargetEnd);
+      if (overlapEnd - overlapStart < 2) continue;
+
+      final queryStartWindow = _projectTargetWindowToQuery(
+        alignment.path,
+        overlapStart,
+        preferEarlier: true,
+      );
+      final queryEndWindow = _projectTargetWindowToQuery(
+        alignment.path,
+        overlapEnd,
+        preferEarlier: false,
+      );
+      if (queryEndWindow - queryStartWindow < 2) continue;
+
+      final sectionDurationMs = section.endMs - section.startMs;
+      final maxSectionDurationMs = max(
+        250,
+        (sectionDurationMs * maxSectionDurationMultiplier).round(),
+      );
+      final maxSectionWindowLength = max(
+        2,
+        (maxSectionDurationMs /
+                recordingFingerprint.durationMs *
+                recordingFingerprint.windowCount)
+            .round(),
+      );
+
+      var adjustedQueryStartWindow = queryStartWindow;
+      var adjustedQueryEndWindow = queryEndWindow;
+      final queryWindowSpan = adjustedQueryEndWindow - adjustedQueryStartWindow;
+      if (queryWindowSpan > maxSectionWindowLength) {
+        final targetSlice = _sliceFingerprintByWindowRange(
+          alignment.scaledTarget,
+          overlapStart,
+          overlapEnd,
+        );
+        if (targetSlice.windowCount >= 2) {
+          final bestRange = _bestMatchingQueryWindowRange(
+            recordingFingerprint: recordingFingerprint,
+            targetFingerprint: targetSlice,
+            candidateStartWindow: adjustedQueryStartWindow,
+            candidateEndWindow: adjustedQueryEndWindow,
+            desiredWindowLength: maxSectionWindowLength,
+          );
+          adjustedQueryStartWindow = bestRange.start;
+          adjustedQueryEndWindow = bestRange.end;
+        } else {
+          adjustedQueryEndWindow =
+              adjustedQueryStartWindow + maxSectionWindowLength;
+        }
       }
-      final startRatio = score.offset! / recordingFingerprint.windowCount;
-      final endRatio = (score.offset! + sectionFingerprint.windowCount) /
-          recordingFingerprint.windowCount;
-      final startMs = (startRatio * recordingFingerprint.durationMs)
-          .round()
-          .clamp(0, recordingFingerprint.durationMs);
-      final endMs = (endRatio * recordingFingerprint.durationMs)
-          .round()
+
+      final startMs =
+          _windowToMs(adjustedQueryStartWindow, recordingFingerprint)
+              .clamp(0, recordingFingerprint.durationMs);
+      var endMs = _windowToMs(adjustedQueryEndWindow, recordingFingerprint)
           .clamp(startMs + 1, recordingFingerprint.durationMs);
+      if (endMs - startMs > maxSectionDurationMs) {
+        endMs = min(
+            recordingFingerprint.durationMs, startMs + maxSectionDurationMs);
+      }
       if (endMs - startMs < 250) continue;
-      candidates.add(_AlignedSectionCandidate(
-        section: SongSection(
-          recordingId: recording.id,
-          startMs: startMs,
-          endMs: endMs,
-          label: section.label,
-          colorIndex: section.colorIndex,
-        ),
-        confidence: score.confidence,
+
+      projected.add(SongSection(
+        recordingId: recording.id,
+        startMs: startMs,
+        endMs: endMs,
+        label: section.label,
+        colorIndex: section.colorIndex,
       ));
     }
-    if (candidates.isEmpty) return const <SongSection>[];
-    candidates.sort((a, b) => b.confidence.compareTo(a.confidence));
+
+    if (projected.isEmpty) return const <SongSection>[];
+    projected.sort((a, b) => a.startMs.compareTo(b.startMs));
     final accepted = <SongSection>[];
-    for (final candidate in candidates) {
-      final overlapsExisting = accepted.any((existing) =>
-          candidate.section.startMs < existing.endMs &&
-          candidate.section.endMs > existing.startMs);
-      if (!overlapsExisting) {
-        accepted.add(candidate.section);
+    final usedLabels = <String>{};
+    for (final section in projected) {
+      final normalizedLabel = section.label.trim().toLowerCase();
+      if (enforceUniqueSectionLabels &&
+          normalizedLabel.isNotEmpty &&
+          usedLabels.contains(normalizedLabel)) {
+        continue;
+      }
+      if (accepted.isEmpty) {
+        accepted.add(section);
+        if (enforceUniqueSectionLabels && normalizedLabel.isNotEmpty) {
+          usedLabels.add(normalizedLabel);
+        }
+        continue;
+      }
+      final previous = accepted.last;
+      if (section.startMs >= previous.endMs) {
+        accepted.add(section);
+        if (enforceUniqueSectionLabels && normalizedLabel.isNotEmpty) {
+          usedLabels.add(normalizedLabel);
+        }
+        continue;
+      }
+      if (section.endMs <= previous.endMs) {
+        continue;
+      }
+      final adjustedStart = previous.endMs;
+      if (section.endMs - adjustedStart < 250) continue;
+      accepted.add(SongSection(
+        recordingId: section.recordingId,
+        startMs: adjustedStart,
+        endMs: section.endMs,
+        label: section.label,
+        colorIndex: section.colorIndex,
+      ));
+      if (enforceUniqueSectionLabels && normalizedLabel.isNotEmpty) {
+        usedLabels.add(normalizedLabel);
       }
     }
-    accepted.sort((a, b) => a.startMs.compareTo(b.startMs));
     return accepted;
+  }
+
+  _SubsequenceAlignment? _bestSubsequenceAlignment(
+    AudioFingerprint query,
+    AudioFingerprint target,
+  ) {
+    if (query.windowCount < 4 || target.windowCount < 4) return null;
+    const tempoScales = <double>[.92, .96, 1.0, 1.04, 1.08];
+    _SubsequenceAlignment? best;
+    for (final tempoScale in tempoScales) {
+      final scaledTarget =
+          tempoScale == 1.0 ? target : _resampleFingerprint(target, tempoScale);
+      if (scaledTarget.windowCount < 4) continue;
+      final alignment =
+          _subsequenceAlignmentAtCurrentTempo(query, scaledTarget, tempoScale);
+      if (alignment == null) continue;
+      if (best == null || alignment.confidence > best.confidence) {
+        best = alignment;
+      }
+    }
+    return best;
+  }
+
+  _SubsequenceAlignment? _subsequenceAlignmentAtCurrentTempo(
+    AudioFingerprint query,
+    AudioFingerprint target,
+    double tempoScale,
+  ) {
+    final queryWindows = query.windowCount;
+    final targetWindows = target.windowCount;
+    if (queryWindows < 4 || targetWindows < 4) return null;
+
+    const stretchPenalty = .015;
+    const epsilon = 1e-9;
+    final cost = List<List<double>>.generate(
+      queryWindows + 1,
+      (_) => List<double>.filled(targetWindows + 1, double.infinity),
+    );
+    final steps = List<List<int>>.generate(
+      queryWindows + 1,
+      (_) => List<int>.filled(targetWindows + 1, 1 << 30),
+    );
+    final back = List<List<int>>.generate(
+      queryWindows + 1,
+      (_) => List<int>.filled(targetWindows + 1, -1),
+    );
+
+    for (var targetIndex = 0; targetIndex <= targetWindows; targetIndex += 1) {
+      cost[0][targetIndex] = 0;
+      steps[0][targetIndex] = 0;
+    }
+
+    for (var queryIndex = 1; queryIndex <= queryWindows; queryIndex += 1) {
+      for (var targetIndex = 1;
+          targetIndex <= targetWindows;
+          targetIndex += 1) {
+        final localCost = 1 -
+            _windowPairSimilarity(
+              query,
+              queryIndex - 1,
+              target,
+              targetIndex - 1,
+            );
+
+        var bestPreviousCost = cost[queryIndex - 1][targetIndex - 1];
+        var bestPreviousSteps = steps[queryIndex - 1][targetIndex - 1];
+        var bestDirection = 0;
+
+        final upCost = cost[queryIndex - 1][targetIndex] + stretchPenalty;
+        final upSteps = steps[queryIndex - 1][targetIndex];
+        if (upCost < bestPreviousCost - epsilon ||
+            ((upCost - bestPreviousCost).abs() <= epsilon &&
+                upSteps < bestPreviousSteps)) {
+          bestPreviousCost = upCost;
+          bestPreviousSteps = upSteps;
+          bestDirection = 1;
+        }
+
+        final leftCost = cost[queryIndex][targetIndex - 1] + stretchPenalty;
+        final leftSteps = steps[queryIndex][targetIndex - 1];
+        if (leftCost < bestPreviousCost - epsilon ||
+            ((leftCost - bestPreviousCost).abs() <= epsilon &&
+                leftSteps < bestPreviousSteps)) {
+          bestPreviousCost = leftCost;
+          bestPreviousSteps = leftSteps;
+          bestDirection = 2;
+        }
+
+        cost[queryIndex][targetIndex] = localCost + bestPreviousCost;
+        steps[queryIndex][targetIndex] = bestPreviousSteps + 1;
+        back[queryIndex][targetIndex] = bestDirection;
+      }
+    }
+
+    var bestEndTarget = -1;
+    var bestAverageCost = double.infinity;
+    for (var targetIndex = 1; targetIndex <= targetWindows; targetIndex += 1) {
+      final stepCount = steps[queryWindows][targetIndex];
+      if (stepCount <= 0 || stepCount >= (1 << 30)) continue;
+      final averageCost = cost[queryWindows][targetIndex] / stepCount;
+      if (averageCost < bestAverageCost) {
+        bestAverageCost = averageCost;
+        bestEndTarget = targetIndex;
+      }
+    }
+    if (bestEndTarget == -1) return null;
+
+    var queryIndex = queryWindows;
+    var targetIndex = bestEndTarget;
+    final reversePath = <_AlignmentPoint>[];
+    while (queryIndex > 0 && targetIndex > 0) {
+      reversePath.add(_AlignmentPoint(
+        queryWindow: queryIndex - 1,
+        targetWindow: targetIndex - 1,
+      ));
+      final direction = back[queryIndex][targetIndex];
+      switch (direction) {
+        case 0:
+          queryIndex -= 1;
+          targetIndex -= 1;
+          break;
+        case 1:
+          queryIndex -= 1;
+          break;
+        case 2:
+          targetIndex -= 1;
+          break;
+        default:
+          queryIndex = 0;
+          targetIndex = 0;
+          break;
+      }
+    }
+    if (reversePath.length < 4) return null;
+
+    final path = reversePath.reversed.toList(growable: false);
+    final confidence = (1 - bestAverageCost).clamp(0.0, 1.0).toDouble();
+    return _SubsequenceAlignment(
+      confidence: confidence,
+      tempoScale: tempoScale,
+      scaledTarget: target,
+      path: path,
+      featureScores: _pathFeatureScores(query, target, path),
+    );
+  }
+
+  double _windowPairSimilarity(
+    AudioFingerprint left,
+    int leftIndex,
+    AudioFingerprint right,
+    int rightIndex,
+  ) {
+    final featureNames = left.features.keys
+        .where((name) => right.features.containsKey(name))
+        .toList(growable: false);
+    if (featureNames.isEmpty) return 0;
+    var weightedScore = 0.0;
+    var totalWeight = 0.0;
+    for (final name in featureNames) {
+      final leftValues = left.features[name]!;
+      final rightValues = right.features[name]!;
+      if (leftIndex >= leftValues.length || rightIndex >= rightValues.length) {
+        continue;
+      }
+      final weight = _featureWeight(name);
+      if (weight <= 0) continue;
+      final similarity =
+          (1 - (leftValues[leftIndex] - rightValues[rightIndex]).abs())
+              .clamp(0.0, 1.0)
+              .toDouble();
+      weightedScore += similarity * weight;
+      totalWeight += weight;
+    }
+    return totalWeight == 0 ? 0 : weightedScore / totalWeight;
+  }
+
+  Map<String, double> _pathFeatureScores(
+    AudioFingerprint query,
+    AudioFingerprint target,
+    List<_AlignmentPoint> path,
+  ) {
+    final scores = <String, double>{};
+    if (path.isEmpty) return scores;
+    final featureNames = query.features.keys
+        .where((name) => target.features.containsKey(name))
+        .toList(growable: false);
+    for (final name in featureNames) {
+      final queryValues = query.features[name]!;
+      final targetValues = target.features[name]!;
+      var total = 0.0;
+      var count = 0;
+      for (final point in path) {
+        if (point.queryWindow >= queryValues.length ||
+            point.targetWindow >= targetValues.length) {
+          continue;
+        }
+        total += (1 -
+                (queryValues[point.queryWindow] -
+                        targetValues[point.targetWindow])
+                    .abs())
+            .clamp(0.0, 1.0)
+            .toDouble();
+        count += 1;
+      }
+      if (count > 0) {
+        scores[name] = (total / count).clamp(0.0, 1.0).toDouble();
+      }
+    }
+    return scores;
+  }
+
+  _WindowRange _sectionWindowRange(
+    AudioFingerprint fingerprint,
+    SongSection section,
+  ) {
+    if (fingerprint.durationMs <= 0 || fingerprint.windowCount == 0) {
+      return const _WindowRange(start: 0, end: 0);
+    }
+    final start =
+        (section.startMs / fingerprint.durationMs * fingerprint.windowCount)
+            .floor()
+            .clamp(0, fingerprint.windowCount - 1);
+    final end =
+        (section.endMs / fingerprint.durationMs * fingerprint.windowCount)
+            .ceil()
+            .clamp(start + 1, fingerprint.windowCount);
+    return _WindowRange(start: start, end: end);
+  }
+
+  int _projectTargetWindowToQuery(
+    List<_AlignmentPoint> path,
+    int targetWindow, {
+    required bool preferEarlier,
+  }) {
+    if (path.isEmpty) return 0;
+    _AlignmentPoint? left;
+    _AlignmentPoint? right;
+    for (final point in path) {
+      if (point.targetWindow <= targetWindow) {
+        left = point;
+      }
+      if (point.targetWindow >= targetWindow) {
+        right = point;
+        break;
+      }
+    }
+    if (left == null) {
+      return path.first.queryWindow;
+    }
+    if (right == null) {
+      return path.last.queryWindow + (preferEarlier ? 0 : 1);
+    }
+    if (left.targetWindow == right.targetWindow) {
+      return preferEarlier
+          ? min(left.queryWindow, right.queryWindow)
+          : max(left.queryWindow, right.queryWindow) + 1;
+    }
+    final fraction = (targetWindow - left.targetWindow) /
+        (right.targetWindow - left.targetWindow);
+    final projected =
+        left.queryWindow + ((right.queryWindow - left.queryWindow) * fraction);
+    return preferEarlier ? projected.floor() : projected.ceil();
+  }
+
+  int _windowToMs(int windowIndex, AudioFingerprint fingerprint) {
+    if (fingerprint.windowCount <= 0 || fingerprint.durationMs <= 0) return 0;
+    return (windowIndex / fingerprint.windowCount * fingerprint.durationMs)
+        .round();
+  }
+
+  AudioFingerprint _sliceFingerprintByWindowRange(
+    AudioFingerprint fingerprint,
+    int startWindow,
+    int endWindow,
+  ) {
+    if (fingerprint.windowCount <= 0 || fingerprint.durationMs <= 0) {
+      return const AudioFingerprint(durationMs: 0, features: {});
+    }
+    final safeStart = startWindow.clamp(0, fingerprint.windowCount - 1);
+    final safeEnd = endWindow.clamp(safeStart + 1, fingerprint.windowCount);
+    final windowCount = safeEnd - safeStart;
+    final durationMs =
+        (windowCount / fingerprint.windowCount * fingerprint.durationMs)
+            .round()
+            .clamp(1, fingerprint.durationMs);
+    return AudioFingerprint(
+      durationMs: durationMs,
+      features: fingerprint.features.map(
+        (name, values) => MapEntry(name, values.sublist(safeStart, safeEnd)),
+      ),
+    );
+  }
+
+  _WindowRange _bestMatchingQueryWindowRange({
+    required AudioFingerprint recordingFingerprint,
+    required AudioFingerprint targetFingerprint,
+    required int candidateStartWindow,
+    required int candidateEndWindow,
+    required int desiredWindowLength,
+  }) {
+    final maxStart = candidateEndWindow - desiredWindowLength;
+    if (maxStart <= candidateStartWindow) {
+      return _WindowRange(
+        start: candidateStartWindow,
+        end: candidateEndWindow,
+      );
+    }
+
+    var bestStart = candidateStartWindow;
+    var bestScore = double.negativeInfinity;
+    for (var start = candidateStartWindow; start <= maxStart; start += 1) {
+      final end = start + desiredWindowLength;
+      final querySlice =
+          _sliceFingerprintByWindowRange(recordingFingerprint, start, end);
+      final score = _similarity(querySlice, targetFingerprint).confidence;
+      if (score > bestScore) {
+        bestScore = score;
+        bestStart = start;
+      }
+    }
+    return _WindowRange(
+      start: bestStart,
+      end: bestStart + desiredWindowLength,
+    );
+  }
+
+  static String _normalizedSongTitle(String? value) {
+    final trimmed = value?.trim();
+    if (trimmed == null || trimmed.isEmpty) return '';
+    return trimmed.toLowerCase();
   }
 
   Future<AudioFingerprint> loadOrGenerateFingerprint(
@@ -1780,6 +2347,44 @@ class _AlignedSectionCandidate {
 
   final SongSection section;
   final double confidence;
+}
+
+class _AlignmentPoint {
+  const _AlignmentPoint({
+    required this.queryWindow,
+    required this.targetWindow,
+  });
+
+  final int queryWindow;
+  final int targetWindow;
+}
+
+class _WindowRange {
+  const _WindowRange({required this.start, required this.end});
+
+  final int start;
+  final int end;
+
+  int get length => end - start;
+}
+
+class _SubsequenceAlignment {
+  const _SubsequenceAlignment({
+    required this.confidence,
+    required this.tempoScale,
+    required this.scaledTarget,
+    required this.path,
+    required this.featureScores,
+  });
+
+  final double confidence;
+  final double tempoScale;
+  final AudioFingerprint scaledTarget;
+  final List<_AlignmentPoint> path;
+  final Map<String, double> featureScores;
+
+  int get targetStartWindow => path.first.targetWindow;
+  int get targetEndWindow => path.last.targetWindow + 1;
 }
 
 class _SimilarityResult {

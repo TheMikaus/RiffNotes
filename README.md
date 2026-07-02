@@ -27,6 +27,7 @@ The repository contains an early but usable Windows-focused practice-review appl
 - Convert WAV/WAVE recordings to MP3, replacing the source recording after a successful conversion.
 - Open the Masters library, mark tracks/clips as masters, section master recordings, and run fuzzy fingerprint suggestions against practice folders.
 - Use each take's fingerprint menu to inspect two-stage song/section match details, accept a guessed title/sections, teach the correct result, or mark the guess as unknown.
+- Song section automation (auto-labeling from masters) is experimental and should be reviewed before saving.
 - Quick title selection now also teaches the fingerprint system and clears the current guess from the take row.
 - Manually sync a selected practice folder to/from a local Google Drive-style sync folder while excluding regenerable cache.
 - Connect to a Google Drive account using a bundled app OAuth client, browse Drive folders, create a RiffNotes folder, and remember a remote sync root. Direct Drive upload/download is in progress.
@@ -39,6 +40,8 @@ Kindle Fire / Android support is planned around playback, note review, note edit
 ## Repository status
 
 This is active experimental software. It is useful for testing the workflow, but not yet a polished production release. Expect rough edges, UI churn, and missing features while the MVP gets shaped.
+
+Fingerprint-driven section automation is also experimental. Auto-labeled sections should be treated as suggestions and verified by ear before finalizing.
 
 ## Requirements
 

@@ -28,7 +28,7 @@ Make band-practice review fast: identify takes, listen, annotate, share notes, p
 14. The user can export selected regions or processed tracks as WAV or MP3.
 15. WAV/WAVE recordings can be converted to MP3 via FFmpeg; after a successful conversion the recording mapping is updated.
 16. The user can select a Masters folder, copy tracks/clips into it as masters, section masters, and run fuzzy fingerprint matching against selected practice folders.
-17. Fingerprint suggestions include confidence and require user review before applying or ignoring. Teaching a correction or choosing a quick remembered title clears the current guess from the take row.
+17. Fingerprint suggestions include confidence and require user review before applying or ignoring. Teaching a correction or choosing a quick remembered title clears the current guess from the take row. Song section automation is experimental and should be treated as suggested structure.
 18. Manual Google Drive-style sync copies a selected practice folder to/from a local sync folder while excluding regenerable cache.
 19. The UI remains interactive during scanning, waveform generation, conversion, matching, export, and sync. Each task gives a name, status, measurable progress when available, and a completion/failure result.
 20. Preferences persist, including the Windows-login-derived user name, editable display name, Band Folder, Masters folder, selected sync folder, and playback settings.
