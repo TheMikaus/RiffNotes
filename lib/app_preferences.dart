@@ -29,6 +29,7 @@ class AppPreferences extends ChangeNotifier {
       'fingerprint_section_confidence';
   static const _fingerprintSongTitlesByPracticeKey =
       'fingerprint_song_titles_by_practice';
+  static const _reviewedPracticesKey = 'reviewed_practices';
 
   String? _bandFolder;
   String? _syncFolder;
@@ -53,6 +54,8 @@ class AppPreferences extends ChangeNotifier {
   Map<String, double> _fingerprintFeatureWeights = <String, double>{};
   Map<String, List<String>> _fingerprintSongTitlesByPractice =
       <String, List<String>>{};
+  Map<String, Map<String, bool>> _reviewedPracticesByUser =
+      <String, Map<String, bool>>{};
 
   String? get bandFolder => _bandFolder;
   String? get syncFolder => _syncFolder;
@@ -81,6 +84,11 @@ class AppPreferences extends ChangeNotifier {
   List<String> fingerprintSongTitlesForPractice(String practicePath) =>
       List<String>.unmodifiable(
           _fingerprintSongTitlesByPractice[practicePath] ?? const <String>[]);
+  bool isPracticeReviewed(String practicePath, {String? user}) {
+    final key = _reviewedUserKey(user);
+    return _reviewedPracticesByUser[key]?[practicePath] ?? false;
+  }
+
   bool get hasGoogleClientConfig => _googleClientId?.trim().isNotEmpty ?? false;
   bool get hasGoogleDriveConnection =>
       _googleDriveCredentials != null && _googleDriveRootFolderId != null;
@@ -131,6 +139,43 @@ class AppPreferences extends ChangeNotifier {
         _fingerprintSongTitlesByPractice = <String, List<String>>{};
       } on TypeError {
         _fingerprintSongTitlesByPractice = <String, List<String>>{};
+      }
+    }
+    final reviewedPractices = store.getString(_reviewedPracticesKey);
+    if (reviewedPractices != null) {
+      try {
+        final decoded = jsonDecode(reviewedPractices) as Map<String, dynamic>;
+        final hasNestedMap = decoded.values.any((value) => value is Map);
+        if (hasNestedMap) {
+          _reviewedPracticesByUser = decoded.map((userKey, value) {
+            final userPractices = value is Map<String, dynamic>
+                ? value
+                : (value as Map).cast<String, dynamic>();
+            final mapped = <String, bool>{};
+            for (final entry in userPractices.entries) {
+              if (entry.value == true) {
+                mapped[entry.key] = true;
+              }
+            }
+            return MapEntry(userKey, mapped);
+          })
+            ..removeWhere((_, practices) => practices.isEmpty);
+        } else {
+          // Backward compatibility: previous format was {practicePath: true}.
+          final mapped = <String, bool>{};
+          for (final entry in decoded.entries) {
+            if (entry.value == true) {
+              mapped[entry.key] = true;
+            }
+          }
+          if (mapped.isNotEmpty) {
+            _reviewedPracticesByUser[_reviewedUserKey(_displayName)] = mapped;
+          }
+        }
+      } on FormatException {
+        _reviewedPracticesByUser = <String, Map<String, bool>>{};
+      } on TypeError {
+        _reviewedPracticesByUser = <String, Map<String, bool>>{};
       }
     }
     _lastPractice = store.getString(_lastPracticeKey);
@@ -375,6 +420,41 @@ class AppPreferences extends ChangeNotifier {
     await store.setString(_fingerprintSongTitlesByPracticeKey,
         jsonEncode(_fingerprintSongTitlesByPractice));
     notifyListeners();
+  }
+
+  Future<void> setPracticeReviewed(
+    String practicePath,
+    bool reviewed, {
+    String? user,
+  }) async {
+    final key = _reviewedUserKey(user);
+    final userPractices =
+        Map<String, bool>.from(_reviewedPracticesByUser[key] ?? const {});
+    if (reviewed) {
+      userPractices[practicePath] = true;
+    } else {
+      userPractices.remove(practicePath);
+    }
+
+    if (userPractices.isEmpty) {
+      _reviewedPracticesByUser.remove(key);
+    } else {
+      _reviewedPracticesByUser[key] = userPractices;
+    }
+
+    final store = await SharedPreferences.getInstance();
+    if (_reviewedPracticesByUser.isEmpty) {
+      await store.remove(_reviewedPracticesKey);
+    } else {
+      await store.setString(
+          _reviewedPracticesKey, jsonEncode(_reviewedPracticesByUser));
+    }
+    notifyListeners();
+  }
+
+  String _reviewedUserKey(String? user) {
+    final candidate = (user ?? _displayName).trim();
+    return candidate.isEmpty ? 'Bandmate' : candidate;
   }
 
   Future<void> setBoost(String recordingId, double decibels) async {
