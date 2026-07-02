@@ -4,6 +4,8 @@ RiffNotes is an AI-built, offline-first practice-review tool for bands. It helps
 
 This project was generated and iterated with AI assistance from Codex, based on product direction, feature requests, and hands-on testing feedback from the repo owner.
 
+<img width="1265" height="711" alt="image" src="https://github.com/user-attachments/assets/0ec69e17-6da1-494a-b50f-103a6b073434" />
+
 ## What's New in v0.6.8
 
 - Added per-take section labeling choices from the fingerprint menu:
