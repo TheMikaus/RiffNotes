@@ -4,6 +4,16 @@ RiffNotes is an AI-built, offline-first practice-review tool for bands. It helps
 
 This project was generated and iterated with AI assistance from Codex, based on product direction, feature requests, and hands-on testing feedback from the repo owner.
 
+## What's New in v0.6.8
+
+- Added per-take section labeling choices from the fingerprint menu:
+- Label sections (unique labels)
+- Label sections (allow repeats)
+- Added bulk section labeling actions for matching takes and selected practices.
+- Improved section alignment quality with partial-aware matching and tighter duration limits.
+- Added a Preferences slider for section-label confidence tuning.
+- Song section automation is experimental and auto-labeled results should be reviewed before finalizing.
+
 ## Current milestone
 
 The repository contains an early but usable Windows-focused practice-review application:
