@@ -4,6 +4,20 @@ import 'dart:io';
 import 'package:path/path.dart' as path;
 
 class PracticeSyncRepository {
+  Future<SyncResult> syncFolderContents({
+    required Directory sourceRoot,
+    required Directory targetRoot,
+    bool changedOnly = true,
+    bool deleteMissingFiles = false,
+  }) {
+    return _copyPractice(
+      source: sourceRoot,
+      target: targetRoot,
+      changedOnly: changedOnly,
+      deleteMissingFiles: deleteMissingFiles,
+    );
+  }
+
   Future<List<SyncFileCandidate>> listUploadCandidates({
     required Directory practiceFolder,
     required Directory syncRoot,
@@ -81,9 +95,8 @@ class PracticeSyncRepository {
     var copied = 0;
     var skipped = 0;
     var deleted = 0;
-    final normalizedAllowed = allowedRelativePaths
-        ?.map(_normalizeRelativePath)
-        .toSet();
+    final normalizedAllowed =
+        allowedRelativePaths?.map(_normalizeRelativePath).toSet();
     final expectedFiles = <String>{};
     await for (final entity in source.list(recursive: true)) {
       if (entity is! File) {
@@ -138,8 +151,7 @@ class PracticeSyncRepository {
       final relative = path.relative(entity.path, from: source.path);
       if (_shouldSkip(relative)) continue;
       final destination = File(path.join(target.path, relative));
-      final isLikelyChanged =
-          !await _hasSameFileMetadata(entity, destination);
+      final isLikelyChanged = !await _hasSameFileMetadata(entity, destination);
       candidates.add(SyncFileCandidate(
         relativePath: _normalizeRelativePath(relative),
         existsInSync: await destination.exists(),

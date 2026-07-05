@@ -1007,11 +1007,22 @@ class _LibraryScreenState extends State<LibraryScreen> {
         return copied;
       });
       if (mounted) {
+        final message = _syncSummary(
+          verb: 'Uploaded',
+          result: result,
+          practiceName: practice.name,
+          sourcePath: practice.directory.path,
+          targetPath: path.join(
+              syncFolder.path, path.basename(practice.directory.path)),
+          selectedCount: decision.files.length,
+        );
         ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-            content: Text(_syncSummary(
-                verb: 'Uploaded',
-                result: result,
-                practiceName: practice.name))));
+          content: Text(message),
+          action: SnackBarAction(
+            label: 'Copy',
+            onPressed: () => Clipboard.setData(ClipboardData(text: message)),
+          ),
+        ));
       }
     } on FileSystemException catch (error) {
       if (mounted) {
@@ -1179,16 +1190,21 @@ class _LibraryScreenState extends State<LibraryScreen> {
     required String verb,
     required SyncResult result,
     required String practiceName,
+    required String sourcePath,
+    required String targetPath,
+    int? selectedCount,
   }) {
-    final details = <String>[];
-    if (result.skippedItems > 0) {
-      details.add('${result.skippedItems} skipped');
-    }
-    if (result.deletedFiles > 0) {
-      details.add('${result.deletedFiles} deleted');
-    }
-    final suffix = details.isEmpty ? '' : ' (${details.join(', ')})';
-    return '$verb ${result.copiedFiles} files for $practiceName$suffix.';
+    final details = <String>[
+      '${result.copiedFiles} copied',
+      '${result.skippedItems} skipped',
+      '${result.deletedFiles} deleted',
+    ];
+    final selectedLabel =
+        selectedCount == null ? '' : ' ($selectedCount selected)';
+    return '$verb $practiceName$selectedLabel\n'
+        'From: $sourcePath\n'
+        'To: $targetPath\n'
+        'Result: ${details.join(', ')}';
   }
 
   Future<void> _downloadSelectedPractice() async {
@@ -1232,11 +1248,21 @@ class _LibraryScreenState extends State<LibraryScreen> {
               .firstOrNull;
       if (currentRecording != null) await _selectRecording(currentRecording);
       if (mounted) {
+        final message = _syncSummary(
+          verb: 'Downloaded',
+          result: result,
+          practiceName: practice.name,
+          sourcePath: path.join(
+              syncFolder.path, path.basename(practice.directory.path)),
+          targetPath: practice.directory.path,
+        );
         ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-            content: Text(_syncSummary(
-                verb: 'Downloaded',
-                result: result,
-                practiceName: practice.name))));
+          content: Text(message),
+          action: SnackBarAction(
+            label: 'Copy',
+            onPressed: () => Clipboard.setData(ClipboardData(text: message)),
+          ),
+        ));
       }
     } on FileSystemException catch (error) {
       if (mounted) {
@@ -1296,6 +1322,181 @@ class _LibraryScreenState extends State<LibraryScreen> {
                       deleteMissingFiles: deleteMissingFiles,
                     )),
                 child: const Text('Download')),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Future<void> _initializeSyncDrive() async {
+    final localFolderPath = (_bandFolder ?? _preferences.bandFolder)?.trim();
+    if (localFolderPath == null || localFolderPath.isEmpty) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+            content: Text('Choose a local Band Folder in Preferences first.')));
+      }
+      return;
+    }
+    final syncFolder = await _requireSyncFolder();
+    if (syncFolder == null) return;
+
+    final localFolder = Directory(localFolderPath);
+    if (!await localFolder.exists()) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+            content: Text('Local folder not found: ${localFolder.path}')));
+      }
+      return;
+    }
+
+    final options = await _confirmInitializeSyncDriveOptions(
+      localFolderPath: localFolder.path,
+      syncFolderPath: syncFolder.path,
+    );
+    if (options == null) return;
+
+    final source = options.uploadToCloud ? localFolder : syncFolder;
+    final target = options.uploadToCloud ? syncFolder : localFolder;
+    if (!await source.exists()) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(content: Text('Source folder not found: ${source.path}')));
+      }
+      return;
+    }
+
+    try {
+      final result =
+          await _activity.run('Initializing sync drive', (update) async {
+        update(
+          null,
+          options.uploadToCloud
+              ? 'Uploading local practice folder to sync drive…'
+              : 'Pulling sync drive folder down to local practice folder…',
+        );
+        final synced = await _syncRepository.syncFolderContents(
+          sourceRoot: source,
+          targetRoot: target,
+          changedOnly: options.changedOnly,
+          deleteMissingFiles: options.deleteMissingFiles,
+        );
+        update(1, 'Initialize sync drive complete');
+        return synced;
+      });
+
+      if (!mounted) return;
+      final message = _syncSummary(
+        verb: options.uploadToCloud ? 'Uploaded' : 'Pulled',
+        result: result,
+        practiceName: path.basename(localFolder.path),
+        sourcePath: source.path,
+        targetPath: target.path,
+      );
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+        content: Text(message),
+        action: SnackBarAction(
+          label: 'Copy',
+          onPressed: () => Clipboard.setData(ClipboardData(text: message)),
+        ),
+      ));
+
+      if (_bandFolder == localFolder.path) {
+        await _openBandFolder(localFolder.path, remember: false);
+      }
+    } on FileSystemException catch (error) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+            content: Text('Initialize sync drive failed: ${error.message}')));
+      }
+    } on StateError catch (error) {
+      if (mounted) {
+        ScaffoldMessenger.of(context)
+            .showSnackBar(SnackBar(content: Text(error.message)));
+      }
+    }
+  }
+
+  Future<({bool uploadToCloud, bool changedOnly, bool deleteMissingFiles})?>
+      _confirmInitializeSyncDriveOptions({
+    required String localFolderPath,
+    required String syncFolderPath,
+  }) async {
+    var uploadToCloud = true;
+    var changedOnly = true;
+    var deleteMissingFiles = false;
+    return showDialog<
+        ({bool uploadToCloud, bool changedOnly, bool deleteMissingFiles})>(
+      context: context,
+      builder: (context) => StatefulBuilder(
+        builder: (context, setDialogState) => AlertDialog(
+          title: const Text('Initialize Sync Drive'),
+          content: SizedBox(
+            width: 680,
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                const Text(
+                    'Choose one direction for first-time sync setup between your local practice folder and the configured sync-drive folder.'),
+                const SizedBox(height: 12),
+                Text('Local folder: $localFolderPath'),
+                const SizedBox(height: 4),
+                Text('Sync folder: $syncFolderPath'),
+                const SizedBox(height: 10),
+                RadioListTile<bool>(
+                  dense: true,
+                  contentPadding: EdgeInsets.zero,
+                  value: true,
+                  groupValue: uploadToCloud,
+                  onChanged: (value) =>
+                      setDialogState(() => uploadToCloud = value ?? true),
+                  title: const Text('Upload local folder to cloud sync folder'),
+                  subtitle: const Text(
+                      'Copies Local/* to Sync/*. Use when local files are your source of truth.'),
+                ),
+                RadioListTile<bool>(
+                  dense: true,
+                  contentPadding: EdgeInsets.zero,
+                  value: false,
+                  groupValue: uploadToCloud,
+                  onChanged: (value) =>
+                      setDialogState(() => uploadToCloud = value ?? false),
+                  title: const Text('Pull cloud sync folder to local folder'),
+                  subtitle: const Text(
+                      'Copies Sync/* to Local/*. Use when cloud files are your source of truth.'),
+                ),
+                const SizedBox(height: 6),
+                CheckboxListTile(
+                  dense: true,
+                  contentPadding: EdgeInsets.zero,
+                  value: changedOnly,
+                  onChanged: (value) =>
+                      setDialogState(() => changedOnly = value ?? true),
+                  title: const Text('Only copy changed files'),
+                ),
+                CheckboxListTile(
+                  dense: true,
+                  contentPadding: EdgeInsets.zero,
+                  value: deleteMissingFiles,
+                  onChanged: (value) =>
+                      setDialogState(() => deleteMissingFiles = value ?? false),
+                  title: const Text('Delete files missing from source'),
+                  subtitle: const Text('Use carefully; this can remove files.'),
+                ),
+              ],
+            ),
+          ),
+          actions: [
+            TextButton(
+                onPressed: () => Navigator.pop(context),
+                child: const Text('Cancel')),
+            FilledButton(
+                onPressed: () => Navigator.pop(context, (
+                      uploadToCloud: uploadToCloud,
+                      changedOnly: changedOnly,
+                      deleteMissingFiles: deleteMissingFiles,
+                    )),
+                child: Text(uploadToCloud ? 'Upload now' : 'Pull now')),
           ],
         ),
       ),
@@ -3979,6 +4180,23 @@ class _LibraryScreenState extends State<LibraryScreen> {
                   ),
                   ListTile(
                     contentPadding: EdgeInsets.zero,
+                    leading: const Icon(Icons.sync_outlined),
+                    title: const Text('Initialize sync drive'),
+                    subtitle: const Text(
+                        'Upload Local/* to Sync/* or pull Sync/* to Local/* for first-time setup.'),
+                    trailing: TextButton(
+                      onPressed: (_preferences.syncFolder == null ||
+                              (_bandFolder ?? _preferences.bandFolder) == null)
+                          ? null
+                          : () async {
+                              Navigator.pop(context);
+                              await _initializeSyncDrive();
+                            },
+                      child: const Text('Initialize'),
+                    ),
+                  ),
+                  ListTile(
+                    contentPadding: EdgeInsets.zero,
                     leading: const Icon(Icons.cloud_outlined),
                     title: const Text('Google Drive account'),
                     subtitle: Text(_googleDriveStatusLabel()),
@@ -5653,8 +5871,23 @@ class _PracticeList extends StatelessWidget {
           if (masters != null) ...[
             ListTile(
               selected: selectedIsMasters,
+              selectedTileColor:
+                  Theme.of(context).colorScheme.secondaryContainer,
+              iconColor: selectedIsMasters
+                  ? Theme.of(context).colorScheme.onSecondaryContainer
+                  : null,
               leading: const Icon(Icons.library_music_outlined),
-              title: const Text('Masters'),
+              title: Text(
+                'Masters',
+                style: selectedIsMasters
+                    ? Theme.of(context).textTheme.titleMedium?.copyWith(
+                          color: Theme.of(context)
+                              .colorScheme
+                              .onSecondaryContainer,
+                          fontWeight: FontWeight.w700,
+                        )
+                    : null,
+              ),
               subtitle:
                   Text('${masters!.recordings.length} reference recordings'),
               onTap: onSelectMasters,
@@ -5666,21 +5899,46 @@ class _PracticeList extends StatelessWidget {
           for (final practice in practices)
             Builder(builder: (context) {
               final reviewed = isReviewed(practice);
+              final isSelected = practice == selected;
+              final selectedTextColor =
+                  Theme.of(context).colorScheme.onSecondaryContainer;
               return ListTile(
-                selected: practice == selected,
+                selected: isSelected,
+                selectedTileColor:
+                    Theme.of(context).colorScheme.secondaryContainer,
                 leading: Icon(
                   reviewed ? Icons.check_circle_outline : Icons.queue_music,
-                  color: reviewed ? Colors.greenAccent : null,
+                  color: isSelected
+                      ? selectedTextColor
+                      : (reviewed ? Colors.greenAccent : null),
                 ),
-                title: Text(practice.name),
-                subtitle: Text(reviewed
-                    ? '${practice.recordings.length} takes • reviewed'
-                    : '${practice.recordings.length} takes'),
+                title: Text(
+                  practice.name,
+                  style: isSelected
+                      ? Theme.of(context).textTheme.titleMedium?.copyWith(
+                            color: selectedTextColor,
+                            fontWeight: FontWeight.w700,
+                          )
+                      : null,
+                ),
+                subtitle: Text(
+                  reviewed
+                      ? '${practice.recordings.length} takes • reviewed'
+                      : '${practice.recordings.length} takes',
+                  style: isSelected
+                      ? Theme.of(context)
+                          .textTheme
+                          .bodyMedium
+                          ?.copyWith(color: selectedTextColor)
+                      : null,
+                ),
                 trailing: IconButton(
                   tooltip: reviewed ? 'Mark unreviewed' : 'Mark reviewed',
                   icon: Icon(
                     reviewed ? Icons.verified : Icons.verified_outlined,
-                    color: reviewed ? Colors.greenAccent : null,
+                    color: isSelected
+                        ? selectedTextColor
+                        : (reviewed ? Colors.greenAccent : null),
                   ),
                   onPressed: () => onToggleReviewed(practice),
                 ),
@@ -5981,17 +6239,35 @@ class _RecordingList extends StatelessWidget {
                   Card(
                       child: ListTile(
                     selected: selected?.id == recording.id,
+                    selectedTileColor:
+                        Theme.of(context).colorScheme.secondaryContainer,
                     leading: Icon(
                         isMasters
                             ? Icons.library_music_outlined
                             : recording.isBestTake
                                 ? Icons.star
                                 : Icons.audiotrack,
-                        color: !isMasters && recording.isBestTake
-                            ? Colors.amber
-                            : null),
-                    title: Text(recording.title ?? recording.filename),
-                    subtitle: _recordingSubtitleWidget(context, recording),
+                        color: selected?.id == recording.id
+                            ? Theme.of(context).colorScheme.onSecondaryContainer
+                            : (!isMasters && recording.isBestTake
+                                ? Colors.amber
+                                : null)),
+                    title: Text(
+                      recording.title ?? recording.filename,
+                      style: selected?.id == recording.id
+                          ? Theme.of(context).textTheme.titleMedium?.copyWith(
+                                color: Theme.of(context)
+                                    .colorScheme
+                                    .onSecondaryContainer,
+                                fontWeight: FontWeight.w700,
+                              )
+                          : null,
+                    ),
+                    subtitle: _recordingSubtitleWidget(
+                      context,
+                      recording,
+                      isSelected: selected?.id == recording.id,
+                    ),
                     trailing: Row(
                       mainAxisSize: MainAxisSize.min,
                       children: [
@@ -6200,8 +6476,16 @@ class _RecordingList extends StatelessWidget {
     }
   }
 
-  Widget _recordingSubtitleWidget(BuildContext context, Recording recording) {
-    final baseStyle = Theme.of(context).textTheme.bodyMedium;
+  Widget _recordingSubtitleWidget(
+    BuildContext context,
+    Recording recording, {
+    bool isSelected = false,
+  }) {
+    final baseStyle = Theme.of(context).textTheme.bodyMedium?.copyWith(
+          color: isSelected
+              ? Theme.of(context).colorScheme.onSecondaryContainer
+              : null,
+        );
     final match = _bestFingerprintMatch(recording);
     final pieces = <TextSpan>[
       if (recording.title != null) TextSpan(text: recording.filename),
