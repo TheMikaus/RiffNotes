@@ -1,3 +1,4 @@
+import 'dart:io';
 import 'dart:convert';
 
 import 'package:flutter/foundation.dart';
@@ -37,6 +38,7 @@ class AppPreferences extends ChangeNotifier {
   bool _autoPlayOnTakeSelection = false;
   bool _autoPlayOnPracticeSelection = false;
   String _displayName = 'Bandmate';
+  bool _displayNameConfigured = false;
   String? _lastPractice;
   String? _lastRecording;
   Map<String, String> _lastRecordingsByPractice = <String, String>{};
@@ -63,6 +65,7 @@ class AppPreferences extends ChangeNotifier {
   bool get autoPlayOnTakeSelection => _autoPlayOnTakeSelection;
   bool get autoPlayOnPracticeSelection => _autoPlayOnPracticeSelection;
   String get displayName => _displayName;
+  bool get hasConfiguredDisplayName => _displayNameConfigured;
   String? get lastPractice => _lastPractice;
   String? get lastRecording => _lastRecording;
   String? lastRecordingForPractice(String practice) =>
@@ -100,7 +103,9 @@ class AppPreferences extends ChangeNotifier {
     _mastersFolder = store.getString(_mastersFolderKey);
     _autoPlayOnTakeSelection = store.getBool(_autoPlayTakeKey) ?? false;
     _autoPlayOnPracticeSelection = store.getBool(_autoPlayPracticeKey) ?? false;
-    _displayName = store.getString(_displayNameKey) ?? 'Bandmate';
+    _displayNameConfigured = store.containsKey(_displayNameKey);
+    _displayName =
+        store.getString(_displayNameKey) ?? _defaultDisplayNameForSystem();
     _audioOutputDevice = store.getString(_audioOutputDeviceKey);
     _googleClientId = store.getString(_googleClientIdKey);
     _googleClientSecret = store.getString(_googleClientSecretKey);
@@ -293,9 +298,17 @@ class AppPreferences extends ChangeNotifier {
 
   Future<void> setDisplayName(String value) async {
     _displayName = value.trim().isEmpty ? 'Bandmate' : value.trim();
+    _displayNameConfigured = true;
     final store = await SharedPreferences.getInstance();
     await store.setString(_displayNameKey, _displayName);
     notifyListeners();
+  }
+
+  String _defaultDisplayNameForSystem() {
+    final userName = Platform.environment['USERNAME']?.trim() ??
+        Platform.environment['USER']?.trim() ??
+        '';
+    return userName.isEmpty ? 'Bandmate' : userName;
   }
 
   Future<void> setAudioOutputDevice(String? value) async {

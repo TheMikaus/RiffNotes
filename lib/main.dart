@@ -169,7 +169,11 @@ class _LibraryScreenState extends State<LibraryScreen> {
 
   Future<Directory?> _requireSyncFolder() async {
     final saved = _preferences.syncFolder?.trim();
-    if (saved != null && saved.isNotEmpty) return Directory(saved);
+    if (saved != null && saved.isNotEmpty) {
+      _log.info('sync', 'Using sync folder: $saved');
+      return Directory(saved);
+    }
+    _log.warning('sync', 'Sync folder is not configured.');
     if (mounted) {
       ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
           content: Text('Choose a Google Drive sync folder in Preferences.')));
@@ -275,11 +279,19 @@ class _LibraryScreenState extends State<LibraryScreen> {
 
   Future<GoogleDriveConnection> _requireGoogleDriveConnection() async {
     final existing = _googleDriveConnection;
-    if (existing != null) return existing;
+    if (existing != null) {
+      _log.info('sync', 'Reusing existing Google Drive connection.');
+      return existing;
+    }
     final bundled = _bundledGoogleOAuthConfig;
     final clientId = _preferences.googleClientId ?? bundled?.clientId;
     final clientSecret =
         _preferences.googleClientSecret ?? bundled?.clientSecret;
+    _log.info(
+      'sync',
+      'Connecting Google Drive: hasClientId=${clientId != null && clientId.trim().isNotEmpty}, '
+          'hasSavedCredentials=${_preferences.googleDriveCredentials != null}',
+    );
     if (clientId == null || clientId.trim().isEmpty) {
       throw StateError('Import OAuth JSON in Preferences before connecting.');
     }
@@ -371,6 +383,9 @@ class _LibraryScreenState extends State<LibraryScreen> {
     }
     if (mounted) {
       setState(() => _playerPanelCollapsed = _preferences.playerPanelCollapsed);
+    }
+    if (mounted && !_preferences.hasConfiguredDisplayName) {
+      await _promptForInitialDisplayName();
     }
     _applyPreferredAudioOutputIfPossible();
     final savedFolder = _preferences.bandFolder;
@@ -972,8 +987,39 @@ class _LibraryScreenState extends State<LibraryScreen> {
   Future<void> _uploadSelectedPractice() async {
     final practice = _selected;
     if (practice == null) return;
+    final driveRootFolderId = _preferences.googleDriveRootFolderId?.trim();
+    final hasCredentials = _preferences.googleDriveCredentials != null;
+    final hasDriveRoot =
+        driveRootFolderId != null && driveRootFolderId.isNotEmpty;
+    final shouldUseDrive = _preferences.googleDriveCredentials != null &&
+        driveRootFolderId != null &&
+        driveRootFolderId.isNotEmpty;
+    _log.info(
+      'sync',
+      'Upload requested for "${practice.name}": shouldUseDrive=$shouldUseDrive '
+          '(hasCredentials=$hasCredentials, hasDriveRoot=$hasDriveRoot)',
+    );
+    if (shouldUseDrive) {
+      await _uploadSelectedPracticeToDrive(practice, driveRootFolderId);
+      return;
+    }
     final syncFolder = await _requireSyncFolder();
     if (syncFolder == null) return;
+    final localTargetPath =
+        path.join(syncFolder.path, path.basename(practice.directory.path));
+    if (path.equals(localTargetPath, practice.directory.path)) {
+      _log.warning(
+        'sync',
+        'Upload fallback blocked because source and target are the same: '
+            '${practice.directory.path}',
+      );
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+            content: Text(
+                'Sync folder points to the same local practice folder. Choose a different sync target or connect Google Drive.')));
+      }
+      return;
+    }
     try {
       final candidates = await _syncRepository.listUploadCandidates(
         practiceFolder: practice.directory,
@@ -992,7 +1038,8 @@ class _LibraryScreenState extends State<LibraryScreen> {
             .showSnackBar(const SnackBar(content: Text('Nothing selected.')));
         return;
       }
-      final result = await _activity.run('Uploading practice', (update) async {
+      final result = await _activity.runCancellable('Uploading practice',
+          (update, isCancelled) async {
         update(null,
             'Copying ${decision.files.length} files from ${practice.name} to sync folder…');
         final copied = await _syncRepository.uploadPracticeSelection(
@@ -1002,6 +1049,9 @@ class _LibraryScreenState extends State<LibraryScreen> {
               decision.files.map((item) => item.relativePath).toSet(),
           changedOnly: decision.changedOnly,
           deleteMissingFiles: decision.deleteMissingFiles,
+          shouldCancel: isCancelled,
+          statusUpdate: (message) => update(null, message),
+          debugLog: (message) => _log.info('sync', message),
         );
         update(1, 'Upload complete');
         return copied;
@@ -1009,7 +1059,9 @@ class _LibraryScreenState extends State<LibraryScreen> {
       if (mounted) {
         final message = _syncSummary(
           verb: 'Uploaded',
-          result: result,
+          copiedFiles: result.copiedFiles,
+          skippedItems: result.skippedItems,
+          deletedFiles: result.deletedFiles,
           practiceName: practice.name,
           sourcePath: practice.directory.path,
           targetPath: path.join(
@@ -1023,6 +1075,101 @@ class _LibraryScreenState extends State<LibraryScreen> {
             onPressed: () => Clipboard.setData(ClipboardData(text: message)),
           ),
         ));
+      }
+    } on ActivityCancelledException {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+            content: Text(
+                'Upload cancelled. Run the same sync again later to finish the remaining files.')));
+      }
+    } on FileSystemException catch (error) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(content: Text('Upload failed: ${error.message}')));
+      }
+    } on StateError catch (error) {
+      if (mounted) {
+        ScaffoldMessenger.of(context)
+            .showSnackBar(SnackBar(content: Text(error.message)));
+      }
+    }
+  }
+
+  Future<void> _uploadSelectedPracticeToDrive(
+    PracticeFolder practice,
+    String driveRootFolderId,
+  ) async {
+    try {
+      _log.info(
+        'sync',
+        'Uploading to Google Drive for "${practice.name}" using rootId=$driveRootFolderId',
+      );
+      final connection = await _requireGoogleDriveConnection();
+      final candidates = await _syncRepository.listUploadCandidates(
+        practiceFolder: practice.directory,
+        syncRoot: practice.directory,
+      );
+      if (!mounted) return;
+      if (candidates.isEmpty) {
+        ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(content: Text('No uploadable files were found.')));
+        return;
+      }
+      final decision = await _confirmUploadSelection(practice, candidates);
+      if (decision == null) return;
+      if (decision.files.isEmpty) {
+        ScaffoldMessenger.of(context)
+            .showSnackBar(const SnackBar(content: Text('Nothing selected.')));
+        return;
+      }
+
+      final result = await _activity.runCancellable('Uploading to Google Drive',
+          (update, isCancelled) async {
+        update(
+          null,
+          'Uploading ${decision.files.length} files from ${practice.name} to Google Drive…',
+        );
+        final uploaded = await connection.uploadLocalFolder(
+          localFolder: practice.directory,
+          driveRootFolderId: driveRootFolderId,
+          changedOnly: decision.changedOnly,
+          deleteMissingFiles: decision.deleteMissingFiles,
+          shouldCancel: isCancelled,
+          statusUpdate: (message) => update(null, message),
+          allowedRelativePaths:
+              decision.files.map((item) => item.relativePath).toSet(),
+          debugLog: (message) => _log.info('sync', message),
+        );
+        update(1, 'Google Drive upload complete');
+        return uploaded;
+      });
+
+      if (!mounted) return;
+      final driveRootName =
+          _preferences.googleDriveRootFolderName ?? 'Drive root';
+      final message = _syncSummary(
+        verb: 'Uploaded',
+        copiedFiles: result.copiedFiles,
+        skippedItems: result.skippedItems,
+        deletedFiles: result.deletedFiles,
+        practiceName: practice.name,
+        sourcePath: practice.directory.path,
+        targetPath:
+            'Google Drive/$driveRootName/${path.basename(practice.directory.path)}',
+        selectedCount: decision.files.length,
+      );
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+        content: Text(message),
+        action: SnackBarAction(
+          label: 'Copy',
+          onPressed: () => Clipboard.setData(ClipboardData(text: message)),
+        ),
+      ));
+    } on ActivityCancelledException {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+            content: Text(
+                'Upload cancelled. Run the same sync again later to finish the remaining files.')));
       }
     } on FileSystemException catch (error) {
       if (mounted) {
@@ -1188,16 +1335,18 @@ class _LibraryScreenState extends State<LibraryScreen> {
 
   String _syncSummary({
     required String verb,
-    required SyncResult result,
+    required int copiedFiles,
+    required int skippedItems,
+    required int deletedFiles,
     required String practiceName,
     required String sourcePath,
     required String targetPath,
     int? selectedCount,
   }) {
     final details = <String>[
-      '${result.copiedFiles} copied',
-      '${result.skippedItems} skipped',
-      '${result.deletedFiles} deleted',
+      '$copiedFiles copied',
+      '$skippedItems skipped',
+      '$deletedFiles deleted',
     ];
     final selectedLabel =
         selectedCount == null ? '' : ' ($selectedCount selected)';
@@ -1210,8 +1359,39 @@ class _LibraryScreenState extends State<LibraryScreen> {
   Future<void> _downloadSelectedPractice() async {
     final practice = _selected;
     if (practice == null) return;
+    final driveRootFolderId = _preferences.googleDriveRootFolderId?.trim();
+    final hasCredentials = _preferences.googleDriveCredentials != null;
+    final hasDriveRoot =
+        driveRootFolderId != null && driveRootFolderId.isNotEmpty;
+    final shouldUseDrive = _preferences.googleDriveCredentials != null &&
+        driveRootFolderId != null &&
+        driveRootFolderId.isNotEmpty;
+    _log.info(
+      'sync',
+      'Download requested for "${practice.name}": shouldUseDrive=$shouldUseDrive '
+          '(hasCredentials=$hasCredentials, hasDriveRoot=$hasDriveRoot)',
+    );
+    if (shouldUseDrive) {
+      await _downloadSelectedPracticeFromDrive(practice, driveRootFolderId);
+      return;
+    }
     final syncFolder = await _requireSyncFolder();
     if (syncFolder == null) return;
+    final localSourcePath =
+        path.join(syncFolder.path, path.basename(practice.directory.path));
+    if (path.equals(localSourcePath, practice.directory.path)) {
+      _log.warning(
+        'sync',
+        'Download fallback blocked because source and target are the same: '
+            '${practice.directory.path}',
+      );
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+            content: Text(
+                'Sync folder points to the same local practice folder. Choose a different sync source or connect Google Drive.')));
+      }
+      return;
+    }
     final options = await _confirmDownloadSyncOptions(practice);
     if (options == null) return;
     try {
@@ -1223,6 +1403,7 @@ class _LibraryScreenState extends State<LibraryScreen> {
           syncRoot: syncFolder,
           changedOnly: options.changedOnly,
           deleteMissingFiles: options.deleteMissingFiles,
+          debugLog: (message) => _log.info('sync', message),
         );
         update(.85, 'Refreshing local practice…');
         final refreshed = await _repository.openPractice(practice.directory);
@@ -1250,7 +1431,9 @@ class _LibraryScreenState extends State<LibraryScreen> {
       if (mounted) {
         final message = _syncSummary(
           verb: 'Downloaded',
-          result: result,
+          copiedFiles: result.copiedFiles,
+          skippedItems: result.skippedItems,
+          deletedFiles: result.deletedFiles,
           practiceName: practice.name,
           sourcePath: path.join(
               syncFolder.path, path.basename(practice.directory.path)),
@@ -1264,6 +1447,86 @@ class _LibraryScreenState extends State<LibraryScreen> {
           ),
         ));
       }
+    } on FileSystemException catch (error) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(content: Text('Download failed: ${error.message}')));
+      }
+    } on StateError catch (error) {
+      if (mounted) {
+        ScaffoldMessenger.of(context)
+            .showSnackBar(SnackBar(content: Text(error.message)));
+      }
+    }
+  }
+
+  Future<void> _downloadSelectedPracticeFromDrive(
+    PracticeFolder practice,
+    String driveRootFolderId,
+  ) async {
+    final options = await _confirmDownloadSyncOptions(practice);
+    if (options == null) return;
+    try {
+      _log.info(
+        'sync',
+        'Downloading from Google Drive for "${practice.name}" using rootId=$driveRootFolderId',
+      );
+      final connection = await _requireGoogleDriveConnection();
+      final updatedPractice =
+          await _activity.run('Downloading from Google Drive', (update) async {
+        update(null, 'Downloading ${practice.name} from Google Drive…');
+        final result = await connection.downloadFolderToLocal(
+          localFolder: practice.directory,
+          driveRootFolderId: driveRootFolderId,
+          changedOnly: options.changedOnly,
+          deleteMissingFiles: options.deleteMissingFiles,
+          debugLog: (message) => _log.info('sync', message),
+        );
+        update(.85, 'Refreshing local practice…');
+        final refreshed = await _repository.openPractice(practice.directory);
+        update(1, 'Google Drive download complete');
+        return (result, refreshed);
+      });
+
+      if (!mounted) return;
+      final result = updatedPractice.$1;
+      final refreshed = updatedPractice.$2;
+      setState(() {
+        _selected = refreshed;
+        _practices = _practices
+            .map((item) => item.directory.path == refreshed.directory.path
+                ? refreshed
+                : item)
+            .toList(growable: false);
+      });
+      await _refreshPracticeReview(refreshed);
+      final currentRecording = _selectedRecording == null
+          ? null
+          : refreshed.recordings
+              .where((item) => item.id == _selectedRecording!.id)
+              .firstOrNull;
+      if (currentRecording != null) await _selectRecording(currentRecording);
+
+      if (!mounted) return;
+      final driveRootName =
+          _preferences.googleDriveRootFolderName ?? 'Drive root';
+      final message = _syncSummary(
+        verb: 'Downloaded',
+        copiedFiles: result.copiedFiles,
+        skippedItems: result.skippedItems,
+        deletedFiles: result.deletedFiles,
+        practiceName: practice.name,
+        sourcePath:
+            'Google Drive/$driveRootName/${path.basename(practice.directory.path)}',
+        targetPath: practice.directory.path,
+      );
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+        content: Text(message),
+        action: SnackBarAction(
+          label: 'Copy',
+          onPressed: () => Clipboard.setData(ClipboardData(text: message)),
+        ),
+      ));
     } on FileSystemException catch (error) {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
@@ -1330,6 +1593,27 @@ class _LibraryScreenState extends State<LibraryScreen> {
 
   Future<void> _initializeSyncDrive() async {
     final localFolderPath = (_bandFolder ?? _preferences.bandFolder)?.trim();
+    final driveRootFolderId = _preferences.googleDriveRootFolderId?.trim();
+    final driveConfigured = _preferences.googleDriveCredentials != null &&
+        driveRootFolderId != null &&
+        driveRootFolderId.isNotEmpty;
+    final configuredSyncFolder = _preferences.syncFolder?.trim();
+    final hasSyncFolder =
+        configuredSyncFolder != null && configuredSyncFolder.isNotEmpty;
+    _log.info(
+      'sync',
+      'Initialize sync requested: localFolder=${localFolderPath ?? '(unset)'} '
+          'syncFolder=${_preferences.syncFolder ?? '(unset)'} '
+          'driveConfigured=$driveConfigured hasSyncFolder=$hasSyncFolder',
+    );
+    if (!driveConfigured && !hasSyncFolder) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+            content: Text(
+                'Connect Google Drive or choose a local sync folder in Preferences first.')));
+      }
+      return;
+    }
     if (localFolderPath == null || localFolderPath.isEmpty) {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
@@ -1337,8 +1621,6 @@ class _LibraryScreenState extends State<LibraryScreen> {
       }
       return;
     }
-    final syncFolder = await _requireSyncFolder();
-    if (syncFolder == null) return;
 
     final localFolder = Directory(localFolderPath);
     if (!await localFolder.exists()) {
@@ -1351,23 +1633,68 @@ class _LibraryScreenState extends State<LibraryScreen> {
 
     final options = await _confirmInitializeSyncDriveOptions(
       localFolderPath: localFolder.path,
-      syncFolderPath: syncFolder.path,
+      syncFolderPath: configuredSyncFolder,
+      driveConfigured: driveConfigured,
     );
     if (options == null) return;
 
-    final source = options.uploadToCloud ? localFolder : syncFolder;
-    final target = options.uploadToCloud ? syncFolder : localFolder;
-    if (!await source.exists()) {
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(content: Text('Source folder not found: ${source.path}')));
-      }
-      return;
-    }
+    final useDriveApi = options.useDriveApi;
+    final syncFolder = useDriveApi ? null : await _requireSyncFolder();
+    if (!useDriveApi && syncFolder == null) return;
+
+    final syncTargetLabel = useDriveApi
+        ? 'Google Drive/${_preferences.googleDriveRootFolderName ?? driveRootFolderId!}'
+        : syncFolder!.path;
 
     try {
-      final result =
-          await _activity.run('Initializing sync drive', (update) async {
+      final result = await _activity.runCancellable(
+          useDriveApi
+              ? 'Initializing Google Drive sync'
+              : 'Initializing sync drive', (update, isCancelled) async {
+        if (useDriveApi) {
+          final resolvedDriveRootFolderId = driveRootFolderId!;
+          final connection = await _requireGoogleDriveConnection();
+          update(
+            null,
+            options.uploadToCloud
+                ? 'Uploading local practice folder to Google Drive…'
+                : 'Pulling Google Drive folder down to local practice folder…',
+          );
+          final synced = options.uploadToCloud
+              ? await connection.uploadLocalFolder(
+                  localFolder: localFolder,
+                  driveRootFolderId: resolvedDriveRootFolderId,
+                  changedOnly: options.changedOnly,
+                  deleteMissingFiles: options.deleteMissingFiles,
+                  includeLocalRootFolder: false,
+                  shouldCancel: isCancelled,
+                  statusUpdate: (message) => update(null, message),
+                  debugLog: (message) => _log.info('sync', message),
+                )
+              : await connection.downloadFolderToLocal(
+                  localFolder: localFolder,
+                  driveRootFolderId: resolvedDriveRootFolderId,
+                  changedOnly: options.changedOnly,
+                  deleteMissingFiles: options.deleteMissingFiles,
+                  includeLocalRootFolder: false,
+                  shouldCancel: isCancelled,
+                  statusUpdate: (message) => update(null, message),
+                  debugLog: (message) => _log.info('sync', message),
+                );
+          update(1, 'Initialize Google Drive sync complete');
+          return (
+            copiedFiles: synced.copiedFiles,
+            skippedItems: synced.skippedItems,
+            deletedFiles: synced.deletedFiles,
+          );
+        }
+
+        final localSyncFolder = syncFolder!;
+        final source = options.uploadToCloud ? localFolder : localSyncFolder;
+        final target = options.uploadToCloud ? localSyncFolder : localFolder;
+        if (!await source.exists()) {
+          throw StateError('Source folder not found: ${source.path}');
+        }
         update(
           null,
           options.uploadToCloud
@@ -1379,18 +1706,31 @@ class _LibraryScreenState extends State<LibraryScreen> {
           targetRoot: target,
           changedOnly: options.changedOnly,
           deleteMissingFiles: options.deleteMissingFiles,
+          shouldCancel: isCancelled,
+          statusUpdate: (message) => update(null, message),
+          debugLog: (message) => _log.info('sync', message),
         );
         update(1, 'Initialize sync drive complete');
-        return synced;
+        return (
+          copiedFiles: synced.copiedFiles,
+          skippedItems: synced.skippedItems,
+          deletedFiles: synced.deletedFiles,
+        );
       });
 
       if (!mounted) return;
       final message = _syncSummary(
         verb: options.uploadToCloud ? 'Uploaded' : 'Pulled',
-        result: result,
+        copiedFiles: result.copiedFiles,
+        skippedItems: result.skippedItems,
+        deletedFiles: result.deletedFiles,
         practiceName: path.basename(localFolder.path),
-        sourcePath: source.path,
-        targetPath: target.path,
+        sourcePath: options.uploadToCloud
+            ? localFolder.path
+            : (useDriveApi ? syncTargetLabel : syncFolder!.path),
+        targetPath: options.uploadToCloud
+            ? (useDriveApi ? syncTargetLabel : syncFolder!.path)
+            : localFolder.path,
       );
       ScaffoldMessenger.of(context).showSnackBar(SnackBar(
         content: Text(message),
@@ -1402,6 +1742,12 @@ class _LibraryScreenState extends State<LibraryScreen> {
 
       if (_bandFolder == localFolder.path) {
         await _openBandFolder(localFolder.path, remember: false);
+      }
+    } on ActivityCancelledException {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+            content: Text(
+                'Sync cancelled. Run Initialize Sync again later to finish the remaining files.')));
       }
     } on FileSystemException catch (error) {
       if (mounted) {
@@ -1416,16 +1762,28 @@ class _LibraryScreenState extends State<LibraryScreen> {
     }
   }
 
-  Future<({bool uploadToCloud, bool changedOnly, bool deleteMissingFiles})?>
-      _confirmInitializeSyncDriveOptions({
+  Future<
+      ({
+        bool uploadToCloud,
+        bool changedOnly,
+        bool deleteMissingFiles,
+        bool useDriveApi
+      })?> _confirmInitializeSyncDriveOptions({
     required String localFolderPath,
-    required String syncFolderPath,
+    String? syncFolderPath,
+    required bool driveConfigured,
   }) async {
     var uploadToCloud = true;
     var changedOnly = true;
     var deleteMissingFiles = false;
+    var useDriveApi = driveConfigured;
     return showDialog<
-        ({bool uploadToCloud, bool changedOnly, bool deleteMissingFiles})>(
+        ({
+          bool uploadToCloud,
+          bool changedOnly,
+          bool deleteMissingFiles,
+          bool useDriveApi
+        })>(
       context: context,
       builder: (context) => StatefulBuilder(
         builder: (context, setDialogState) => AlertDialog(
@@ -1439,9 +1797,50 @@ class _LibraryScreenState extends State<LibraryScreen> {
                 const Text(
                     'Choose one direction for first-time sync setup between your local practice folder and the configured sync-drive folder.'),
                 const SizedBox(height: 12),
+                if (driveConfigured && syncFolderPath != null)
+                  RadioListTile<bool>(
+                    dense: true,
+                    contentPadding: EdgeInsets.zero,
+                    value: true,
+                    groupValue: useDriveApi,
+                    onChanged: (value) =>
+                        setDialogState(() => useDriveApi = value ?? true),
+                    title: const Text('Use Google Drive API (token auth)'),
+                    subtitle: Text(
+                        'Target: Google Drive/${_preferences.googleDriveRootFolderName ?? _preferences.googleDriveRootFolderId ?? 'root'}'),
+                  ),
+                if (driveConfigured && syncFolderPath != null)
+                  RadioListTile<bool>(
+                    dense: true,
+                    contentPadding: EdgeInsets.zero,
+                    value: false,
+                    groupValue: useDriveApi,
+                    onChanged: (value) =>
+                        setDialogState(() => useDriveApi = value ?? false),
+                    title: const Text('Use local sync folder mirror mode'),
+                    subtitle: Text('Target: $syncFolderPath'),
+                  ),
+                if (driveConfigured && syncFolderPath == null)
+                  ListTile(
+                    dense: true,
+                    contentPadding: EdgeInsets.zero,
+                    title: const Text('Transfer mode: Google Drive API'),
+                    subtitle: Text(
+                        'Target: Google Drive/${_preferences.googleDriveRootFolderName ?? _preferences.googleDriveRootFolderId ?? 'root'}'),
+                  ),
+                if (!driveConfigured && syncFolderPath != null)
+                  ListTile(
+                    dense: true,
+                    contentPadding: EdgeInsets.zero,
+                    title:
+                        const Text('Transfer mode: Local sync folder mirror'),
+                    subtitle: Text('Target: $syncFolderPath'),
+                  ),
+                const SizedBox(height: 8),
                 Text('Local folder: $localFolderPath'),
                 const SizedBox(height: 4),
-                Text('Sync folder: $syncFolderPath'),
+                Text(
+                    'Sync target: ${useDriveApi ? 'Google Drive/${_preferences.googleDriveRootFolderName ?? _preferences.googleDriveRootFolderId ?? 'root'}' : (syncFolderPath ?? '(not configured)')}'),
                 const SizedBox(height: 10),
                 RadioListTile<bool>(
                   dense: true,
@@ -1495,6 +1894,7 @@ class _LibraryScreenState extends State<LibraryScreen> {
                       uploadToCloud: uploadToCloud,
                       changedOnly: changedOnly,
                       deleteMissingFiles: deleteMissingFiles,
+                      useDriveApi: useDriveApi,
                     )),
                 child: Text(uploadToCloud ? 'Upload now' : 'Pull now')),
           ],
@@ -4291,37 +4691,68 @@ class _LibraryScreenState extends State<LibraryScreen> {
   }
 
   Future<void> _editDisplayName() async {
-    final controller = TextEditingController(text: _preferences.displayName);
-    final name = await showDialog<String>(
-      context: context,
-      builder: (context) => AlertDialog(
-        title: const Text('Display name'),
-        content: TextField(
-          controller: controller,
-          autofocus: true,
-          decoration: const InputDecoration(
-            labelText: 'Name used for your note file',
-            helperText: 'This controls .riffnotes.<name>.bandnotes',
-          ),
-          onSubmitted: (value) => Navigator.pop(context, value),
-        ),
-        actions: [
-          TextButton(
-              onPressed: () => Navigator.pop(context),
-              child: const Text('Cancel')),
-          FilledButton(
-              onPressed: () => Navigator.pop(context, controller.text),
-              child: const Text('Save')),
-        ],
-      ),
+    final name = await _promptForDisplayName(
+      title: 'Display name',
+      helperText: 'This controls .riffnotes.<name>.bandnotes',
+      saveLabel: 'Save',
+      initialName: _preferences.displayName,
     );
-    controller.dispose();
     if (name == null) return;
     await _preferences.setDisplayName(name);
     final recording = _selectedRecording;
     if (recording != null) await _refreshNotes(recording);
     final practice = _selected;
     if (practice != null) await _refreshPracticeReview(practice);
+  }
+
+  Future<void> _promptForInitialDisplayName() async {
+    final name = await _promptForDisplayName(
+      title: 'Choose your user name',
+      helperText:
+          'This name is used for notes, reviews, and fingerprints. You can change it later in Preferences.',
+      saveLabel: 'Continue',
+      initialName: _preferences.displayName,
+      allowCancel: false,
+    );
+    if (name == null) return;
+    await _preferences.setDisplayName(name);
+  }
+
+  Future<String?> _promptForDisplayName({
+    required String title,
+    required String helperText,
+    required String saveLabel,
+    required String initialName,
+    bool allowCancel = true,
+  }) async {
+    final controller = TextEditingController(text: initialName);
+    final name = await showDialog<String>(
+      context: context,
+      barrierDismissible: allowCancel,
+      builder: (context) => AlertDialog(
+        title: Text(title),
+        content: TextField(
+          controller: controller,
+          autofocus: true,
+          decoration: InputDecoration(
+            labelText: 'Name used for your note file',
+            helperText: helperText,
+          ),
+          onSubmitted: (value) => Navigator.pop(context, value),
+        ),
+        actions: [
+          if (allowCancel)
+            TextButton(
+                onPressed: () => Navigator.pop(context),
+                child: const Text('Cancel')),
+          FilledButton(
+              onPressed: () => Navigator.pop(context, controller.text),
+              child: Text(saveLabel)),
+        ],
+      ),
+    );
+    controller.dispose();
+    return name;
   }
 
   Future<void> _updateRecording(
@@ -5724,7 +6155,9 @@ class _LibraryScreenState extends State<LibraryScreen> {
             ],
           ),
           body: Column(children: [
-            _ActivityStrip(activities: _activity.activities),
+            _ActivityStrip(
+                activities: _activity.activities,
+                onCancelActive: _activity.cancelFirstRunning),
             Expanded(
                 child: Row(children: [
               SizedBox(
@@ -7707,8 +8140,9 @@ class _CopyableErrorMessage extends StatelessWidget {
 }
 
 class _ActivityStrip extends StatelessWidget {
-  const _ActivityStrip({required this.activities});
+  const _ActivityStrip({required this.activities, this.onCancelActive});
   final List<Activity> activities;
+  final VoidCallback? onCancelActive;
 
   @override
   Widget build(BuildContext context) {
@@ -7732,6 +8166,16 @@ class _ActivityStrip extends StatelessWidget {
             SizedBox(
                 width: 160,
                 child: LinearProgressIndicator(value: item.progress)),
+            const SizedBox(width: 8),
+            IconButton(
+              tooltip: item.cancelRequested
+                  ? 'Cancelling...'
+                  : (item.cancellable ? 'Cancel activity' : 'Cannot cancel'),
+              onPressed: (item.cancellable && !item.cancelRequested)
+                  ? onCancelActive
+                  : null,
+              icon: const Icon(Icons.stop_circle_outlined),
+            ),
             const SizedBox(width: 8),
             IconButton(
               tooltip: item.detail.trim().isEmpty

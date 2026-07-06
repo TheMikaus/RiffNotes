@@ -6,15 +6,13 @@ This project was generated and iterated with AI assistance from Codex, based on 
 
 <img width="1265" height="711" alt="image" src="https://github.com/user-attachments/assets/0ec69e17-6da1-494a-b50f-103a6b073434" />
 
-## What's New in v0.6.8
+## What's New in v0.6.9
 
-- Added per-take section labeling choices from the fingerprint menu:
-- Label sections (unique labels)
-- Label sections (allow repeats)
-- Added bulk section labeling actions for matching takes and selected practices.
-- Improved section alignment quality with partial-aware matching and tighter duration limits.
-- Added a Preferences slider for section-label confidence tuning.
-- Song section automation is experimental and auto-labeled results should be reviewed before finalizing.
+- Added direct Google Drive upload/download for selected practices.
+- Initialize Sync can now use either the Google Drive API or a local sync-folder mirror.
+- Added cancel support and live status updates during sync operations.
+- Initialize Sync now copies inner contents when the local and Drive folder names match.
+- Prompt for a display name on first launch using the current Windows user name as the default.
 
 ## Current milestone
 
@@ -42,7 +40,7 @@ The repository contains an early but usable Windows-focused practice-review appl
 - Song section automation (auto-labeling from masters) is experimental and should be reviewed before saving.
 - Quick title selection now also teaches the fingerprint system and clears the current guess from the take row.
 - Manually sync a selected practice folder to/from a local Google Drive-style sync folder while excluding regenerable cache.
-- Connect to a Google Drive account using a bundled app OAuth client, browse Drive folders, create a RiffNotes folder, and remember a remote sync root. Direct Drive upload/download is in progress.
+- Connect to a Google Drive account using a bundled app OAuth client, browse Drive folders, create a RiffNotes folder, remember a remote sync root, and sync selected practices through the Drive API.
 - Clear generated cache for a selected practice from Preferences, including waveform, processed-audio, fingerprint cache, pending fingerprint suggestions, and fingerprint review state.
 - Preserve portable metadata in the practice folder.
 - Keep long-running work visible so the app does not appear frozen.
@@ -195,8 +193,8 @@ Cache folders are safe to exclude from backups and cloud sync.
 - A recording has a stable ID, so renaming or WAV-to-MP3 replacement never detaches notes or sections.
 - Per-user annotations use `.riffnotes.<user>.bandnotes` JSON files in the practice folder.
 - Google Drive-style local-folder sync is manual per practice folder. Regenerable cache is excluded.
-- Direct Google Drive account sync is being added in slices. See [docs/google-drive-setup.md](docs/google-drive-setup.md).
-- Lengthy work is queued in background operations with progress and cancellation where safe.
+- Direct Google Drive account sync is available for selected practices and Initialize Sync. See [docs/google-drive-setup.md](docs/google-drive-setup.md).
+- Lengthy work is queued in background operations with progress, live status, and cancellation where safe.
 - Heavy processing is Windows-first; the Android/Kindle path is intended to focus on playback, notes, sections, and sync.
 
 See [docs/product-spec.md](docs/product-spec.md) for the current, prioritized specification.

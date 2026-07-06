@@ -1,7 +1,10 @@
 import 'dart:async';
 import 'dart:io';
 
+import 'activity.dart';
 import 'package:path/path.dart' as path;
+
+typedef SyncDebugLog = void Function(String message);
 
 class PracticeSyncRepository {
   Future<SyncResult> syncFolderContents({
@@ -9,12 +12,18 @@ class PracticeSyncRepository {
     required Directory targetRoot,
     bool changedOnly = true,
     bool deleteMissingFiles = false,
+    bool Function()? shouldCancel,
+    void Function(String message)? statusUpdate,
+    SyncDebugLog? debugLog,
   }) {
     return _copyPractice(
       source: sourceRoot,
       target: targetRoot,
       changedOnly: changedOnly,
       deleteMissingFiles: deleteMissingFiles,
+      shouldCancel: shouldCancel,
+      statusUpdate: statusUpdate,
+      debugLog: debugLog,
     );
   }
 
@@ -32,6 +41,9 @@ class PracticeSyncRepository {
     required Directory syncRoot,
     bool changedOnly = true,
     bool deleteMissingFiles = false,
+    bool Function()? shouldCancel,
+    void Function(String message)? statusUpdate,
+    SyncDebugLog? debugLog,
   }) async {
     final target =
         Directory(path.join(syncRoot.path, path.basename(practiceFolder.path)));
@@ -40,6 +52,9 @@ class PracticeSyncRepository {
       target: target,
       changedOnly: changedOnly,
       deleteMissingFiles: deleteMissingFiles,
+      shouldCancel: shouldCancel,
+      statusUpdate: statusUpdate,
+      debugLog: debugLog,
     );
   }
 
@@ -49,6 +64,9 @@ class PracticeSyncRepository {
     required Set<String> relativePaths,
     bool changedOnly = true,
     bool deleteMissingFiles = false,
+    bool Function()? shouldCancel,
+    void Function(String message)? statusUpdate,
+    SyncDebugLog? debugLog,
   }) async {
     final target =
         Directory(path.join(syncRoot.path, path.basename(practiceFolder.path)));
@@ -58,6 +76,9 @@ class PracticeSyncRepository {
       allowedRelativePaths: relativePaths,
       changedOnly: changedOnly,
       deleteMissingFiles: deleteMissingFiles,
+      shouldCancel: shouldCancel,
+      statusUpdate: statusUpdate,
+      debugLog: debugLog,
     );
   }
 
@@ -66,6 +87,9 @@ class PracticeSyncRepository {
     required Directory syncRoot,
     bool changedOnly = true,
     bool deleteMissingFiles = false,
+    bool Function()? shouldCancel,
+    void Function(String message)? statusUpdate,
+    SyncDebugLog? debugLog,
   }) async {
     final source = Directory(
         path.join(syncRoot.path, path.basename(localPracticeFolder.path)));
@@ -78,6 +102,9 @@ class PracticeSyncRepository {
       target: localPracticeFolder,
       changedOnly: changedOnly,
       deleteMissingFiles: deleteMissingFiles,
+      shouldCancel: shouldCancel,
+      statusUpdate: statusUpdate,
+      debugLog: debugLog,
     );
   }
 
@@ -87,6 +114,9 @@ class PracticeSyncRepository {
     Set<String>? allowedRelativePaths,
     bool changedOnly = true,
     bool deleteMissingFiles = false,
+    bool Function()? shouldCancel,
+    void Function(String message)? statusUpdate,
+    SyncDebugLog? debugLog,
   }) async {
     if (!await source.exists()) {
       throw StateError('Practice folder does not exist.');
@@ -98,25 +128,47 @@ class PracticeSyncRepository {
     final normalizedAllowed =
         allowedRelativePaths?.map(_normalizeRelativePath).toSet();
     final expectedFiles = <String>{};
+    var scannedFiles = 0;
+    var skippedFiltered = 0;
+    var skippedUnselected = 0;
+    var skippedUnchanged = 0;
+    final unchangedSamples = <String>[];
+    debugLog?.call(
+      'sync.local start source="${source.path}" target="${target.path}" '
+      'changedOnly=$changedOnly deleteMissingFiles=$deleteMissingFiles '
+      'selection=${normalizedAllowed?.length ?? 'all'}',
+    );
+    statusUpdate?.call('Scanning ${source.path}…');
     await for (final entity in source.list(recursive: true)) {
+      if (shouldCancel?.call() ?? false) {
+        throw const ActivityCancelledException();
+      }
       if (entity is! File) {
         continue;
       }
+      scannedFiles += 1;
       final relative = path.relative(entity.path, from: source.path);
       if (_shouldSkip(relative)) {
         skipped += 1;
+        skippedFiltered += 1;
         continue;
       }
       final normalizedRelative = _normalizeRelativePath(relative);
       if (normalizedAllowed != null &&
           !normalizedAllowed.contains(normalizedRelative)) {
+        skippedUnselected += 1;
         continue;
       }
       expectedFiles.add(normalizedRelative);
       final destination = path.join(target.path, relative);
+      statusUpdate?.call('Copying $normalizedRelative…');
       if (changedOnly &&
           await _hasSameFileMetadata(entity, File(destination))) {
         skipped += 1;
+        skippedUnchanged += 1;
+        if (unchangedSamples.length < 5) {
+          unchangedSamples.add(normalizedRelative);
+        }
         continue;
       }
       await File(destination).parent.create(recursive: true);
@@ -126,9 +178,24 @@ class PracticeSyncRepository {
       copied += 1;
     }
     if (deleteMissingFiles) {
+      if (shouldCancel?.call() ?? false) {
+        throw const ActivityCancelledException();
+      }
+      statusUpdate?.call('Removing files missing from source…');
       deleted = await _deleteUnexpectedFiles(
         target: target,
         expectedRelativePaths: expectedFiles,
+      );
+    }
+    debugLog?.call(
+      'sync.local done scanned=$scannedFiles copied=$copied skipped=$skipped '
+      'deleted=$deleted skipFiltered=$skippedFiltered '
+      'skipUnselected=$skippedUnselected skipUnchanged=$skippedUnchanged '
+      'expected=${expectedFiles.length}',
+    );
+    if (unchangedSamples.isNotEmpty) {
+      debugLog?.call(
+        'sync.local unchanged samples: ${unchangedSamples.join(', ')}',
       );
     }
     return SyncResult(

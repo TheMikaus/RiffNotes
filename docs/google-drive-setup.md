@@ -21,12 +21,15 @@ Implemented in the app:
 - Browse top-level Google Drive folders.
 - Create a `RiffNotes` folder in My Drive.
 - Remember the selected remote Drive root folder.
+- Upload and download selected practice folders through the Drive API.
+- Use Initialize Sync to choose between Drive API mode and local sync-folder mirror mode.
+- Show live sync status and support canceling long-running sync operations.
 
 Still to build:
 
-- Upload/download selected practice folders through the Drive API.
 - Conflict preview and overwrite protection for remote sync.
 - Move stored credentials into OS-protected credential storage.
+- A smoother first-run onboarding flow for Drive-only setups.
 
 ## Create the app OAuth client
 
