@@ -4,12 +4,13 @@ import 'dart:math';
 
 import 'package:path/path.dart' as path;
 
-const supportedAudioExtensions = {'.wav', '.wave', '.mp3'};
+const supportedAudioExtensions = {'.wav', '.wave', '.mp3', '.flac'};
 const ignoredPracticeFolderNames = {
   '.backup',
   '.cache',
   '.riffnotes-cache',
   'cache',
+  'mixed_down',
   'masters',
 };
 

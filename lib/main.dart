@@ -103,6 +103,8 @@ class _LibraryScreenState extends State<LibraryScreen> {
   bool _playerPanelCollapsed = false;
   bool _applyingAudioOutput = false;
   bool _refreshingSelectedFolder = false;
+  bool _showBulkMixdownAction = false;
+  int _bulkMixdownAvailabilityRequest = 0;
   String? _appliedAudioOutputDevice;
   DateTime? _lastSectionResizeLogAt;
   bool _sectionResizeGestureActive = false;
@@ -426,8 +428,10 @@ class _LibraryScreenState extends State<LibraryScreen> {
         _sectionUndoStack.clear();
         _rangeStartMs = null;
         _rangeRecordingId = null;
+        _showBulkMixdownAction = false;
       });
       _watchSelectedFolder(_selected);
+      unawaited(_refreshBulkMixDownAvailability(_selected));
       _waveform.clear();
       if (_selected != null) await _refreshPracticeReview(_selected!);
       if (_selected != null) await _refreshFingerprintDecisions(_selected!);
@@ -463,8 +467,10 @@ class _LibraryScreenState extends State<LibraryScreen> {
       _sectionStartMs = null;
       _sectionRecordingId = null;
       _reviewRecordingFilter = null;
+      _showBulkMixdownAction = false;
     });
     _watchSelectedFolder(refreshed);
+    unawaited(_refreshBulkMixDownAvailability(refreshed));
     _waveform.clear();
     await _refreshPracticeReview(refreshed);
     await _refreshFingerprintDecisions(refreshed);
@@ -528,6 +534,7 @@ class _LibraryScreenState extends State<LibraryScreen> {
       _fingerprintMatches = const [];
       _fingerprintDecisionState = const FingerprintDecisions();
       _reviewNotes = const [];
+      _showBulkMixdownAction = false;
     });
     _watchSelectedFolder(masters);
     _waveform.clear();
@@ -646,6 +653,7 @@ class _LibraryScreenState extends State<LibraryScreen> {
           _sectionRecordingId = null;
         }
       });
+      unawaited(_refreshBulkMixDownAvailability(refreshed));
       if (nextRecording == null) {
         await _audio.stop();
         _waveform.clear();
@@ -1946,6 +1954,251 @@ class _LibraryScreenState extends State<LibraryScreen> {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
             SnackBar(content: Text('Cache clear failed: ${error.message}')));
+      }
+    }
+  }
+
+  bool _isNumericFolderName(String value) => RegExp(r'^\d+$').hasMatch(value);
+
+  Future<void> _refreshBulkMixDownAvailability(PracticeFolder? practice) async {
+    final selectedPractice = practice;
+    if (selectedPractice == null || _selectedIsMasters) {
+      if (!mounted) return;
+      setState(() => _showBulkMixdownAction = false);
+      return;
+    }
+    final request = ++_bulkMixdownAvailabilityRequest;
+    final groups = await _discoverNumericMultitrackFolders(selectedPractice);
+    if (!mounted || request != _bulkMixdownAvailabilityRequest) return;
+    if (_selectedIsMasters ||
+        _selected?.directory.path != selectedPractice.directory.path) {
+      return;
+    }
+    setState(() => _showBulkMixdownAction = groups.isNotEmpty);
+  }
+
+  Future<List<({Directory folder, List<File> tracks})>>
+      _discoverNumericMultitrackFolders(PracticeFolder practice) async {
+    final groups = <({Directory folder, List<File> tracks})>[];
+    await for (final entity in practice.directory.list(followLinks: false)) {
+      if (entity is! Directory) continue;
+      final folderName = path.basename(entity.path);
+      if (!_isNumericFolderName(folderName)) continue;
+      final tracks = <File>[];
+      await for (final child in entity.list(followLinks: false)) {
+        if (child is! File) continue;
+        final extension = path.extension(child.path).toLowerCase();
+        if (supportedAudioExtensions.contains(extension)) {
+          tracks.add(child);
+        }
+      }
+      if (tracks.length < 2) continue;
+      tracks.sort((a, b) => path
+          .basename(a.path)
+          .toLowerCase()
+          .compareTo(path.basename(b.path).toLowerCase()));
+      groups.add((folder: entity, tracks: tracks));
+    }
+    groups.sort((a, b) {
+      final aName = path.basename(a.folder.path);
+      final bName = path.basename(b.folder.path);
+      final aValue = int.tryParse(aName) ?? 0;
+      final bValue = int.tryParse(bName) ?? 0;
+      final byValue = aValue.compareTo(bValue);
+      if (byValue != 0) return byValue;
+      return aName.compareTo(bName);
+    });
+    return groups;
+  }
+
+  Future<Directory> _moveFolderToMixedDownArchive(
+    Directory source,
+    Directory archiveRoot,
+  ) async {
+    final name = path.basename(source.path);
+    var target = Directory(path.join(archiveRoot.path, name));
+    if (await target.exists()) {
+      target = Directory(path.join(archiveRoot.path,
+          '${name}_${DateTime.now().millisecondsSinceEpoch}'));
+    }
+    return source.rename(target.path);
+  }
+
+  Future<
+      List<
+          ({
+            Directory folder,
+            List<File> tracks,
+            File output,
+            bool outputExists
+          })>> _buildMultitrackMixdownPreview(
+    PracticeFolder practice,
+    List<({Directory folder, List<File> tracks})> groups,
+  ) async {
+    final preview = <({
+      Directory folder,
+      List<File> tracks,
+      File output,
+      bool outputExists
+    })>[];
+    for (final group in groups) {
+      final folderName = path.basename(group.folder.path);
+      final output =
+          File(path.join(practice.directory.path, '$folderName.wav'));
+      preview.add((
+        folder: group.folder,
+        tracks: group.tracks,
+        output: output,
+        outputExists: await output.exists(),
+      ));
+    }
+    return preview;
+  }
+
+  Future<void> _bulkMixDownNumericMultitrackFolders() async {
+    final practice = _selected;
+    if (practice == null || _selectedIsMasters) return;
+    final groups = await _discoverNumericMultitrackFolders(practice);
+    if (groups.isEmpty) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+            content: Text(
+                'No numeric multitrack folders were found (need at least 2 audio tracks in each numbered folder).')));
+      }
+      return;
+    }
+
+    final preview = await _buildMultitrackMixdownPreview(practice, groups);
+    final toMix = preview.where((item) => !item.outputExists).length;
+    if (toMix == 0) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+            content: Text(
+                'All numbered folders already have matching .wav outputs in this practice.')));
+      }
+      return;
+    }
+
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Multitrack mixdown preview'),
+        content: SizedBox(
+          width: 760,
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(
+                  'Found ${preview.length} numbered folder${preview.length == 1 ? '' : 's'}. Mixdown creates number.wav in the practice root, then archives the source folder to mixed_Down.'),
+              const SizedBox(height: 8),
+              Text(
+                  '$toMix ready to mix, ${preview.length - toMix} already have output files.'),
+              const SizedBox(height: 4),
+              Text(
+                  'This run will create $toMix WAV output${toMix == 1 ? '' : 's'} and move each mixed source folder to mixed_Down.'),
+              const SizedBox(height: 10),
+              Flexible(
+                child: ListView.builder(
+                  shrinkWrap: true,
+                  itemCount: preview.length,
+                  itemBuilder: (context, index) {
+                    final item = preview[index];
+                    final folderName = path.basename(item.folder.path);
+                    final status =
+                        item.outputExists ? 'Skip (exists)' : 'Will mix';
+                    final archiveTarget = path.join('mixed_Down', folderName);
+                    return ListTile(
+                      dense: true,
+                      contentPadding: EdgeInsets.zero,
+                      title: Text(
+                          '$folderName -> ${path.basename(item.output.path)}'),
+                      subtitle: Text(
+                          '${item.tracks.length} tracks • $status • archive: $archiveTarget'),
+                    );
+                  },
+                ),
+              ),
+            ],
+          ),
+        ),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(context, false),
+              child: const Text('Cancel')),
+          FilledButton(
+              onPressed: () => Navigator.pop(context, true),
+              child: Text('Mix down $toMix folder${toMix == 1 ? '' : 's'}')),
+        ],
+      ),
+    );
+    if (confirmed != true) return;
+
+    try {
+      await _audio.stop();
+      final result =
+          await _activity.run('Bulk mix down multitrack', (update) async {
+        var mixed = 0;
+        var moved = 0;
+        var skipped = 0;
+        final skippedNames = <String>[];
+        final archiveRoot =
+            Directory(path.join(practice.directory.path, 'mixed_Down'));
+        await archiveRoot.create(recursive: true);
+        for (var index = 0; index < groups.length; index += 1) {
+          final group = groups[index];
+          final folderName = path.basename(group.folder.path);
+          update(
+            index / groups.length,
+            'Mixing folder $folderName (${index + 1}/${groups.length})…',
+          );
+          final output =
+              File(path.join(practice.directory.path, '$folderName.wav'));
+          if (await output.exists()) {
+            skipped += 1;
+            skippedNames.add('$folderName (output already exists)');
+            continue;
+          }
+          await _audioProcessing.mixDownTracksToStereo(
+            inputTracks: group.tracks,
+            output: output,
+          );
+          mixed += 1;
+          await _moveFolderToMixedDownArchive(group.folder, archiveRoot);
+          moved += 1;
+        }
+        update(1, 'Bulk mixdown complete');
+        return (
+          mixed: mixed,
+          moved: moved,
+          skipped: skipped,
+          skippedNames: skippedNames,
+        );
+      });
+
+      await _refreshSelectedFolderFromDisk();
+      if (mounted) {
+        final details = result.skippedNames.isEmpty
+            ? ''
+            : ' Skipped: ${result.skippedNames.join(', ')}.';
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+            content: Text(
+                'Bulk mixdown complete: ${result.mixed} mixed, ${result.moved} archived, ${result.skipped} skipped.$details')));
+      }
+    } on ProcessException {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+            content: Text('FFmpeg is required for multitrack mixdown.')));
+      }
+    } on FileSystemException catch (error) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(content: Text('Bulk mixdown failed: ${error.message}')));
+      }
+    } on StateError catch (error) {
+      if (mounted) {
+        ScaffoldMessenger.of(context)
+            .showSnackBar(SnackBar(content: Text(error.message)));
       }
     }
   }
@@ -5830,9 +6083,12 @@ class _LibraryScreenState extends State<LibraryScreen> {
     }
   }
 
-  Future<void> _convertSelectedWavToMp3(Recording recording) async {
+  Future<void> _convertSelectedRecordingToMp3(Recording recording) async {
     final practice = _selected;
-    if (practice == null || recording.extension != '.wav') return;
+    if (practice == null ||
+        !{'.wav', '.wave', '.flac'}.contains(recording.extension)) {
+      return;
+    }
     final target = File(path.join(practice.directory.path,
         '${path.basenameWithoutExtension(recording.filename)}.mp3'));
     if (await target.exists()) {
@@ -5845,7 +6101,7 @@ class _LibraryScreenState extends State<LibraryScreen> {
     final confirmed = await showDialog<bool>(
       context: context,
       builder: (context) => AlertDialog(
-        title: const Text('Convert WAV to MP3?'),
+        title: const Text('Convert recording to MP3?'),
         content: Text(
             'This will create ${path.basename(target.path)}, verify it, then remove ${recording.filename}. Notes and sections stay linked.'),
         actions: [
@@ -5862,10 +6118,10 @@ class _LibraryScreenState extends State<LibraryScreen> {
     try {
       await _audio.stop();
       final updatedPractice =
-          await _activity.run('Converting WAV to MP3', (update) async {
+          await _activity.run('Converting recording to MP3', (update) async {
         update(null, 'Creating ${path.basename(target.path)}…');
-        await _audioProcessing.convertWavToMp3(recording, target);
-        update(.8, 'MP3 verified; removing original WAV…');
+        await _audioProcessing.convertRecordingToMp3(recording, target);
+        update(.8, 'MP3 verified; removing original recording…');
         await recording.file.delete();
         final result =
             await _repository.replaceRecordingFile(practice, recording, target);
@@ -5885,7 +6141,8 @@ class _LibraryScreenState extends State<LibraryScreen> {
     } on ProcessException {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
-            content: Text('FFmpeg is required to convert WAV files to MP3.')));
+            content: Text(
+                'FFmpeg is required to convert WAV/WAVE/FLAC files to MP3.')));
       }
     } on FileSystemException catch (error) {
       if (mounted) {
@@ -6197,6 +6454,9 @@ class _LibraryScreenState extends State<LibraryScreen> {
                     isBestTake: isBestTake,
                   ),
                   onBatchRename: _previewAndApplyRename,
+                  showBulkMixdownAction:
+                      _showBulkMixdownAction && !_selectedIsMasters,
+                  onBulkMixDown: _bulkMixDownNumericMultitrackFolders,
                   onAddAnnotation: _addAnnotation,
                   onStartRangeNote: _startRangeNote,
                   onStartSection: _startSection,
@@ -6219,7 +6479,7 @@ class _LibraryScreenState extends State<LibraryScreen> {
                   canUndoSectionEdit: _sectionUndoStack.isNotEmpty,
                   onUndoSectionEdit: _undoLastSectionEdit,
                   onExportAudio: _exportAudio,
-                  onConvertToMp3: _convertSelectedWavToMp3,
+                  onConvertToMp3: _convertSelectedRecordingToMp3,
                   onSaveRecordingAsMaster: _saveRecordingAsMaster,
                   onSaveSectionAsMaster: _saveSectionAsMaster,
                   onWaveformSeek: _onWaveformSeek,
@@ -6406,6 +6666,8 @@ class _RecordingList extends StatelessWidget {
     required this.onDeleteTake,
     required this.onToggleBest,
     required this.onBatchRename,
+    required this.showBulkMixdownAction,
+    required this.onBulkMixDown,
     required this.onAddAnnotation,
     required this.onStartRangeNote,
     required this.onStartSection,
@@ -6473,6 +6735,8 @@ class _RecordingList extends StatelessWidget {
   final Future<void> Function(Recording recording, bool isBestTake)
       onToggleBest;
   final Future<void> Function() onBatchRename;
+  final bool showBulkMixdownAction;
+  final Future<void> Function() onBulkMixDown;
   final ValueChanged<Recording> onAddAnnotation;
   final ValueChanged<Recording> onStartRangeNote;
   final ValueChanged<Recording> onStartSection;
@@ -6651,6 +6915,14 @@ class _RecordingList extends StatelessWidget {
                       child: Text(isMasters
                           ? 'Select a master to play it and mark song sections.'
                           : 'Select a take to load it into the player.')),
+                  if (!isMasters && showBulkMixdownAction) ...[
+                    FilledButton.icon(
+                      onPressed: onBulkMixDown,
+                      icon: const Icon(Icons.queue_music_outlined),
+                      label: const Text('Bulk mixdown'),
+                    ),
+                    const SizedBox(width: 8),
+                  ],
                   if (!isMasters)
                     FilledButton.icon(
                       onPressed: onBatchRename,
@@ -7719,8 +7991,8 @@ class _PlayerPanelState extends State<_PlayerPanel> {
                             ]),
                           ),
                         ),
-                        if (controller.recording!.extension == '.wav' ||
-                            controller.recording!.extension == '.wave')
+                        if ({'.wav', '.wave', '.flac'}
+                            .contains(controller.recording!.extension))
                           TextButton.icon(
                             onPressed: () =>
                                 onConvertToMp3(controller.recording!),

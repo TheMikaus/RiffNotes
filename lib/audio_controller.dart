@@ -111,7 +111,7 @@ class AudioController extends ChangeNotifier {
     } catch (_) {
       if (request == _loadRequest) {
         _error =
-            'Unable to load ${recording.filename}. Check that the file is a valid WAV or MP3.';
+            'Unable to load ${recording.filename}. Check that the file is a valid WAV, MP3, or FLAC.';
       }
     } finally {
       if (request == _loadRequest) {

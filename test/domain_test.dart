@@ -15,8 +15,9 @@ import 'package:shared_preferences/shared_preferences.dart';
 void main() {
   test('recognizes only supported audio extensions', () {
     expect(supportedAudioExtensions.contains('.wav'), isTrue);
+    expect(supportedAudioExtensions.contains('.wave'), isTrue);
     expect(supportedAudioExtensions.contains('.mp3'), isTrue);
-    expect(supportedAudioExtensions.contains('.flac'), isFalse);
+    expect(supportedAudioExtensions.contains('.flac'), isTrue);
   });
 
   test('excludes metadata and cache folders from practice discovery', () {
@@ -24,6 +25,7 @@ void main() {
     expect(
         isPracticeDirectory(Directory(r'C:\Band\.riffnotes-cache')), isFalse);
     expect(isPracticeDirectory(Directory(r'C:\Band\cache')), isFalse);
+    expect(isPracticeDirectory(Directory(r'C:\Band\mixed_Down')), isFalse);
     expect(isPracticeDirectory(Directory(r'C:\Band\Masters')), isFalse);
     expect(
         isPracticeDirectory(Directory(r'C:\Band\2026-06-21 Practice')), isTrue);

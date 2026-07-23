@@ -6,20 +6,19 @@ This project was generated and iterated with AI assistance from Codex, based on 
 
 <img width="1265" height="711" alt="image" src="https://github.com/user-attachments/assets/0ec69e17-6da1-494a-b50f-103a6b073434" />
 
-## What's New in v0.6.9
+## What's New in v0.6.10
 
-- Added direct Google Drive upload/download for selected practices.
-- Initialize Sync can now use either the Google Drive API or a local sync-folder mirror.
-- Added cancel support and live status updates during sync operations.
-- Initialize Sync now copies inner contents when the local and Drive folder names match.
-- Prompt for a display name on first launch using the current Windows user name as the default.
+- Added FLAC support in practice-file discovery and playback flows.
+- Expanded Convert to MP3 so WAV/WAVE/FLAC recordings can be converted in place.
+- Added numeric-folder multitrack bulk mixdown: detected folders are previewed, mixed to `number.wav`, and archived to `mixed_Down`.
+- Added a main-panel `Bulk mixdown` action that appears only when the selected practice has numbered multitrack folders.
 
 ## Current milestone
 
 The repository contains an early but usable Windows-focused practice-review application:
 
 - Select and remember a band folder.
-- Discover practice folders and WAV/MP3 recordings while excluding cache/backup folders.
+- Discover practice folders and WAV/WAVE/MP3/FLAC recordings while excluding cache/backup folders.
 - Remember the last selected practice and the last selected track per practice, with safe fallbacks.
 - Play, pause, seek, scrub with keyboard shortcuts, and view cached waveforms.
 - Zoom the waveform from 1x to 4x in 0.5x steps from the playback controls.
@@ -34,7 +33,8 @@ The repository contains an early but usable Windows-focused practice-review appl
 - Mute the left channel, mute the right channel, or fold playback down to mono; processed playback is cached and remembered per recording.
 - Select the Windows playback output device.
 - Export processed tracks or selected clips as WAV or MP3.
-- Convert WAV/WAVE recordings to MP3, replacing the source recording after a successful conversion.
+- Convert WAV/WAVE/FLAC recordings to MP3, replacing the source recording after a successful conversion.
+- For numbered multitrack take folders, run bulk mixdown to create root-level stereo `number.wav` files and archive the source folders into `mixed_Down`.
 - Open the Masters library, mark tracks/clips as masters, section master recordings, and run fuzzy fingerprint suggestions against practice folders.
 - Use each take's fingerprint menu to inspect two-stage song/section match details, accept a guessed title/sections, teach the correct result, or mark the guess as unknown.
 - Song section automation (auto-labeling from masters) is experimental and should be reviewed before saving.
@@ -189,7 +189,7 @@ Cache folders are safe to exclude from backups and cloud sync.
 ## Product decisions
 
 - A band folder contains practice folders; each practice folder contains audio and portable metadata.
-- WAV and MP3 are supported.
+- WAV, MP3, and FLAC are supported.
 - A recording has a stable ID, so renaming or WAV-to-MP3 replacement never detaches notes or sections.
 - Per-user annotations use `.riffnotes.<user>.bandnotes` JSON files in the practice folder.
 - Google Drive-style local-folder sync is manual per practice folder. Regenerable cache is excluded.
