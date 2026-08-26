@@ -6,12 +6,17 @@ This project was generated and iterated with AI assistance from Codex, based on 
 
 <img width="1265" height="711" alt="image" src="https://github.com/user-attachments/assets/0ec69e17-6da1-494a-b50f-103a6b073434" />
 
-## What's New in v0.6.10
+## What's New in v0.6.11
 
-- Added FLAC support in practice-file discovery and playback flows.
-- Expanded Convert to MP3 so WAV/WAVE/FLAC recordings can be converted in place.
-- Added numeric-folder multitrack bulk mixdown: detected folders are previewed, mixed to `number.wav`, and archived to `mixed_Down`.
-- Added a main-panel `Bulk mixdown` action that appears only when the selected practice has numbered multitrack folders.
+Data-safety release. See [docs/releases/v0.6.11.md](docs/releases/v0.6.11.md) for detail.
+
+- A damaged `library.riffnotes.json` now stops the practice from opening instead of silently re-keying every recording and orphaning its notes and sections.
+- Practice metadata is written atomically, so an interrupted write cannot leave a truncated file.
+- Catalogue entries for takes that are not present locally are kept, so a partially synced machine can no longer destroy their titles on the next upload.
+- Google Drive uploads send the local modification time, so unchanged files are no longer re-uploaded on every sync.
+- Downloads no longer overwrite newer local files, and report how many were protected.
+- `mixed_Down` is excluded from sync.
+- Corrected fingerprint chroma weighting; saved weight profiles should be re-evaluated.
 
 ## Current milestone
 
