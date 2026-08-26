@@ -1333,10 +1333,15 @@ class FingerprintRepository {
   }
 
   double _featureWeight(String name) => switch (name) {
-        // Keep chroma contribution intentionally modest so it helps
-        // disambiguate similar grooves without dominating the score.
+        // The configured chroma weight describes the pitch-class group as a
+        // whole, so it is divided across the twelve bins. Returning the full
+        // weight per bin -- as this did previously -- multiplied the intended
+        // chroma contribution by twelve, making it the single largest term in
+        // the score and inverting the comment's stated intent.
         final chroma when chroma.startsWith('chroma') =>
-          _featureWeightProfile['chroma'] ?? _defaultWeightProfile['chroma']!,
+          (_featureWeightProfile['chroma'] ??
+                  _defaultWeightProfile['chroma']!) /
+              _chromaClasses,
         'energy' =>
           _featureWeightProfile['energy'] ?? _defaultWeightProfile['energy']!,
         'attack' =>

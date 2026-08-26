@@ -454,8 +454,28 @@ class _LibraryScreenState extends State<LibraryScreen> {
     await _preferences.setPlayerPanelCollapsed(value);
   }
 
+  /// Opens a practice folder, reporting an unreadable catalogue instead of
+  /// letting it propagate. Returning null means "do not select this folder" --
+  /// the damaged file is left on disk untouched so it can still be recovered.
+  Future<PracticeFolder?> _openPracticeSafely(Directory directory) async {
+    try {
+      return await _repository.openPractice(directory);
+    } on CatalogueUnreadableException catch (error) {
+      _log.error('library', 'Refused to open ${directory.path}: $error');
+      if (mounted) {
+        _showCopyableError(
+          '${path.basename(directory.path)} could not be opened. $error '
+          'Nothing was changed. Restore library.riffnotes.json from Google '
+          'Drive or a backup, then try again.',
+        );
+      }
+      return null;
+    }
+  }
+
   Future<void> _selectPractice(PracticeFolder practice) async {
-    final refreshed = await _repository.openPractice(practice.directory);
+    final refreshed = await _openPracticeSafely(practice.directory);
+    if (refreshed == null || !mounted) return;
     setState(() {
       _selectedIsMasters = false;
       _replaceSelectedPractice(refreshed);
@@ -506,7 +526,7 @@ class _LibraryScreenState extends State<LibraryScreen> {
       }
       await directory.create(recursive: true);
     }
-    return _repository.openPractice(directory);
+    return _openPracticeSafely(directory);
   }
 
   Future<void> _selectMastersLibrary() async {
@@ -634,7 +654,8 @@ class _LibraryScreenState extends State<LibraryScreen> {
     final selectedPath = current.directory.path;
     final previousRecording = _selectedRecording;
     try {
-      final refreshed = await _repository.openPractice(current.directory);
+      final refreshed = await _openPracticeSafely(current.directory);
+      if (refreshed == null) return;
       if (!mounted || _selected?.directory.path != selectedPath) return;
       final nextRecording = _bestRefreshedRecording(
         refreshed,
@@ -1350,6 +1371,7 @@ class _LibraryScreenState extends State<LibraryScreen> {
     required String sourcePath,
     required String targetPath,
     int? selectedCount,
+    int skippedLocalNewer = 0,
   }) {
     final details = <String>[
       '$copiedFiles copied',
@@ -1358,10 +1380,17 @@ class _LibraryScreenState extends State<LibraryScreen> {
     ];
     final selectedLabel =
         selectedCount == null ? '' : ' ($selectedCount selected)';
+    // Protected files are called out separately: a file that was deliberately
+    // left alone must not disappear into the generic "skipped" count, or the
+    // user has no way to know their newer edit survived.
+    final protectedLabel = skippedLocalNewer == 0
+        ? ''
+        : '\nKept $skippedLocalNewer newer local file'
+            '${skippedLocalNewer == 1 ? '' : 's'} instead of overwriting.';
     return '$verb $practiceName$selectedLabel\n'
         'From: $sourcePath\n'
         'To: $targetPath\n'
-        'Result: ${details.join(', ')}';
+        'Result: ${details.join(', ')}$protectedLabel';
   }
 
   Future<void> _downloadSelectedPractice() async {
@@ -1442,6 +1471,7 @@ class _LibraryScreenState extends State<LibraryScreen> {
           copiedFiles: result.copiedFiles,
           skippedItems: result.skippedItems,
           deletedFiles: result.deletedFiles,
+          skippedLocalNewer: result.skippedLocalNewer,
           practiceName: practice.name,
           sourcePath: path.join(
               syncFolder.path, path.basename(practice.directory.path)),
@@ -1454,6 +1484,17 @@ class _LibraryScreenState extends State<LibraryScreen> {
             onPressed: () => Clipboard.setData(ClipboardData(text: message)),
           ),
         ));
+      }
+    } on CatalogueUnreadableException catch (error) {
+      // The files landed, but the catalogue that arrived will not parse. Say so
+      // loudly: the local copy is now suspect and re-uploading it would spread
+      // the damage to the other machine.
+      _log.error('sync', 'Download left an unreadable catalogue: $error');
+      if (mounted) {
+        _showCopyableError(
+          'Files downloaded, but $error Do not upload this practice until the '
+          'catalogue is restored.',
+        );
       }
     } on FileSystemException catch (error) {
       if (mounted) {
@@ -1523,6 +1564,7 @@ class _LibraryScreenState extends State<LibraryScreen> {
         copiedFiles: result.copiedFiles,
         skippedItems: result.skippedItems,
         deletedFiles: result.deletedFiles,
+        skippedLocalNewer: result.skippedLocalNewer,
         practiceName: practice.name,
         sourcePath:
             'Google Drive/$driveRootName/${path.basename(practice.directory.path)}',
@@ -1535,6 +1577,14 @@ class _LibraryScreenState extends State<LibraryScreen> {
           onPressed: () => Clipboard.setData(ClipboardData(text: message)),
         ),
       ));
+    } on CatalogueUnreadableException catch (error) {
+      _log.error('sync', 'Drive download left an unreadable catalogue: $error');
+      if (mounted) {
+        _showCopyableError(
+          'Files downloaded, but $error Do not upload this practice until the '
+          'catalogue is restored.',
+        );
+      }
     } on FileSystemException catch (error) {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
@@ -6595,6 +6645,21 @@ class _PracticeList extends StatelessWidget {
               final isSelected = practice == selected;
               final selectedTextColor =
                   Theme.of(context).colorScheme.onSecondaryContainer;
+              if (!practice.isReadable) {
+                // Listed but not openable: hiding it would make a damaged
+                // catalogue look like a folder that simply vanished.
+                return ListTile(
+                  leading: Icon(Icons.error_outline,
+                      color: Theme.of(context).colorScheme.error),
+                  title: Text(practice.name),
+                  subtitle: Text(
+                    'Cannot be opened — ${practice.loadError}',
+                    style: TextStyle(
+                        color: Theme.of(context).colorScheme.error),
+                  ),
+                  onTap: () => onSelect(practice),
+                );
+              }
               return ListTile(
                 selected: isSelected,
                 selectedTileColor:

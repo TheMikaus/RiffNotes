@@ -4,6 +4,30 @@ import 'dart:math';
 
 import 'package:path/path.dart' as path;
 
+import 'atomic_file.dart';
+
+/// Thrown when a practice folder's catalogue exists but cannot be parsed.
+///
+/// This is deliberately fatal for the affected practice folder. The previous
+/// behaviour -- treating a damaged catalogue as an empty one -- silently minted
+/// a fresh UUID for every recording and then overwrote the damaged file,
+/// orphaning every note and section beyond recovery. Refusing to open the
+/// folder keeps the bytes on disk so the user (or a restored Drive copy) can
+/// still recover them.
+class CatalogueUnreadableException implements Exception {
+  const CatalogueUnreadableException({
+    required this.catalogueFile,
+    required this.reason,
+  });
+
+  final File catalogueFile;
+  final String reason;
+
+  @override
+  String toString() =>
+      'Could not read ${path.basename(catalogueFile.path)}: $reason';
+}
+
 const supportedAudioExtensions = {'.wav', '.wave', '.mp3', '.flac'};
 const ignoredPracticeFolderNames = {
   '.backup',
@@ -20,16 +44,28 @@ bool isPracticeDirectory(Directory directory) {
 }
 
 class PracticeFolder {
-  const PracticeFolder({required this.directory, required this.recordings});
+  const PracticeFolder({
+    required this.directory,
+    required this.recordings,
+    this.loadError,
+  });
 
   final Directory directory;
   final List<Recording> recordings;
+
+  /// Non-null when the folder could not be read safely. The folder is still
+  /// listed so the problem is visible, but it holds no recordings and must not
+  /// be opened, synced, or written to.
+  final String? loadError;
+
+  bool get isReadable => loadError == null;
 
   String get name => path.basename(directory.path);
 
   PracticeFolder copyWith({List<Recording>? recordings}) => PracticeFolder(
         directory: directory,
         recordings: recordings ?? this.recordings,
+        loadError: loadError,
       );
 }
 
@@ -79,7 +115,17 @@ class PracticeRepository {
     final practices = <PracticeFolder>[];
     await for (final entity in bandFolder.list()) {
       if (entity is Directory && isPracticeDirectory(entity)) {
-        practices.add(await openPractice(entity));
+        // One damaged practice folder must not take down the whole band
+        // folder, so the failure is captured per practice rather than thrown.
+        try {
+          practices.add(await openPractice(entity));
+        } on CatalogueUnreadableException catch (error) {
+          practices.add(PracticeFolder(
+            directory: entity,
+            recordings: const [],
+            loadError: error.reason,
+          ));
+        }
       }
     }
     practices.sort((a, b) => b.name.compareTo(a.name));
@@ -133,15 +179,11 @@ class PracticeRepository {
         ));
       }
     }
-    final staleFilenames = catalogue.keys
-        .where((filename) => !seenFilenames.contains(filename))
-        .toList(growable: false);
-    if (staleFilenames.isNotEmpty) {
-      for (final filename in staleFilenames) {
-        catalogue.remove(filename);
-      }
-      catalogueChanged = true;
-    }
+    // Entries whose files are absent are deliberately retained. On a partially
+    // synced machine the audio for a take may simply not be here yet, and
+    // pruning would push a catalogue with missing titles and Best Take flags
+    // over the complete copy on the next upload. Deliberate removal happens
+    // only through deleteRecording, where the user has confirmed it.
     recordings.sort((a, b) => a.filename.compareTo(b.filename));
     if (catalogueChanged) {
       await _writeCatalogue(folder, catalogue);
@@ -337,29 +379,63 @@ class PracticeRepository {
   Future<Map<String, dynamic>> _loadCatalogue(Directory folder) async {
     final file = File(path.join(folder.path, _catalogueName));
     if (!await file.exists()) return <String, dynamic>{};
+    // A catalogue that exists but will not parse is a hard error. Falling back
+    // to an empty catalogue here would re-key every recording and orphan every
+    // note and section in this folder -- see CatalogueUnreadableException.
+    final String raw;
     try {
-      final decoded =
-          jsonDecode(await file.readAsString()) as Map<String, dynamic>;
-      final recordings = decoded['recordings'];
-      if (recordings is Map<String, dynamic>) {
-        return recordings;
-      }
-      return decoded;
-    } on FormatException {
-      return <String, dynamic>{};
+      raw = await file.readAsString();
+    } on FileSystemException catch (error) {
+      throw CatalogueUnreadableException(
+        catalogueFile: file,
+        reason: error.message,
+      );
     }
+    if (raw.trim().isEmpty) {
+      throw CatalogueUnreadableException(
+        catalogueFile: file,
+        reason: 'the file is empty, which usually means a write was '
+            'interrupted',
+      );
+    }
+    final Object? decoded;
+    try {
+      decoded = jsonDecode(raw);
+    } on FormatException catch (error) {
+      throw CatalogueUnreadableException(
+        catalogueFile: file,
+        reason: 'the file is not valid JSON (${error.message})',
+      );
+    }
+    if (decoded is! Map<String, dynamic>) {
+      throw CatalogueUnreadableException(
+        catalogueFile: file,
+        reason: 'expected a JSON object at the top level',
+      );
+    }
+    final recordings = decoded['recordings'];
+    if (recordings is Map<String, dynamic>) {
+      return recordings;
+    }
+    if (decoded.containsKey('recordings')) {
+      throw CatalogueUnreadableException(
+        catalogueFile: file,
+        reason: 'the "recordings" entry is not a JSON object',
+      );
+    }
+    return decoded;
   }
 
   Future<void> _writeCatalogue(
       Directory folder, Map<String, dynamic> recordings) async {
     final file = File(path.join(folder.path, _catalogueName));
     const encoder = JsonEncoder.withIndent('  ');
-    await file.writeAsString(
+    await writeFileAtomic(
+      file,
       encoder.convert(<String, dynamic>{
         'version': 1,
         'recordings': recordings,
       }),
-      flush: true,
     );
   }
 

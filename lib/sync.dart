@@ -1,8 +1,11 @@
 import 'dart:async';
 import 'dart:io';
 
-import 'activity.dart';
 import 'package:path/path.dart' as path;
+
+import 'activity.dart';
+import 'drive_folder_sync.dart' show shouldSkipSyncPath;
+import 'sync_policy.dart';
 
 typedef SyncDebugLog = void Function(String message);
 
@@ -12,6 +15,7 @@ class PracticeSyncRepository {
     required Directory targetRoot,
     bool changedOnly = true,
     bool deleteMissingFiles = false,
+    bool overwriteNewerTargetFiles = true,
     bool Function()? shouldCancel,
     void Function(String message)? statusUpdate,
     SyncDebugLog? debugLog,
@@ -21,6 +25,7 @@ class PracticeSyncRepository {
       target: targetRoot,
       changedOnly: changedOnly,
       deleteMissingFiles: deleteMissingFiles,
+      overwriteNewerTargetFiles: overwriteNewerTargetFiles,
       shouldCancel: shouldCancel,
       statusUpdate: statusUpdate,
       debugLog: debugLog,
@@ -87,6 +92,7 @@ class PracticeSyncRepository {
     required Directory syncRoot,
     bool changedOnly = true,
     bool deleteMissingFiles = false,
+    bool overwriteNewerLocalFiles = false,
     bool Function()? shouldCancel,
     void Function(String message)? statusUpdate,
     SyncDebugLog? debugLog,
@@ -102,6 +108,7 @@ class PracticeSyncRepository {
       target: localPracticeFolder,
       changedOnly: changedOnly,
       deleteMissingFiles: deleteMissingFiles,
+      overwriteNewerTargetFiles: overwriteNewerLocalFiles,
       shouldCancel: shouldCancel,
       statusUpdate: statusUpdate,
       debugLog: debugLog,
@@ -114,6 +121,7 @@ class PracticeSyncRepository {
     Set<String>? allowedRelativePaths,
     bool changedOnly = true,
     bool deleteMissingFiles = false,
+    bool overwriteNewerTargetFiles = true,
     bool Function()? shouldCancel,
     void Function(String message)? statusUpdate,
     SyncDebugLog? debugLog,
@@ -132,7 +140,9 @@ class PracticeSyncRepository {
     var skippedFiltered = 0;
     var skippedUnselected = 0;
     var skippedUnchanged = 0;
+    var skippedTargetNewer = 0;
     final unchangedSamples = <String>[];
+    final targetNewerSamples = <String>[];
     debugLog?.call(
       'sync.local start source="${source.path}" target="${target.path}" '
       'changedOnly=$changedOnly deleteMissingFiles=$deleteMissingFiles '
@@ -148,7 +158,7 @@ class PracticeSyncRepository {
       }
       scannedFiles += 1;
       final relative = path.relative(entity.path, from: source.path);
-      if (_shouldSkip(relative)) {
+      if (shouldSkipSyncPath(relative)) {
         skipped += 1;
         skippedFiltered += 1;
         continue;
@@ -168,6 +178,18 @@ class PracticeSyncRepository {
         skippedUnchanged += 1;
         if (unchangedSamples.length < 5) {
           unchangedSamples.add(normalizedRelative);
+        }
+        continue;
+      }
+      // Never clobber a newer copy at the destination. On a download this is
+      // the difference between refreshing a stale file and silently reverting
+      // notes the user wrote since the last sync.
+      if (!overwriteNewerTargetFiles &&
+          await _isTargetNewer(entity, File(destination))) {
+        skipped += 1;
+        skippedTargetNewer += 1;
+        if (targetNewerSamples.length < 5) {
+          targetNewerSamples.add(normalizedRelative);
         }
         continue;
       }
@@ -191,6 +213,7 @@ class PracticeSyncRepository {
       'sync.local done scanned=$scannedFiles copied=$copied skipped=$skipped '
       'deleted=$deleted skipFiltered=$skippedFiltered '
       'skipUnselected=$skippedUnselected skipUnchanged=$skippedUnchanged '
+      'skipTargetNewer=$skippedTargetNewer '
       'expected=${expectedFiles.length}',
     );
     if (unchangedSamples.isNotEmpty) {
@@ -198,10 +221,16 @@ class PracticeSyncRepository {
         'sync.local unchanged samples: ${unchangedSamples.join(', ')}',
       );
     }
+    if (targetNewerSamples.isNotEmpty) {
+      debugLog?.call(
+        'sync.local kept newer target copies: ${targetNewerSamples.join(', ')}',
+      );
+    }
     return SyncResult(
       copiedFiles: copied,
       skippedItems: skipped,
       deletedFiles: deleted,
+      skippedLocalNewer: skippedTargetNewer,
     );
   }
 
@@ -216,7 +245,7 @@ class PracticeSyncRepository {
     await for (final entity in source.list(recursive: true)) {
       if (entity is! File) continue;
       final relative = path.relative(entity.path, from: source.path);
-      if (_shouldSkip(relative)) continue;
+      if (shouldSkipSyncPath(relative)) continue;
       final destination = File(path.join(target.path, relative));
       final isLikelyChanged = !await _hasSameFileMetadata(entity, destination);
       candidates.add(SyncFileCandidate(
@@ -237,7 +266,16 @@ class PracticeSyncRepository {
     final sourceStat = await source.stat();
     final destinationStat = await destination.stat();
     return sourceStat.size == destinationStat.size &&
-        sourceStat.modified.toUtc() == destinationStat.modified.toUtc();
+        syncTimestampsMatch(sourceStat.modified, destinationStat.modified);
+  }
+
+  /// True when the destination file has been modified more recently than the
+  /// source by more than the sync tolerance.
+  Future<bool> _isTargetNewer(File source, File destination) async {
+    if (!await destination.exists()) return false;
+    final sourceStat = await source.stat();
+    final destinationStat = await destination.stat();
+    return isMeaningfullyNewer(destinationStat.modified, sourceStat.modified);
   }
 
   Future<int> _deleteUnexpectedFiles({
@@ -250,7 +288,7 @@ class PracticeSyncRepository {
       final relative = _normalizeRelativePath(
         path.relative(entity.path, from: target.path),
       );
-      if (_shouldSkip(relative)) continue;
+      if (shouldSkipSyncPath(relative)) continue;
       if (expectedRelativePaths.contains(relative)) continue;
       await entity.delete();
       deleted += 1;
@@ -274,14 +312,6 @@ class PracticeSyncRepository {
     }
   }
 
-  bool _shouldSkip(String relativePath) {
-    final parts = path.split(relativePath).map((item) => item.toLowerCase());
-    return parts.any((part) =>
-        part == '.riffnotes-cache' ||
-        part == '.backup' ||
-        part == 'cache' ||
-        part.endsWith('.tmp'));
-  }
 }
 
 class SyncResult {
@@ -289,11 +319,15 @@ class SyncResult {
     required this.copiedFiles,
     required this.skippedItems,
     this.deletedFiles = 0,
+    this.skippedLocalNewer = 0,
   });
 
   final int copiedFiles;
   final int skippedItems;
   final int deletedFiles;
+
+  /// Files left alone because the destination copy was newer than the source.
+  final int skippedLocalNewer;
 }
 
 class SyncFileCandidate {

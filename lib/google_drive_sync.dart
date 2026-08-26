@@ -2,16 +2,17 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
-import 'activity.dart';
 import 'package:flutter/services.dart';
 import 'package:googleapis/drive/v3.dart' as drive;
 import 'package:googleapis_auth/auth_io.dart';
 import 'package:googleapis_auth/src/oauth2_flows/auth_code.dart';
 import 'package:http/http.dart' as http;
-import 'package:path/path.dart' as path;
 import 'package:url_launcher/url_launcher.dart';
 
-typedef DriveDebugLog = void Function(String message);
+import 'drive_api_file_store.dart';
+import 'drive_folder_sync.dart';
+
+export 'drive_folder_sync.dart' show DriveDebugLog, GoogleDriveSyncResult;
 
 class GoogleDriveSyncRepository {
   static const scopes = [drive.DriveApi.driveScope];
@@ -186,10 +187,13 @@ class GoogleDriveOAuthConfig {
 }
 
 class GoogleDriveConnection {
-  GoogleDriveConnection(this._client) : _api = drive.DriveApi(_client);
+  GoogleDriveConnection(this._client) : _api = drive.DriveApi(_client) {
+    _sync = DriveFolderSync(DriveApiFileStore(_api));
+  }
 
   final AutoRefreshingAuthClient _client;
   final drive.DriveApi _api;
+  late final DriveFolderSync _sync;
 
   String get credentialsJson => jsonEncode(_client.credentials.toJson());
 
@@ -251,129 +255,18 @@ class GoogleDriveConnection {
     void Function(String message)? statusUpdate,
     Set<String>? allowedRelativePaths,
     DriveDebugLog? debugLog,
-  }) async {
-    if (!await localFolder.exists()) {
-      throw StateError('Local folder was not found.');
-    }
-
-    final normalizedAllowed =
-        allowedRelativePaths?.map((item) => item.replaceAll('\\', '/')).toSet();
-    final practiceFolderId = includeLocalRootFolder
-        ? await _ensureChildFolder(
-            parentId: driveRootFolderId,
-            folderName: path.basename(localFolder.path),
-          )
-        : driveRootFolderId;
-    final folderCache = <String, String>{'': practiceFolderId};
-
-    final remoteFiles = await _listFilesRecursive(practiceFolderId);
-    final remoteByRelative = {
-      for (final item in remoteFiles) item.relativePath: item,
-    };
-
-    var copied = 0;
-    var skipped = 0;
-    var deleted = 0;
-    final expected = <String>{};
-    var scannedFiles = 0;
-    var skippedFiltered = 0;
-    var skippedUnselected = 0;
-    var skippedUnchanged = 0;
-    final unchangedSamples = <String>[];
-    debugLog?.call(
-      'sync.drive.upload start local="${localFolder.path}" driveRootId="$driveRootFolderId" '
-      'practiceFolderId="$practiceFolderId" changedOnly=$changedOnly '
-      'deleteMissingFiles=$deleteMissingFiles selection=${normalizedAllowed?.length ?? 'all'} '
-      'remoteFiles=${remoteFiles.length}',
-    );
-    statusUpdate?.call('Scanning Google Drive upload source…');
-
-    await for (final entity in localFolder.list(recursive: true)) {
-      if (shouldCancel?.call() ?? false) {
-        throw const ActivityCancelledException();
-      }
-      if (entity is! File) continue;
-      scannedFiles += 1;
-      final relative = path
-          .relative(entity.path, from: localFolder.path)
-          .replaceAll('\\', '/');
-      if (_shouldSkip(relative)) {
-        skipped += 1;
-        skippedFiltered += 1;
-        continue;
-      }
-      if (normalizedAllowed != null && !normalizedAllowed.contains(relative)) {
-        skippedUnselected += 1;
-        continue;
-      }
-      expected.add(relative);
-
-      final remote = remoteByRelative[relative];
-      statusUpdate?.call('Uploading $relative…');
-      if (changedOnly && remote != null && await _sameFile(remote, entity)) {
-        skipped += 1;
-        skippedUnchanged += 1;
-        if (unchangedSamples.length < 5) {
-          unchangedSamples.add(relative);
-        }
-        continue;
-      }
-
-      final folderRelative = path.dirname(relative).replaceAll('\\', '/');
-      final parentFolderId = await _ensureDriveFolderPath(
-          folderRelative, practiceFolderId, folderCache);
-      final name = path.basename(relative);
-      final media = drive.Media(entity.openRead(), await entity.length());
-      if (remote == null) {
-        await _api.files.create(
-          drive.File()
-            ..name = name
-            ..parents = [parentFolderId],
-          uploadMedia: media,
-          $fields: 'id',
-        );
-      } else {
-        await _api.files.update(
-          drive.File(),
-          remote.id,
-          uploadMedia: media,
-          $fields: 'id',
-        );
-      }
-      copied += 1;
-    }
-
-    if (deleteMissingFiles) {
-      statusUpdate?.call('Removing remote files missing locally…');
-      for (final item in remoteFiles) {
-        if (shouldCancel?.call() ?? false) {
-          throw const ActivityCancelledException();
-        }
-        if (_shouldSkip(item.relativePath)) continue;
-        if (expected.contains(item.relativePath)) continue;
-        await _api.files.delete(item.id);
-        deleted += 1;
-      }
-    }
-
-    debugLog?.call(
-      'sync.drive.upload done scanned=$scannedFiles copied=$copied skipped=$skipped '
-      'deleted=$deleted skipFiltered=$skippedFiltered '
-      'skipUnselected=$skippedUnselected skipUnchanged=$skippedUnchanged '
-      'expected=${expected.length}',
-    );
-    if (unchangedSamples.isNotEmpty) {
-      debugLog?.call(
-        'sync.drive.upload unchanged samples: ${unchangedSamples.join(', ')}',
+  }) =>
+      _sync.uploadLocalFolder(
+        localFolder: localFolder,
+        driveRootFolderId: driveRootFolderId,
+        changedOnly: changedOnly,
+        deleteMissingFiles: deleteMissingFiles,
+        includeLocalRootFolder: includeLocalRootFolder,
+        shouldCancel: shouldCancel,
+        statusUpdate: statusUpdate,
+        allowedRelativePaths: allowedRelativePaths,
+        debugLog: debugLog,
       );
-    }
-
-    return GoogleDriveSyncResult(
-      copiedFiles: copied,
-      skippedItems: skipped,
-      deletedFiles: deleted,
-    );
-  }
 
   Future<GoogleDriveSyncResult> downloadFolderToLocal({
     required Directory localFolder,
@@ -381,245 +274,22 @@ class GoogleDriveConnection {
     bool changedOnly = true,
     bool deleteMissingFiles = false,
     bool includeLocalRootFolder = true,
+    bool overwriteNewerLocalFiles = false,
     bool Function()? shouldCancel,
     void Function(String message)? statusUpdate,
     DriveDebugLog? debugLog,
-  }) async {
-    final practiceFolderId = includeLocalRootFolder
-        ? await _findChildFolder(
-            parentId: driveRootFolderId,
-            name: path.basename(localFolder.path),
-          )
-        : driveRootFolderId;
-    if (practiceFolderId == null) {
-      throw StateError('No matching practice folder exists in Google Drive.');
-    }
-
-    await localFolder.create(recursive: true);
-    final remoteFiles = await _listFilesRecursive(practiceFolderId);
-    final expected = <String>{};
-    var copied = 0;
-    var skipped = 0;
-    var deleted = 0;
-    var skippedFiltered = 0;
-    var skippedUnchanged = 0;
-    final unchangedSamples = <String>[];
-    debugLog?.call(
-      'sync.drive.download start driveRootId="$driveRootFolderId" '
-      'practiceFolderId="$practiceFolderId" local="${localFolder.path}" '
-      'changedOnly=$changedOnly deleteMissingFiles=$deleteMissingFiles '
-      'remoteFiles=${remoteFiles.length}',
-    );
-    statusUpdate?.call('Scanning Google Drive download source…');
-
-    for (final remote in remoteFiles) {
-      if (shouldCancel?.call() ?? false) {
-        throw const ActivityCancelledException();
-      }
-      final relative = remote.relativePath;
-      if (_shouldSkip(relative)) {
-        skipped += 1;
-        skippedFiltered += 1;
-        continue;
-      }
-      expected.add(relative);
-      final destination = File(path.join(localFolder.path, relative));
-      statusUpdate?.call('Downloading $relative…');
-      if (changedOnly && await _sameRemoteAsLocal(remote, destination)) {
-        skipped += 1;
-        skippedUnchanged += 1;
-        if (unchangedSamples.length < 5) {
-          unchangedSamples.add(relative);
-        }
-        continue;
-      }
-      await destination.parent.create(recursive: true);
-      final media = await _api.files.get(
-        remote.id,
-        downloadOptions: drive.DownloadOptions.fullMedia,
-      ) as drive.Media;
-      final sink = destination.openWrite();
-      await sink.addStream(media.stream);
-      await sink.close();
-      if (remote.modifiedTime != null) {
-        await destination.setLastModified(remote.modifiedTime!.toUtc());
-      }
-      copied += 1;
-    }
-
-    if (deleteMissingFiles) {
-      statusUpdate?.call('Removing local files missing from Drive…');
-      await for (final entity in localFolder.list(recursive: true)) {
-        if (shouldCancel?.call() ?? false) {
-          throw const ActivityCancelledException();
-        }
-        if (entity is! File) continue;
-        final relative = path
-            .relative(entity.path, from: localFolder.path)
-            .replaceAll('\\', '/');
-        if (_shouldSkip(relative)) continue;
-        if (expected.contains(relative)) continue;
-        await entity.delete();
-        deleted += 1;
-      }
-    }
-
-    debugLog?.call(
-      'sync.drive.download done copied=$copied skipped=$skipped deleted=$deleted '
-      'skipFiltered=$skippedFiltered skipUnchanged=$skippedUnchanged '
-      'expected=${expected.length}',
-    );
-    if (unchangedSamples.isNotEmpty) {
-      debugLog?.call(
-        'sync.drive.download unchanged samples: ${unchangedSamples.join(', ')}',
+  }) =>
+      _sync.downloadFolderToLocal(
+        localFolder: localFolder,
+        driveRootFolderId: driveRootFolderId,
+        changedOnly: changedOnly,
+        deleteMissingFiles: deleteMissingFiles,
+        includeLocalRootFolder: includeLocalRootFolder,
+        overwriteNewerLocalFiles: overwriteNewerLocalFiles,
+        shouldCancel: shouldCancel,
+        statusUpdate: statusUpdate,
+        debugLog: debugLog,
       );
-    }
-
-    return GoogleDriveSyncResult(
-      copiedFiles: copied,
-      skippedItems: skipped,
-      deletedFiles: deleted,
-    );
-  }
-
-  Future<List<_DriveFileEntry>> _listFilesRecursive(String folderId,
-      {String prefix = ''}) async {
-    final entries = <_DriveFileEntry>[];
-    final children = await _listChildren(folderId);
-    for (final child in children) {
-      final name = child.name;
-      final id = child.id;
-      if (name == null || id == null) continue;
-      if (child.mimeType == 'application/vnd.google-apps.folder') {
-        final nextPrefix = prefix.isEmpty ? name : '$prefix/$name';
-        entries.addAll(await _listFilesRecursive(id, prefix: nextPrefix));
-        continue;
-      }
-      final relative = prefix.isEmpty ? name : '$prefix/$name';
-      entries.add(_DriveFileEntry(
-        id: id,
-        relativePath: relative,
-        sizeBytes: int.tryParse(child.size ?? ''),
-        modifiedTime: child.modifiedTime,
-      ));
-    }
-    return entries;
-  }
-
-  Future<List<drive.File>> _listChildren(String parentId) async {
-    final escapedParent = parentId.replaceAll("'", r"\'");
-    final files = <drive.File>[];
-    String? pageToken;
-    do {
-      final response = await _api.files.list(
-        q: "'$escapedParent' in parents and trashed = false",
-        orderBy: 'folder,name_natural',
-        pageSize: 1000,
-        spaces: 'drive',
-        pageToken: pageToken,
-        $fields: 'nextPageToken,files(id,name,mimeType,size,modifiedTime)',
-      );
-      files.addAll(response.files ?? const <drive.File>[]);
-      pageToken = response.nextPageToken;
-    } while (pageToken != null && pageToken.isNotEmpty);
-    return files;
-  }
-
-  Future<String> _ensureDriveFolderPath(
-    String folderRelative,
-    String rootFolderId,
-    Map<String, String> cache,
-  ) async {
-    if (folderRelative == '.' || folderRelative.isEmpty) {
-      return rootFolderId;
-    }
-    final normalized = folderRelative.replaceAll('\\', '/');
-    if (cache.containsKey(normalized)) return cache[normalized]!;
-
-    final segments = normalized.split('/').where((item) => item.isNotEmpty);
-    var currentId = rootFolderId;
-    var currentPath = '';
-    for (final segment in segments) {
-      currentPath = currentPath.isEmpty ? segment : '$currentPath/$segment';
-      final existing = cache[currentPath];
-      if (existing != null) {
-        currentId = existing;
-        continue;
-      }
-      final folderId =
-          await _ensureChildFolder(parentId: currentId, folderName: segment);
-      cache[currentPath] = folderId;
-      currentId = folderId;
-    }
-    return currentId;
-  }
-
-  Future<String?> _findChildFolder({
-    required String parentId,
-    required String name,
-  }) async {
-    final escapedParent = parentId.replaceAll("'", r"\'");
-    final escapedName = name.replaceAll("'", r"\'");
-    final response = await _api.files.list(
-      q: "'$escapedParent' in parents and "
-          "mimeType = 'application/vnd.google-apps.folder' and "
-          "name = '$escapedName' and trashed = false",
-      pageSize: 1,
-      spaces: 'drive',
-      $fields: 'files(id)',
-    );
-    return response.files?.firstOrNull?.id;
-  }
-
-  Future<String> _ensureChildFolder({
-    required String parentId,
-    required String folderName,
-  }) async {
-    final existingId =
-        await _findChildFolder(parentId: parentId, name: folderName);
-    if (existingId != null) return existingId;
-    final created = await _api.files.create(
-      drive.File()
-        ..name = folderName
-        ..mimeType = 'application/vnd.google-apps.folder'
-        ..parents = [parentId],
-      $fields: 'id',
-    );
-    final id = created.id;
-    if (id == null || id.isEmpty) {
-      throw StateError('Google Drive did not return a folder id.');
-    }
-    return id;
-  }
-
-  Future<bool> _sameFile(_DriveFileEntry remote, File local) async {
-    if (!await local.exists()) return false;
-    final localStat = await local.stat();
-    if (remote.sizeBytes != null && localStat.size != remote.sizeBytes) {
-      return false;
-    }
-    if (remote.modifiedTime == null) return false;
-    return localStat.modified.toUtc() == remote.modifiedTime!.toUtc();
-  }
-
-  Future<bool> _sameRemoteAsLocal(_DriveFileEntry remote, File local) async {
-    if (!await local.exists()) return false;
-    final localStat = await local.stat();
-    if (remote.sizeBytes != null && localStat.size != remote.sizeBytes) {
-      return false;
-    }
-    if (remote.modifiedTime == null) return false;
-    return localStat.modified.toUtc() == remote.modifiedTime!.toUtc();
-  }
-
-  bool _shouldSkip(String relativePath) {
-    final parts = path.split(relativePath).map((item) => item.toLowerCase());
-    return parts.any((part) =>
-        part == '.riffnotes-cache' ||
-        part == '.backup' ||
-        part == 'cache' ||
-        part.endsWith('.tmp'));
-  }
 
   void close() => _client.close();
 }
@@ -631,28 +301,3 @@ class GoogleDriveFolder {
   final String name;
 }
 
-class GoogleDriveSyncResult {
-  const GoogleDriveSyncResult({
-    required this.copiedFiles,
-    required this.skippedItems,
-    this.deletedFiles = 0,
-  });
-
-  final int copiedFiles;
-  final int skippedItems;
-  final int deletedFiles;
-}
-
-class _DriveFileEntry {
-  const _DriveFileEntry({
-    required this.id,
-    required this.relativePath,
-    required this.sizeBytes,
-    required this.modifiedTime,
-  });
-
-  final String id;
-  final String relativePath;
-  final int? sizeBytes;
-  final DateTime? modifiedTime;
-}

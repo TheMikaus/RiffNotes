@@ -3,6 +3,8 @@ import 'dart:io';
 
 import 'package:path/path.dart' as path;
 
+import 'atomic_file.dart';
+
 class SongSection {
   const SongSection({
     required this.recordingId,
@@ -92,12 +94,13 @@ class SongSectionRepository {
       List<SongSection> sections) async {
     sections.sort((a, b) => a.startMs.compareTo(b.startMs));
     final file = _fileFor(practiceFolder, recordingId);
-    await file.writeAsString(
-        const JsonEncoder.withIndent('  ').convert(<String, dynamic>{
-          'version': 1,
-          'sections': sections.map((item) => item.toJson()).toList(),
-        }),
-        flush: true);
+    await writeFileAtomic(
+      file,
+      const JsonEncoder.withIndent('  ').convert(<String, dynamic>{
+        'version': 1,
+        'sections': sections.map((item) => item.toJson()).toList(),
+      }),
+    );
   }
 
   bool _sameSection(SongSection left, SongSection right) =>

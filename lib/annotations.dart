@@ -4,6 +4,7 @@ import 'dart:math';
 
 import 'package:path/path.dart' as path;
 
+import 'atomic_file.dart';
 import 'domain.dart';
 
 /// A review comment. A point note has no [endMs]; a range note has a distinct
@@ -127,13 +128,14 @@ class AnnotationRepository {
       String folder, String user, List<PracticeAnnotation> notes) async {
     final file = _fileFor(folder, user);
     const encoder = JsonEncoder.withIndent('  ');
-    await file.writeAsString(
-        encoder.convert({
-          'version': 1,
-          'user': user,
-          'annotations': notes.map((note) => note.toJson()).toList(),
-        }),
-        flush: true);
+    await writeFileAtomic(
+      file,
+      encoder.convert({
+        'version': 1,
+        'user': user,
+        'annotations': notes.map((note) => note.toJson()).toList(),
+      }),
+    );
   }
 
   File _fileFor(String folder, String user) =>
