@@ -225,7 +225,7 @@ Findings from the v0.6.10 audit; fixes shipped in v0.6.11. Fixed items list the 
 | B4 | Drive upload writes the local modification time through to the remote store, so change detection converges. Enforced by the `DriveFileStore` interface, which makes `modifiedTime` a required argument. |
 | B5 | Downloads skip files whose local copy is newer than the remote by more than `syncTimestampTolerance`, in both sync implementations. Override with `overwriteNewerLocalFiles`. The count is reported in the sync summary. |
 | B6 | The stale actionability test is replaced by a group that trips each gate independently. |
-| B7 | The configured chroma weight is divided across the twelve bins, so the knob means what it says. **Existing tuned weight profiles were fitted against the old 12x behaviour and should be re-evaluated.** |
+| B7 | The configured chroma weight is divided across the twelve bins, so the knob means what it says. This moves the chroma group from ~28% of the score to ~3.2% with defaults. **Whether that is an improvement is unmeasured** -- chroma carries song identity while the envelope features largely encode mic and room, so the accidental 28% may have matched better. Setting chroma to `1.44` reproduces the old scoring for a direct comparison; see step 10 of [manual-test-plan.md](manual-test-plan.md). |
 | B9 | `mixed_Down` is excluded from sync, via one `shouldSkipSyncPath` now shared by both implementations. |
 | B12 | Downloads stream to a temp file and rename into place, so an interrupted download leaves no truncated file. |
 

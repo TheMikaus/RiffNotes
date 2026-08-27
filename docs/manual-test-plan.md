@@ -152,16 +152,60 @@ Also check the log for `sync.drive.upload done … skipUnchanged=N` with N equal
 
 ---
 
-## 10. Fingerprint chroma weighting (B7)
+## 10. Fingerprint chroma weighting A/B (B7)
 
-The weighting change alters match scores, so previously tuned profiles no longer mean the same
-thing.
+**This is a measurement, not a pass/fail step, and the fix may be a regression.** Read the reasoning
+before running it.
+
+`_featureWeight` used to return the configured chroma weight for *each* of the twelve pitch-class
+bins, so the chroma group summed to twelve times the configured value. With the default profile that
+made chroma about **28%** of the score — the largest single group, and the opposite of what the
+comment above it claimed. It is now divided across the bins, which drops the chroma group to about
+**3.2%**.
+
+That makes the code match its stated intent. Whether the stated intent is *correct* is a separate
+question, and there is reason to doubt it: chroma is the feature that carries song identity
+(harmony and melody), while energy, zero-crossing, attack, and peaks largely describe the loudness
+envelope, which is dominated by mic placement, room, and how hard the band played that night. The
+accidental 28% may well have matched better than the documented 3.2%.
+
+Setting the chroma weight to **`1.44`** reproduces the old scoring exactly (1.44 ÷ 12 = 0.12 per
+bin, the previous per-bin value), which gives a clean comparison.
+
+**Do not clear anything first.** Feature extraction is unchanged, so the cached fingerprints under
+`.riffnotes-cache/` are still valid — clearing them only forces a slow FFmpeg re-decode of every
+recording. Re-running matching replaces pending suggestions on its own. Avoid *Clear generated cache
+for selected practice* and the fingerprint-state clear entirely: both also delete your accepted and
+ignored decisions, which are ground truth you produced by ear and cannot be recomputed.
+
+**Procedure.** Use one practice whose correct titles you already know, and do not accept or ignore
+anything between runs — that would change `skipRecordingIds` and make the runs incomparable.
 
 | | |
 |---|---|
-| **Do** | Preferences → Fingerprint weight profile → **Apply defaults**. Then run fingerprint matching against a practice whose correct titles you already know. |
-| **Expect** | Matching completes. Record how many suggestions are actionable and how many are correct. |
-| **Note** | This is a **baseline measurement, not a pass/fail.** Compare against your memory of previous runs and tell me whether accuracy went up, down, or stayed flat. If it got worse, the chroma weight likely needs raising now that it is no longer multiplied by twelve. |
+| **Run A** | Preferences → Fingerprint weight profile → **Apply defaults** (chroma ≈ 3.2% of score). Run fingerprint matching on the practice. |
+| **Record** | Total takes matched; suggestions shown as actionable; how many of those are the *right* song; how many correct titles it missed entirely. |
+| **Run B** | Set the chroma weight to **`1.44`** and save the profile (chroma ≈ 28%, i.e. pre-v0.6.11 behaviour). Re-run matching on the same practice. |
+| **Record** | The same four numbers. |
+
+| Metric | Run A (chroma 0.12) | Run B (chroma 1.44) |
+|---|---|---|
+| Takes matched | | |
+| Actionable suggestions | | |
+| ...of which correct | | |
+| Correct songs missed | | |
+
+**Interpreting it**
+
+- **Run B clearly better** → the pre-change weighting was right for real rehearsal audio, and the
+  default profile should be raised toward 1.44 rather than left at 0.12. The fix stays (the knob now
+  means what it says), but the default was calibrated against the buggy behaviour.
+- **Run A better or equal** → the documented intent holds; keep defaults.
+- **Both poor** → the weighting is not the limiting factor, and the real problem is the similarity
+  metric itself (`1 − mean|Δ|` has very little dynamic range) rather than how the features are mixed.
+
+Run B should reproduce whatever you remember from v0.6.10. If it does not, the arithmetic above is
+wrong and worth reporting.
 
 ---
 
