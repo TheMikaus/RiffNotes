@@ -5945,11 +5945,6 @@ class _LibraryScreenState extends State<LibraryScreen> {
             .firstOrNull;
   }
 
-  String _splitLabel(String label) {
-    final trimmed = label.trim();
-    return trimmed.isEmpty ? 'Section' : '$trimmed 2';
-  }
-
   String _normalizedSectionPrefix(String label) {
     final cleaned =
         label.trim().toLowerCase().replaceAll(RegExp(r'[^a-z]+'), '');
@@ -5996,20 +5991,6 @@ class _LibraryScreenState extends State<LibraryScreen> {
 
   String _nextSectionLabel(List<SongSection> existing, {int offset = 0}) {
     return 'Section ${existing.length + offset + 1}';
-  }
-
-  int _suggestSectionColor(String label) {
-    final normalized =
-        label.toLowerCase().replaceAll(RegExp(r'\s+[a-z0-9]+$'), '').trim();
-    if (normalized.isEmpty) return 0;
-    final match = _sections.where((section) {
-      final existing = section.label
-          .toLowerCase()
-          .replaceAll(RegExp(r'\s+[a-z0-9]+$'), '')
-          .trim();
-      return existing == normalized;
-    }).firstOrNull;
-    return match?.colorIndex ?? 0;
   }
 
   Future<void> _addRangeAnnotation(

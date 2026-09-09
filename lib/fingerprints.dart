@@ -5,6 +5,7 @@ import 'dart:math';
 
 import 'package:path/path.dart' as path;
 
+import 'atomic_file.dart';
 import 'domain.dart';
 import 'sections.dart';
 
@@ -1438,8 +1439,10 @@ class FingerprintSuggestionRepository {
           .map(FingerprintMatch.fromJson)
           .toList(growable: false);
     } on FormatException {
+      await quarantineCorruptFile(file);
       return const <FingerprintMatch>[];
     } on TypeError {
+      await quarantineCorruptFile(file);
       return const <FingerprintMatch>[];
     }
   }
@@ -1448,12 +1451,12 @@ class FingerprintSuggestionRepository {
       String practiceFolder, List<FingerprintMatch> matches) async {
     final file = File(path.join(practiceFolder, _filename));
     const encoder = JsonEncoder.withIndent('  ');
-    await file.writeAsString(
+    await writeFileAtomic(
+      file,
       encoder.convert(<String, dynamic>{
         'version': 2,
         'matches': matches.map((item) => item.toJson()).toList(),
       }),
-      flush: true,
     );
   }
 
@@ -1483,8 +1486,10 @@ class FingerprintDecisionRepository {
                 .toSet(),
       );
     } on FormatException {
+      await quarantineCorruptFile(file);
       return const FingerprintDecisions();
     } on TypeError {
+      await quarantineCorruptFile(file);
       return const FingerprintDecisions();
     }
   }
@@ -1521,13 +1526,13 @@ class FingerprintDecisionRepository {
       String practiceFolder, FingerprintDecisions decisions) async {
     final file = File(path.join(practiceFolder, _filename));
     const encoder = JsonEncoder.withIndent('  ');
-    await file.writeAsString(
+    await writeFileAtomic(
+      file,
       encoder.convert(<String, dynamic>{
         'version': 1,
         'accepted': decisions.accepted.map((item) => item.toJson()).toList(),
         'ignoredKeys': decisions.ignoredKeys.toList()..sort(),
       }),
-      flush: true,
     );
   }
 
@@ -1553,8 +1558,10 @@ class FingerprintLearningRepository {
             .toList(growable: false),
       );
     } on FormatException {
+      await quarantineCorruptFile(file);
       return const FingerprintLearning();
     } on TypeError {
+      await quarantineCorruptFile(file);
       return const FingerprintLearning();
     }
   }
@@ -1585,12 +1592,12 @@ class FingerprintLearningRepository {
       ));
     final file = File(path.join(mastersFolder, _filename));
     const encoder = JsonEncoder.withIndent('  ');
-    await file.writeAsString(
+    await writeFileAtomic(
+      file,
       encoder.convert(<String, dynamic>{
         'version': 1,
         'examples': examples.map((item) => item.toJson()).toList(),
       }),
-      flush: true,
     );
   }
 }
@@ -1609,8 +1616,10 @@ class FingerprintCorrectionRepository {
           .map(FingerprintCorrection.fromJson)
           .toList(growable: false);
     } on FormatException {
+      await quarantineCorruptFile(file);
       return const <FingerprintCorrection>[];
     } on TypeError {
+      await quarantineCorruptFile(file);
       return const <FingerprintCorrection>[];
     }
   }
@@ -1620,7 +1629,8 @@ class FingerprintCorrectionRepository {
     final corrections = await load(mastersFolder);
     final file = File(path.join(mastersFolder, _filename));
     const encoder = JsonEncoder.withIndent('  ');
-    await file.writeAsString(
+    await writeFileAtomic(
+      file,
       encoder.convert(<String, dynamic>{
         'version': 1,
         'corrections': <FingerprintCorrection>[
@@ -1628,7 +1638,6 @@ class FingerprintCorrectionRepository {
           correction,
         ].map((item) => item.toJson()).toList(),
       }),
-      flush: true,
     );
   }
 }
@@ -2342,16 +2351,6 @@ class _MasterTarget {
   final Recording recording;
   final SongSection? section;
   final AudioFingerprint fingerprint;
-}
-
-class _AlignedSectionCandidate {
-  const _AlignedSectionCandidate({
-    required this.section,
-    required this.confidence,
-  });
-
-  final SongSection section;
-  final double confidence;
 }
 
 class _AlignmentPoint {

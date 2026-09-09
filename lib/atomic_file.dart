@@ -35,3 +35,27 @@ Future<void> writeFileAtomic(File file, String contents) async {
     rethrow;
   }
 }
+
+/// Moves a metadata file that failed to parse out of the way, keeping its
+/// bytes, so the caller can safely fall back to an empty state and write a
+/// fresh file without destroying the only copy of whatever was in it.
+///
+/// Used for files where "refuse to open" is the wrong response -- fingerprint
+/// suggestions, decisions, learning, and corrections are not referenced by
+/// UUID from anything else, so the practice can keep working without them.
+/// Silently returning empty and then overwriting on the next write, which is
+/// what these repositories used to do, would have erased ear-verified
+/// decisions that cannot be recomputed.
+///
+/// Returns the quarantine path, or null if the move failed (the original is
+/// left untouched in that case).
+Future<File?> quarantineCorruptFile(File file) async {
+  if (!await file.exists()) return null;
+  final stamp = DateTime.now().toUtc().millisecondsSinceEpoch;
+  final target = File('${file.path}.corrupt-$stamp');
+  try {
+    return await file.rename(target.path);
+  } on FileSystemException {
+    return null;
+  }
+}

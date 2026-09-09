@@ -324,9 +324,6 @@ class _SectionTimelineState extends State<SectionTimeline> {
     );
   }
 
-  bool _hitsSection(int milliseconds) => widget.sections.any((section) =>
-      milliseconds >= section.startMs && milliseconds <= section.endMs);
-
   void _handleSectionPointerDown(
     BuildContext context,
     SongSection section,
@@ -417,11 +414,6 @@ class _SectionTimelineState extends State<SectionTimeline> {
         (leftIndex - rightIndex).abs() == 1;
   }
 
-  int _millisecondsFor(double dx, BoxConstraints constraints) =>
-      (widget.duration.inMilliseconds *
-              (dx / constraints.maxWidth).clamp(0, 1).toDouble())
-          .round();
-
   List<_TimelineGap> _gaps() {
     final sorted = widget.sections.toList()
       ..sort((a, b) => a.startMs.compareTo(b.startMs));
@@ -436,13 +428,6 @@ class _SectionTimelineState extends State<SectionTimeline> {
     final end = widget.duration.inMilliseconds;
     if (cursor < end) gaps.add(_TimelineGap(cursor, end));
     return gaps.where((gap) => gap.endMs - gap.startMs >= 250).toList();
-  }
-
-  _TimelineGap? _gapFor(int milliseconds) {
-    for (final gap in _gaps()) {
-      if (milliseconds >= gap.startMs && milliseconds <= gap.endMs) return gap;
-    }
-    return null;
   }
 
   Future<void> _showSectionMenu(
