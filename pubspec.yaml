@@ -15,7 +15,10 @@ dependencies:
   media_kit_libs_audio: ^1.0.7
   shared_preferences: ^2.5.5
   googleapis: ^16.0.0
-  googleapis_auth: ^2.3.2
+  # Pinned: google_drive_sync.dart imports a private src/ path from this
+  # package for the PKCE auth-code flow. A minor bump can break sign-in and
+  # OAuth has no automated coverage to catch it. Unpin when that import is gone.
+  googleapis_auth: 2.3.2
   http: ^1.6.0
   url_launcher: ^6.3.2
   package_info_plus: ^9.0.1
@@ -27,5 +30,9 @@ dev_dependencies:
 
 flutter:
   uses-material-design: true
+  # The whole directory rather than google_oauth.json by name: that file is
+  # gitignored (it holds the OAuth client), so naming it would break the build
+  # on a fresh clone. Declaring the directory bundles it when present and
+  # tolerates its absence; the app then falls back to the Preferences override.
   assets:
-    - assets/google_oauth.json
+    - assets/

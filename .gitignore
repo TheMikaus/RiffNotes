@@ -14,3 +14,6 @@ token.json
 *.riffnotes-cache
 artifacts/
 
+
+# Local OAuth client -- never commit. See docs/google-drive-setup.md.
+assets/google_oauth.json

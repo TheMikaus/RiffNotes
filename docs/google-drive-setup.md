@@ -14,7 +14,7 @@ Google does not allow the OAuth consent flow to run inside a normal embedded web
 
 Implemented in the app:
 
-- Load a bundled Google OAuth desktop client from `assets/google_oauth.json`.
+- Load a bundled Google OAuth desktop client from `assets/google_oauth.json` when the file is present at build time. The file is gitignored; `assets/google_oauth.example.json` shows the shape.
 - Keep a manual OAuth override in Preferences for development/testing builds.
 - Open the browser for Google sign-in.
 - Store refresh credentials locally for later sessions.
@@ -27,7 +27,7 @@ Implemented in the app:
 
 Still to build:
 
-- Conflict preview and overwrite protection for remote sync.
+- Conflict preview for remote sync. (Overwrite protection exists since v0.6.11: downloads skip files whose local copy is newer, and report the count.)
 - Move stored credentials into OS-protected credential storage.
 - A smoother first-run onboarding flow for Drive-only setups.
 
@@ -42,16 +42,20 @@ This is a maintainer/release step, not something each user should do.
 5. Create an OAuth 2.0 Client ID.
 6. Choose `Desktop app` as the application type.
 7. Copy the generated client ID and client secret.
-8. Put them in `assets/google_oauth.json` before building the release:
+8. Copy `assets/google_oauth.example.json` to `assets/google_oauth.json` and fill in the values before building the release:
 
 ```json
 {
-  "client_id": "YOUR_CLIENT_ID.apps.googleusercontent.com",
-  "client_secret": "YOUR_CLIENT_SECRET"
+  "installed": {
+    "client_id": "YOUR_CLIENT_ID.apps.googleusercontent.com",
+    "client_secret": "YOUR_CLIENT_SECRET"
+  }
 }
 ```
 
-Installed desktop apps cannot truly keep a client secret secret, so the app still treats this as public app configuration rather than a user password.
+`assets/google_oauth.json` is gitignored. **Do not commit it.** It was tracked in this public repository from v0.6.7 (commit `872dca0`, 2026-06-25) until v0.6.11, so the client created then should be treated as exposed and rotated in the Google Cloud Console.
+
+Installed desktop apps cannot truly keep a client secret secret — Google's own guidance says as much — so exposure means quota abuse or impersonation of the app's consent screen, not access to anyone's Drive. It is still worth rotating.
 
 ## Connect in RiffNotes
 
