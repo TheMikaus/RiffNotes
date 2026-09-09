@@ -219,8 +219,34 @@ wrong and worth reporting.
 
 ---
 
+## 12. Corrupt fingerprint decisions are quarantined, not overwritten (B16)
+
+| | |
+|---|---|
+| **Do** | Pick a practice with accepted/ignored fingerprint decisions. Close the app. Truncate the decisions file: <br>`Set-Content D:\Band-Test\2026-07-22\.riffnotes.fingerprint-decisions.json '{"accepted": [{'` <br>Relaunch, open the practice, accept one fingerprint suggestion. |
+| **Expect** | A file named `.riffnotes.fingerprint-decisions.json.corrupt-<number>` now exists next to the fresh decisions file, and it still contains the truncated text you wrote. |
+| **Fails if** | No `.corrupt-` file — the damaged decisions were overwritten and are gone. |
+
+---
+
+## 13. Fresh clone builds without the OAuth file (B15)
+
+Only needed if you or a bandmate ever build from a clean checkout.
+
+| | |
+|---|---|
+| **Do** | `git clone` the repo to a new folder. Do **not** copy `assets/google_oauth.json` in. Run `flutter build windows`. |
+| **Expect** | Build succeeds. Launching the app and opening Preferences → Google Drive account shows the client is not configured, with the `Import JSON` / `Add OAuth` path available. |
+| **Fails if** | The build errors on a missing asset — the `pubspec.yaml` directory declaration is not taking effect. |
+
+---
+
 ## Automated coverage for reference
 
-`flutter test` — 47 tests. Covers catalogue durability, atomic writes, retained entries, and both
-sync directions against an in-memory Drive store. It does **not** cover `DriveApiFileStore`, the
-adapter that talks to Google, which is why step 6 exists.
+`flutter test` — 57 tests. Covers catalogue durability, atomic writes, retained entries, fingerprint
+repository quarantine, and both sync directions against an in-memory Drive store. It does **not**
+cover `DriveApiFileStore`, the adapter that talks to Google, which is why step 6 exists.
+
+**Before running any of this:** rotate the OAuth client in Google Cloud Console (see
+`google-drive-setup.md`) and drop the new `google_oauth.json` into `assets/`. The old client id and
+secret are in public git history.

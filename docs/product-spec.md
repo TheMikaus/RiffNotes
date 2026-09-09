@@ -33,7 +33,7 @@ Make band-practice review fast: identify takes, listen, annotate, share notes, p
 19. Direct Google Drive sync is available for selected practices and Initialize Sync. The user can choose between the Drive API and a local mirror path when initializing sync.
 20. The UI remains interactive during scanning, waveform generation, conversion, matching, export, and sync. Each task gives a name, live status, measurable progress when available, and a completion/failure result. Sync operations support cancellation.
 21. Preferences persist, including the Windows-login-derived user name, editable display name, Band Folder, Masters folder, selected sync folder, and playback settings.
-22. Metadata survives rename/conversion flows and is backed up before destructive operations where applicable.
+22. Metadata survives rename/conversion flows. Portable metadata files are written atomically (temp file, then rename) so an interrupted write cannot truncate them, and a metadata file that fails to parse is quarantined with its bytes intact rather than overwritten. There is no separate backup step before destructive operations.
 23. If a selected practice contains numbered multitrack folders (for example `12/` with multiple tracks), the user can preview a bulk mixdown, create stereo `12.wav` outputs in the practice root, and archive the source folders to `mixed_Down`.
 
 ## Next refinement areas

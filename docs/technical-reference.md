@@ -199,7 +199,7 @@ Two independent implementations with matching semantics.
 
 **10.2 Google Drive** — split across three files so the algorithms are testable: `drive_file_store.dart` (the `DriveFileStore` interface), `drive_api_file_store.dart` (the Drive API adapter), and `drive_folder_sync.dart` (`DriveFolderSync`, the upload/download algorithms). `google_drive_sync.dart` keeps OAuth and delegates. Tests drive `DriveFolderSync` against `FakeDriveFileStore` with no network.
 
-OAuth via loopback redirect with PKCE and state validation (`_clientViaRiffNotesBrowserFlow`), using the bundled client in `assets/google_oauth.json` (overridable in Preferences). Credentials persist to `SharedPreferences`; `credentialUpdates` re-saves refreshed tokens.
+OAuth via loopback redirect with PKCE and state validation (`_clientViaRiffNotesBrowserFlow`), using the bundled client in `assets/google_oauth.json` when present at build time (gitignored; `assets/google_oauth.example.json` is the template; overridable in Preferences). `pubspec.yaml` declares the `assets/` directory rather than the file by name so a fresh clone still builds. Credentials persist to `SharedPreferences`; `credentialUpdates` re-saves refreshed tokens.
 
 `uploadLocalFolder` / `downloadFolderToLocal` mirror the local semantics against the Drive API: paginated recursive listing (`_listChildren`), idempotent folder creation (`_ensureChildFolder`, `_ensureDriveFolderPath`), the same skip list, same flags. `includeLocalRootFolder: false` lets Initialize Sync operate on the band folder as a whole.
 
@@ -228,14 +228,17 @@ Findings from the v0.6.10 audit; fixes shipped in v0.6.11. Fixed items list the 
 | B7 | The configured chroma weight is divided across the twelve bins, so the knob means what it says. This moves the chroma group from ~28% of the score to ~3.2% with defaults. **Whether that is an improvement is unmeasured** -- chroma carries song identity while the envelope features largely encode mic and room, so the accidental 28% may have matched better. Setting chroma to `1.44` reproduces the old scoring for a direct comparison; see step 10 of [manual-test-plan.md](manual-test-plan.md). |
 | B9 | `mixed_Down` is excluded from sync, via one `shouldSkipSyncPath` now shared by both implementations. |
 | B12 | Downloads stream to a temp file and rename into place, so an interrupted download leaves no truncated file. |
+| B11 | `product-spec.md` §22 no longer claims a backup step that does not exist; it now describes atomic writes and quarantine, which do. |
+| B15 | `assets/google_oauth.json` (OAuth client id + secret) was tracked in this public repo from `872dca0` (2026-06-25). Untracked, gitignored, example template added, `pubspec.yaml` switched to the `assets/` directory so the build tolerates its absence. **The secret is still in git history and must be rotated in Google Cloud Console** -- see `google-drive-setup.md`. |
+| B16 | The four fingerprint repositories (suggestions, decisions, learning, corrections) swallowed `FormatException`/`TypeError` and returned empty, then the next write overwrote the damaged file -- the B1 pattern applied to ear-verified decisions. They now call `quarantineCorruptFile`, which renames the file to `<name>.corrupt-<ms>` with its bytes intact before falling back to empty, and write atomically. Chosen over B1's refuse-to-open because nothing references these files by UUID, so the practice keeps working without them. |
+| B17 | Five unused private declarations removed (`_AlignedSectionCandidate`, `_splitLabel`, `_suggestSectionColor`, `_hitsSection`, `_millisecondsFor`, `_gapFor`). Analyzer is now warning-free. |
 
 ### Open
 
 | ID | Area | Defect |
 |---|---|---|
 | B8 | `fingerprints.dart::_sliceFingerprint` | Slices inherit the parent track's global min-max normalization, so section comparisons are scale-mismatched. Fixing this changes match scores, so it needs the labelled evaluation set first. |
-| B10 | `google_drive_sync.dart:8` | Imports `package:googleapis_auth/src/...` (private). Left in place deliberately: replacing it means reimplementing the PKCE auth-code flow, and OAuth has no test coverage to catch a regression. Pin `googleapis_auth` and revisit with the auth flow under test. |
-| B11 | -- | `product-spec.md` item 22 claims backup-before-destructive; no backup code exists. Either implement or drop the claim. |
+| B10 | `google_drive_sync.dart:8` | Imports `package:googleapis_auth/src/...` (private). Left in place deliberately: replacing it means reimplementing the PKCE auth-code flow, and OAuth has no test coverage to catch a regression. **`googleapis_auth` is now pinned to `2.3.2`** in `pubspec.yaml` so a resolver bump cannot break sign-in. Revisit with the auth flow under test. |
 | B13 | `app_preferences.dart` | Drive refresh token stored in plaintext `SharedPreferences`. |
 | B14 | `drive_api_file_store.dart` | Drive permits duplicate names in one folder; the relative-path map keeps only the last. |
 
