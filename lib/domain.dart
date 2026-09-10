@@ -5,6 +5,7 @@ import 'dart:math';
 import 'package:path/path.dart' as path;
 
 import 'atomic_file.dart';
+import 'user_catalogue.dart';
 
 /// Thrown when a practice folder's catalogue exists but cannot be parsed.
 ///
@@ -75,22 +76,38 @@ class Recording {
     required this.file,
     required this.title,
     required this.isBestTake,
+    this.bestTakeUsers = const <String>[],
   });
 
   final String id;
   final File file;
+
+  /// Merged across every user's fragment: the most recently set title wins.
   final String? title;
+
+  /// True when any user has starred this take. Best Take is an opinion, not a
+  /// shared fact, so one bandmate's star is never removed by another.
   final bool isBestTake;
+
+  /// Who starred it. Empty when [isBestTake] comes from a legacy shared
+  /// catalogue written before per-user fragments existed.
+  final List<String> bestTakeUsers;
 
   String get filename => path.basename(file.path);
   String get extension => path.extension(file.path).toLowerCase();
 
-  Recording copyWith({String? title, bool? isBestTake, File? file}) =>
+  Recording copyWith({
+    String? title,
+    bool? isBestTake,
+    File? file,
+    List<String>? bestTakeUsers,
+  }) =>
       Recording(
         id: id,
         file: file ?? this.file,
         title: title ?? this.title,
         isBestTake: isBestTake ?? this.isBestTake,
+        bestTakeUsers: bestTakeUsers ?? this.bestTakeUsers,
       );
 }
 
@@ -109,7 +126,25 @@ class RenameProposal {
 }
 
 class PracticeRepository {
+  /// [currentUser] supplies the display name that owns any write to titles or
+  /// Best Take. Read-only callers (discovery, the fingerprint isolate) may
+  /// omit it; write paths throw a clear error instead of guessing a name.
+  PracticeRepository({String Function()? currentUser})
+      : _currentUser = currentUser;
+
   static const _catalogueName = 'library.riffnotes.json';
+
+  final String Function()? _currentUser;
+  final _userCatalogues = UserCatalogueRepository();
+
+  String _requireUser() {
+    final user = _currentUser?.call().trim();
+    if (user == null || user.isEmpty) {
+      throw StateError(
+          'A display name is required before take details can be saved.');
+    }
+    return user;
+  }
 
   Future<List<PracticeFolder>> discoverBandFolder(Directory bandFolder) async {
     final practices = <PracticeFolder>[];
@@ -135,7 +170,8 @@ class PracticeRepository {
   Future<PracticeFolder> openPractice(Directory folder) async {
     final catalogue = await _loadCatalogue(folder);
     final seenFilenames = <String>{};
-    final recordings = <Recording>[];
+    final discovered =
+        <({String id, File file, String? legacyTitle, bool legacyBestTake})>[];
     var catalogueChanged = false;
     await for (final entity in folder.list()) {
       if (entity is File &&
@@ -171,19 +207,34 @@ class PracticeRepository {
           };
           catalogueChanged = true;
         }
-        recordings.add(Recording(
+        discovered.add((
           id: id,
           file: entity,
-          title: entry?['title'] as String?,
-          isBestTake: entry?['isBestTake'] as bool? ?? false,
+          legacyTitle: entry?['title'] as String?,
+          legacyBestTake: entry?['isBestTake'] as bool? ?? false,
         ));
       }
     }
     // Entries whose files are absent are deliberately retained. On a partially
     // synced machine the audio for a take may simply not be here yet, and
-    // pruning would push a catalogue with missing titles and Best Take flags
-    // over the complete copy on the next upload. Deliberate removal happens
-    // only through deleteRecording, where the user has confirmed it.
+    // pruning would drop the filename-to-id mapping the notes depend on.
+    // Deliberate removal happens only through deleteRecording.
+    //
+    // Titles and Best Take live in per-user fragments; the shared catalogue
+    // only maps filenames to ids. Legacy values still present in the shared
+    // file are preserved on rewrite and honoured until a fragment claims the
+    // field, so a folder last written by an older build keeps its titles.
+    final fragments = await _userCatalogues.loadAll(folder);
+    final recordings = <Recording>[
+      for (final item in discovered)
+        _mergedRecording(
+          fragments,
+          id: item.id,
+          file: item.file,
+          legacyTitle: item.legacyTitle,
+          legacyBestTake: item.legacyBestTake,
+        ),
+    ];
     recordings.sort((a, b) => a.filename.compareTo(b.filename));
     if (catalogueChanged) {
       await _writeCatalogue(folder, catalogue);
@@ -197,20 +248,32 @@ class PracticeRepository {
     required String? title,
     required bool isBestTake,
   }) async {
-    final catalogue = await _loadCatalogue(practice.directory);
-    catalogue[recording.filename] = <String, dynamic>{
-      'id': recording.id,
-      'title': title,
-      'isBestTake': isBestTake,
-      ...await _fileMetadata(recording.file),
-    };
-    await _writeCatalogue(practice.directory, catalogue);
+    final user = _requireUser();
+    // Only the fields that actually changed are written, so a Best Take
+    // toggle never re-stamps the title (see UserCatalogueEntry). The Best
+    // Take comparison looks at both the merged flag and this user's own flag:
+    // if the merged star comes from a legacy shared catalogue, the only way to
+    // clear it is for a fragment to claim the field with false.
+    final ownStar = recording.bestTakeUsers.contains(user);
+    await _userCatalogues.update(
+      practice.directory,
+      user,
+      recording.id,
+      setTitle: title != recording.title,
+      title: title,
+      setBestTake: isBestTake != recording.isBestTake || isBestTake != ownStar,
+      isBestTake: isBestTake,
+    );
 
-    final updatedRecording = Recording(
+    final catalogue = await _loadCatalogue(practice.directory);
+    final legacy = catalogue[recording.filename] as Map<String, dynamic>?;
+    final fragments = await _userCatalogues.loadAll(practice.directory);
+    final updatedRecording = _mergedRecording(
+      fragments,
       id: recording.id,
       file: recording.file,
-      title: title,
-      isBestTake: isBestTake,
+      legacyTitle: legacy?['title'] as String?,
+      legacyBestTake: legacy?['isBestTake'] as bool? ?? false,
     );
     return practice.copyWith(
       recordings: practice.recordings
@@ -227,7 +290,35 @@ class PracticeRepository {
     final catalogue = await _loadCatalogue(practice.directory);
     catalogue.remove(recording.filename);
     await _writeCatalogue(practice.directory, catalogue);
+    // Tidy this user's own fragment. Other users' entries for the id stay:
+    // they are inert without a mapping, and not ours to remove.
+    final user = _currentUser?.call().trim();
+    if (user != null && user.isNotEmpty) {
+      await _userCatalogues.remove(practice.directory, user, recording.id);
+    }
     return openPractice(practice.directory);
+  }
+
+  Recording _mergedRecording(
+    List<UserCatalogue> fragments, {
+    required String id,
+    required File file,
+    required String? legacyTitle,
+    required bool legacyBestTake,
+  }) {
+    final merged = mergeRecordingMetadata(
+      fragments,
+      id,
+      legacyTitle: legacyTitle,
+      legacyBestTake: legacyBestTake,
+    );
+    return Recording(
+      id: id,
+      file: file,
+      title: merged.title,
+      isBestTake: merged.isBestTake,
+      bestTakeUsers: merged.bestTakeUsers,
+    );
   }
 
   Future<PracticeFolder> replaceRecordingFile(

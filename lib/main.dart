@@ -55,9 +55,12 @@ class LibraryScreen extends StatefulWidget {
 }
 
 class _LibraryScreenState extends State<LibraryScreen> {
-  final _repository = PracticeRepository();
+  // late: the user callback reads _preferences, which initState assigns.
+  late final _repository =
+      PracticeRepository(currentUser: () => _preferences.displayName);
   final _annotations = AnnotationRepository();
-  final _sectionsRepository = SongSectionRepository();
+  late final _sectionsRepository =
+      SongSectionRepository(currentUser: () => _preferences.displayName);
   final _syncRepository = PracticeSyncRepository();
   final _googleDriveSync = GoogleDriveSyncRepository();
   final _activity = ActivityQueue();
@@ -7142,9 +7145,15 @@ class _RecordingList extends StatelessWidget {
                           ),
                         if (!isMasters)
                           IconButton(
-                            tooltip: recording.isBestTake
-                                ? 'Remove Best Take'
-                                : 'Mark Best Take',
+                            // Best Take is per user; name who starred it so a
+                            // star that survives your own un-star makes sense.
+                            tooltip: !recording.isBestTake
+                                ? 'Mark Best Take'
+                                : recording.bestTakeUsers.isEmpty
+                                    ? 'Remove Best Take'
+                                    : 'Best Take: '
+                                        '${recording.bestTakeUsers.join(', ')}'
+                                        ' (click to toggle yours)',
                             icon: Icon(recording.isBestTake
                                 ? Icons.star
                                 : Icons.star_border),

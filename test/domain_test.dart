@@ -39,7 +39,7 @@ void main() {
     addTearDown(() => folder.delete(recursive: true));
     await File('${folder.path}${Platform.pathSeparator}take.wav')
         .writeAsBytes([1, 2, 3]);
-    final repository = PracticeRepository();
+    final repository = PracticeRepository(currentUser: () => 'Alex');
     final initial = await repository.openPractice(folder);
 
     final updated = await repository.updateRecording(
@@ -67,7 +67,7 @@ void main() {
         .writeAsBytes([1]);
     await File('${folder.path}${Platform.pathSeparator}second.mp3')
         .writeAsBytes([2]);
-    final repository = PracticeRepository();
+    final repository = PracticeRepository(currentUser: () => 'Alex');
     var practice = await repository.openPractice(folder);
     practice = await repository.updateRecording(
         practice, practice.recordings[0],
@@ -105,7 +105,7 @@ void main() {
     final second = File('${folder.path}${Platform.pathSeparator}second.mp3');
     await first.writeAsBytes([1]);
     await second.writeAsBytes([2]);
-    final repository = PracticeRepository();
+    final repository = PracticeRepository(currentUser: () => 'Alex');
     var practice = await repository.openPractice(folder);
     expect(practice.recordings, hasLength(2));
 
@@ -129,7 +129,7 @@ void main() {
     addTearDown(() => folder.delete(recursive: true));
     final original = File('${folder.path}${Platform.pathSeparator}rough.wav');
     await original.writeAsBytes([1, 2, 3, 4]);
-    final repository = PracticeRepository();
+    final repository = PracticeRepository(currentUser: () => 'Alex');
     var practice = await repository.openPractice(folder);
     practice = await repository.updateRecording(
       practice,
@@ -182,7 +182,7 @@ void main() {
     addTearDown(() async {
       if (await folder.exists()) await folder.delete(recursive: true);
     });
-    final repository = SongSectionRepository();
+    final repository = SongSectionRepository(currentUser: () => 'Alex');
     const original = SongSection(
         recordingId: 'take-1', startMs: 0, endMs: 10000, label: 'Intro');
     await repository.add(folder.path, original);
@@ -834,7 +834,7 @@ void main() {
 
     test('refuses to open a practice whose catalogue is malformed', () async {
       final folder = await practiceWithTake();
-      final repository = PracticeRepository();
+      final repository = PracticeRepository(currentUser: () => 'Alex');
       final original = await repository.openPractice(folder);
       final id = original.recordings.single.id;
 
@@ -857,7 +857,7 @@ void main() {
 
     test('refuses to open a practice whose catalogue is empty', () async {
       final folder = await practiceWithTake();
-      final repository = PracticeRepository();
+      final repository = PracticeRepository(currentUser: () => 'Alex');
       await repository.openPractice(folder);
       await catalogueIn(folder).writeAsString('');
 
@@ -884,7 +884,7 @@ void main() {
       await catalogueIn(bad).writeAsString('not json at all');
 
       final practices =
-          await PracticeRepository().discoverBandFolder(band);
+          await PracticeRepository(currentUser: () => 'Alex').discoverBandFolder(band);
 
       expect(practices, hasLength(2));
       final broken =
@@ -900,7 +900,7 @@ void main() {
     test('keeps catalogue entries for takes that are not present locally',
         () async {
       final folder = await practiceWithTake();
-      final repository = PracticeRepository();
+      final repository = PracticeRepository(currentUser: () => 'Alex');
       final practice = await repository.openPractice(folder);
       await repository.updateRecording(
         practice,
@@ -919,9 +919,8 @@ void main() {
           as Map<String, dynamic>;
       final entries = persisted['recordings'] as Map<String, dynamic>;
       expect(entries.containsKey('take.wav'), isTrue,
-          reason: 'pruning here would destroy the title on the next upload');
-      expect((entries['take.wav'] as Map<String, dynamic>)['title'],
-          'Dead Reckoning');
+          reason: 'pruning here would drop the id mapping on the next upload');
+      expect((entries['take.wav'] as Map<String, dynamic>)['id'], isNotNull);
 
       // When the file arrives, it reattaches to the same id and title.
       await File('${folder.path}${Platform.pathSeparator}take.wav')
@@ -933,7 +932,7 @@ void main() {
 
     test('deleting a take does remove its catalogue entry', () async {
       final folder = await practiceWithTake();
-      final repository = PracticeRepository();
+      final repository = PracticeRepository(currentUser: () => 'Alex');
       final practice = await repository.openPractice(folder);
 
       await repository.deleteRecording(practice, practice.recordings.single);

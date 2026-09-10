@@ -6,6 +6,7 @@ import 'package:path/path.dart' as path;
 
 import 'atomic_file.dart';
 import 'domain.dart';
+import 'user_names.dart';
 
 /// A review comment. A point note has no [endMs]; a range note has a distinct
 /// start/end span. Song-structure sections deliberately use a separate model.
@@ -139,9 +140,7 @@ class AnnotationRepository {
   }
 
   File _fileFor(String folder, String user) =>
-      File(path.join(folder, '.riffnotes.${_safeUser(user)}.bandnotes'));
-  String _safeUser(String user) =>
-      user.trim().replaceAll(RegExp(r'[^a-zA-Z0-9_-]'), '_');
+      File(path.join(folder, '.riffnotes.${safeUserName(user)}.bandnotes'));
   String _id() =>
       '${DateTime.now().microsecondsSinceEpoch}-${Random.secure().nextInt(1 << 32)}';
 }
