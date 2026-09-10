@@ -27,7 +27,7 @@ Implemented in the app:
 
 Still to build:
 
-- Conflict preview for remote sync. (Overwrite protection exists since v0.6.11: downloads skip files whose local copy is newer, and report the count.)
+- Conflict preview for remote sync. (Overwrite protection exists since v0.7.0: downloads skip files whose local copy is newer, and report the count.)
 - Move stored credentials into OS-protected credential storage.
 - A smoother first-run onboarding flow for Drive-only setups.
 
@@ -53,7 +53,7 @@ This is a maintainer/release step, not something each user should do.
 }
 ```
 
-`assets/google_oauth.json` is gitignored. **Do not commit it.** It was tracked in this public repository from v0.6.7 (commit `872dca0`, 2026-06-25) until v0.6.11, so the client created then should be treated as exposed and rotated in the Google Cloud Console.
+`assets/google_oauth.json` is gitignored. **Do not commit it.** It was tracked in this public repository from v0.6.7 (2026-06-25) until 2026-09-09, when it was removed from the working tree and purged from git history. Roughly two and a half months of public exposure means the client created then should be treated as compromised and rotated in the Google Cloud Console; a history rewrite does not un-leak anything.
 
 Installed desktop apps cannot truly keep a client secret secret — Google's own guidance says as much — so exposure means quota abuse or impersonation of the app's consent screen, not access to anyone's Drive. It is still worth rotating.
 

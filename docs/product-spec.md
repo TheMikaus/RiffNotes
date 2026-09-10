@@ -23,7 +23,7 @@ Make band-practice review fast: identify takes, listen, annotate, share notes, p
 9. Notes and sections are clickable playback targets. Range notes play the selected range; sections can jump to start and loop.
 10. Sections are shown in their own lane on the waveform and can be added/adjusted from that lane.
 11. Best Take is a multi-select flag, not a single winner.
-12. Each user has an independent portable note file; all discovered users' notes are readable.
+12. Each user has independent portable files for notes, titles/Best Take, and section layouts; all discovered users' files are readable and merged on read. Two machines never write the same file.
 13. The practice review view shows notes across the selected practice and can jump playback to the referenced clip.
 14. The user can export selected regions or processed tracks as WAV or MP3.
 15. WAV/WAVE/FLAC recordings can be converted to MP3 via FFmpeg; after a successful conversion the recording mapping is updated.
@@ -47,7 +47,7 @@ Make band-practice review fast: identify takes, listen, annotate, share notes, p
 
 ## Portable practice metadata
 
-`library.riffnotes.json` contains the recordings catalogue, aliases, and Best Take state. User annotations are JSON content in files named `.riffnotes.<user>.bandnotes`. Track sections are stored in `.riffnotes.<recording-id>.sections.json` files so section edits stay portable with the practice folder.
+`library.riffnotes.json` maps each audio filename to a stable recording id. Everything a user edits is per user: titles and Best Take in `.riffnotes.<user>.catalogue.json` (newest title wins; Best Take is true if anyone starred it), annotations in `.riffnotes.<user>.bandnotes`, and section layouts in `.riffnotes.<recording-id>.sections.<user>.json` (most recently saved layout wins; edits start from it). Legacy `title`/`isBestTake` fields and `.riffnotes.<recording-id>.sections.json` files written before v0.7.0 are still read, never rewritten. See `technical-reference.md` §1 for the merge rules.
 
 Each recording has a generated UUID and current filename. All cross-references use UUIDs, never filenames.
 

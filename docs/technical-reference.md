@@ -18,6 +18,7 @@ Break any of these and something corrupts silently. Read this section before cha
 | I4 | **Anything slower than ~200 ms runs through `ActivityQueue`.** | The app scans folders, shells out to FFmpeg, and moves gigabytes. A frozen window reads as a crash. |
 | I5 | **Audio is never mutated in place.** Every transformation writes a new file or a cache entry. | Rehearsal recordings are irreplaceable. The only exceptions are explicit, confirmed, verified flows (§7.4, §7.5). |
 | I6 | **Portable metadata is written atomically** via `writeFileAtomic`, never `writeAsString`. | A truncated `library.riffnotes.json` violates I3. |
+| I7 | **User-editable metadata is written only to the current user's fragment, never to a shared file.** Titles, Best Take, sections, and notes all follow this. | Two machines never write the same file, so Drive sync cannot clobber a bandmate. Repositories that write take a `currentUser` callback and throw without one. |
 
 **Architecture in one line:** `_LibraryScreenState` in `lib/main.dart` owns one instance of every repository and controller and drives the whole UI. Repositories are stateless classes doing filesystem and `Process` work; controllers are `ChangeNotifier`s. No state-management package.
 
@@ -31,13 +32,23 @@ Inside each practice folder:
 
 | File | Scope | Contents |
 |---|---|---|
-| `library.riffnotes.json` | shared | Catalogue: `filename → {id, title, isBestTake, size, modifiedMs}` |
+| `library.riffnotes.json` | shared, effectively append-only | `filename → {id, size, modifiedMs}`. Legacy `title`/`isBestTake` from pre-0.7.0 builds are preserved and read as a fallback but never written. |
+| `.riffnotes.<user>.catalogue.json` | **per user** | `{recordingId → {title, titleUpdatedAt, isBestTake, bestTakeUpdatedAt}}`. Fields stamped independently. |
 | `.riffnotes.<user>.bandnotes` | **per user** | One user's point and range annotations |
-| `.riffnotes.<recording-id>.sections.json` | shared | Song sections for one track |
+| `.riffnotes.<recording-id>.sections.<user>.json` | **per user** | One user's complete section layout for a track, with `updatedAt` |
+| `.riffnotes.<recording-id>.sections.json` | legacy | Pre-0.7.0 layout; read as the oldest candidate, never written |
 | `.riffnotes-cache/` | local only | Regenerable waveform, processed-audio, fingerprint caches |
 | `mixed_Down/` | shared | Archived multitrack source folders after bulk mixdown |
 
-**Why per-user notes:** avoids merges entirely — each person writes only their own file, everyone reads all files. **Known gap:** the catalogue and sections files are *not* per-user, so titles, Best Take, and sections are still last-writer-wins across machines. Newer-wins protection (§10) prevents an older copy from overwriting a newer one, but two people editing the same field between syncs will still resolve to one winner.
+**Why per-user files:** avoids merging files entirely — each person writes only their own, everyone reads all of them. Merging happens on read, per field:
+
+- **Title** — most recent `titleUpdatedAt` across users wins; ties break on user name so both machines agree. Legacy shared value used only while no fragment claims the title.
+- **Best Take** — an opinion, not a fact: true if anyone starred it, `Recording.bestTakeUsers` says who. A legacy star stops counting the moment any fragment claims the field, which is the only way it can be cleared.
+- **Sections** — document-level recency: the most recently saved layout wins, ties prefer a fragment over legacy then the smallest user name. Every edit loads the winning layout first, so a bandmate's sections are carried forward. Overlapping ranges cannot be merged entry-by-entry, hence whole-layout.
+
+**Why the UUID map stays shared:** if two machines each minted an id for the same new file, notes would fork. Ids are minted once (on the machine that recorded the take) and sync out with the audio; the shared file is effectively append-only and no longer carries any user-edited field.
+
+**Rollout:** old builds ignore the new files and keep reading the legacy fields, which the new build preserves but never writes. Nothing is lost; the old machine just does not see new edits until it upgrades.
 
 **Why `size` + `modifiedMs` in the catalogue:** `_findRenamedCatalogueEntry` re-attaches an entry to a renamed file by matching both, which is what preserves UUIDs (I1) when someone renames a take outside the app. It requires a *unique* match — ambiguity mints a new UUID rather than guessing wrong.
 
@@ -49,7 +60,7 @@ Inside each practice folder:
 
 Exclusions are centralized in `domain.dart` (`ignoredPracticeFolderNames`): `.backup`, `.cache`, `.riffnotes-cache`, `cache`, `mixed_down`, `masters`, plus any dot-prefixed folder. *Adding a generated folder means updating `ignoredPracticeFolderNames` in `domain.dart` (practice discovery), `shouldSkipSyncPath` in `drive_folder_sync.dart` (both sync directions, shared), and `test/domain_test.dart`.*
 
-**2.2 Practice open** — `PracticeRepository.openPractice`, the most load-bearing function in the codebase: load catalogue → list supported audio (`.wav .wave .mp3 .flac`) → per file, reuse entry by filename, else rename-detect by size+mtime, else mint a UUID → rewrite if changed. Entries whose audio is absent are **retained**, not pruned, so a partially synced machine cannot destroy the titles of takes it has not downloaded yet. It throws `CatalogueUnreadableException` rather than treating a damaged catalogue as empty.
+**2.2 Practice open** — `PracticeRepository.openPractice`, the most load-bearing function in the codebase: load catalogue → list supported audio (`.wav .wave .mp3 .flac`) → per file, reuse entry by filename, else rename-detect by size+mtime, else mint a UUID → rewrite if changed → load every `.riffnotes.<user>.catalogue.json` and merge per id (`mergeRecordingMetadata`, §1). Entries whose audio is absent are **retained**, not pruned, so a partially synced machine cannot drop the id mapping of takes it has not downloaded yet. It throws `CatalogueUnreadableException` rather than treating a damaged catalogue as empty. `updateRecording` writes only the changed fields to the current user's fragment; the shared file is untouched.
 
 **2.3 Selection memory** — `_selectPractice`, `_selectRecording`. Remembers band folder, last practice, and last recording *per practice*, falling back to the first take when the remembered one is gone. **Why:** you reopen the same practice across several review sessions.
 
@@ -91,7 +102,7 @@ Exclusions are centralized in `domain.dart` (`ignoredPracticeFolderNames`): `.ba
 
 ## 5. Sections
 
-`SongSection` + `SongSectionRepository` (`sections.dart`), stored per recording at `.riffnotes.<recording-id>.sections.json`.
+`SongSection` + `SongSectionRepository` (`sections.dart`), stored per recording **and per user** at `.riffnotes.<recording-id>.sections.<user>.json` (§1). `load` returns the most recently saved layout across users and the legacy file; every write loads that layout first, applies the change, and saves the whole list to the current user's fragment with a fresh `updatedAt`. The repository takes `currentUser` and `clock` callbacks; `main.dart` constructs it `late final` so it can read `_preferences.displayName`.
 
 | Operation | Handler |
 |---|---|
@@ -131,7 +142,7 @@ Stored at `.riffnotes.<user>.bandnotes` with `<user>` sanitized to `[a-zA-Z0-9_-
 
 ## 7. Take management
 
-**7.1 Title and Best Take** — `_editTitle`, `_quickSetRecordingTitle`, `_updateRecording` → `PracticeRepository.updateRecording`. **Quick titles** (`_quickSongTitlesForPractice`) offer one-click reuse of titles already used in this practice. **Why:** a rehearsal is the same handful of songs played repeatedly, so this is the single most repeated action in the app. Choosing a quick title also teaches the fingerprint system (§9.6). **Best Take is multi-select** — a practice usually yields several keepers for different reasons.
+**7.1 Title and Best Take** — `_editTitle`, `_quickSetRecordingTitle`, `_updateRecording` → `PracticeRepository.updateRecording`. **Quick titles** (`_quickSongTitlesForPractice`) offer one-click reuse of titles already used in this practice. **Why:** a rehearsal is the same handful of songs played repeatedly, so this is the single most repeated action in the app. Choosing a quick title also teaches the fingerprint system (§9.6). **Best Take is multi-select** — a practice usually yields several keepers for different reasons — **and per user** (§1): the star shows when anyone starred the take, the tooltip names who, and toggling writes only your own flag. `_updateRecording` funnels every title/star write through `PracticeRepository.updateRecording`, which stamps only the fields that changed.
 
 **7.2 Batch rename** — `_previewAndApplyRename` → `planRename` / `applyRename`. Target pattern `##_Title_Take#.<ext>`: sequence across the practice, take number per title. `planRename` flags `Duplicate target name` and `A different file already uses this name`; `applyRename` refuses to run while any remain. Execution is **two-phase** — every file renames to `.riffnotes-rename-<id>-<micros>` first, then to its target. **Why:** single-phase renaming breaks on cycles (`A→B`, `B→A`). The original catalogue JSON is held for rollback.
 
@@ -213,7 +224,7 @@ OAuth via loopback redirect with PKCE and state validation (`_clientViaRiffNotes
 
 ## 11. Defect status
 
-Findings from the v0.6.10 audit; fixes shipped in v0.6.11. Fixed items list the change so the reasoning is not lost.
+Findings from the v0.6.10 audit; fixes shipped in v0.7.0. Fixed items list the change so the reasoning is not lost.
 
 ### Fixed
 
@@ -229,9 +240,10 @@ Findings from the v0.6.10 audit; fixes shipped in v0.6.11. Fixed items list the 
 | B9 | `mixed_Down` is excluded from sync, via one `shouldSkipSyncPath` now shared by both implementations. |
 | B12 | Downloads stream to a temp file and rename into place, so an interrupted download leaves no truncated file. |
 | B11 | `product-spec.md` §22 no longer claims a backup step that does not exist; it now describes atomic writes and quarantine, which do. |
-| B15 | `assets/google_oauth.json` (OAuth client id + secret) was tracked in this public repo from `872dca0` (2026-06-25). Untracked, gitignored, example template added, `pubspec.yaml` switched to the `assets/` directory so the build tolerates its absence. **The secret is still in git history and must be rotated in Google Cloud Console** -- see `google-drive-setup.md`. |
+| B15 | `assets/google_oauth.json` (OAuth client id + secret) was tracked in this public repo from 2026-06-25 to 2026-09-09. Untracked, gitignored, purged from git history via `git filter-repo`, example template added, `pubspec.yaml` switched to the `assets/` directory so the build tolerates its absence. **The secret was public for ~2.5 months and must be rotated in Google Cloud Console** -- see `google-drive-setup.md`. |
 | B16 | The four fingerprint repositories (suggestions, decisions, learning, corrections) swallowed `FormatException`/`TypeError` and returned empty, then the next write overwrote the damaged file -- the B1 pattern applied to ear-verified decisions. They now call `quarantineCorruptFile`, which renames the file to `<name>.corrupt-<ms>` with its bytes intact before falling back to empty, and write atomically. Chosen over B1's refuse-to-open because nothing references these files by UUID, so the practice keeps working without them. |
 | B17 | Five unused private declarations removed (`_AlignedSectionCandidate`, `_splitLabel`, `_suggestSectionColor`, `_hitsSection`, `_millisecondsFor`, `_gapFor`). Analyzer is now warning-free. |
+| B18 | **Shared metadata had no merge** -- titles, Best Take, and sections were single shared files, last-writer-wins across machines. Now per-user fragments merged on read (§1): `user_catalogue.dart` for titles/Best Take with per-field timestamps, `sections.dart` with document-level recency. Shared `library.riffnotes.json` reduced to the filename→id map. Legacy values honoured until claimed. 27 tests across `user_catalogue_test.dart` and `sections_fragments_test.dart`. |
 
 ### Open
 
@@ -264,3 +276,4 @@ reports 0 copied.
 9. **Bump the fingerprint cache constants** when extraction changes (§9.1).
 10. **Write portable metadata with `writeFileAtomic`**, never `File.writeAsString` (I6).
 11. **New remote operations go on `DriveFileStore`**, not directly on `drive.DriveApi`, so sync stays testable.
+12. **Anything a user edits goes in a per-user file** (I7). A repository that writes such data takes `currentUser` (and `clock` if it stamps) as constructor callbacks and is constructed `late final` in `_LibraryScreenState`. Never add a user-editable field to `library.riffnotes.json`.

@@ -1,4 +1,4 @@
-# Manual test plan — v0.6.11 data-safety release
+# Manual test plan — v0.7.0 data-safety release
 
 Verifies the changes that automated tests cannot reach: real Google Drive behaviour, and the write
 paths against a real practice folder.
@@ -185,7 +185,7 @@ anything between runs — that would change `skipRecordingIds` and make the runs
 |---|---|
 | **Run A** | Preferences → Fingerprint weight profile → **Apply defaults** (chroma ≈ 3.2% of score). Run fingerprint matching on the practice. |
 | **Record** | Total takes matched; suggestions shown as actionable; how many of those are the *right* song; how many correct titles it missed entirely. |
-| **Run B** | Set the chroma weight to **`1.44`** and save the profile (chroma ≈ 28%, i.e. pre-v0.6.11 behaviour). Re-run matching on the same practice. |
+| **Run B** | Set the chroma weight to **`1.44`** and save the profile (chroma ≈ 28%, i.e. pre-v0.7.0 behaviour). Re-run matching on the same practice. |
 | **Record** | The same four numbers. |
 
 | Metric | Run A (chroma 0.12) | Run B (chroma 1.44) |
@@ -215,7 +215,7 @@ wrong and worth reporting.
 |---|---|
 | **Do** | On your **real** band folder (read-only actions): open several practices, switch takes, load waveforms, open Practice review, open the Masters library. |
 | **Expect** | No errors in the log. No practice reported unreadable. |
-| **Fails if** | Any practice that opened before v0.6.11 now reports "Cannot be opened" — that would mean the stricter catalogue reader is rejecting a file the old lenient reader tolerated. **Report the exact message.** |
+| **Fails if** | Any practice that opened before v0.7.0 now reports "Cannot be opened" — that would mean the stricter catalogue reader is rejecting a file the old lenient reader tolerated. **Report the exact message.** |
 
 ---
 
@@ -241,10 +241,48 @@ Only needed if you or a bandmate ever build from a clean checkout.
 
 ---
 
+## 14. Legacy titles and stars are still visible after upgrading
+
+| | |
+|---|---|
+| **Do** | Open a practice you titled and starred with v0.6.10 (before per-user files existed). |
+| **Expect** | Titles and stars show exactly as before. The star tooltip reads "Remove Best Take" (no names — legacy stars belong to nobody in particular). |
+| **Fails if** | Titles are blank or stars gone. The legacy fallback in `openPractice` is not firing. |
+
+---
+
+## 15. Per-user title and Best Take merge (the actual two-computer case)
+
+Simulate the second bandmate by changing your display name.
+
+| | |
+|---|---|
+| **Do** | Title a take "Dead Reckoning". Then Preferences → Display name → change it to a different name (e.g. `Rob`). Star the same take. Change the name back. |
+| **Expect** | Title still "Dead Reckoning". Star shown. Tooltip: "Best Take: Rob (click to toggle yours)". Two files exist: `.riffnotes.<you>.catalogue.json` and `.riffnotes.Rob.catalogue.json`. `library.riffnotes.json` contains **no** `title` for that take. |
+| **Do** | Click the star as yourself. |
+| **Expect** | Star **stays** (Rob's opinion is not yours to remove). Tooltip still names Rob. |
+| **Fails if** | Star clears — per-user semantics are broken. |
+
+Un-star a **legacy** star (one from step 14) as yourself: it should clear, because nobody's fragment claims it yet.
+
+---
+
+## 16. Section layouts win by recency
+
+| | |
+|---|---|
+| **Do** | On a take, as yourself, create sections Verse + Chorus. Change display name to `Rob`. Add a Bridge section. Change the name back. |
+| **Expect** | You see Verse, Chorus, **and** Bridge — Rob's edit started from your layout and carried it forward. `.riffnotes.<id>.sections.Rob.json` contains all three. |
+| **Do** | As yourself, delete Bridge. |
+| **Expect** | Bridge gone (your layout is now newest). Rob's file is untouched on disk. |
+
+---
+
 ## Automated coverage for reference
 
-`flutter test` — 57 tests. Covers catalogue durability, atomic writes, retained entries, fingerprint
-repository quarantine, and both sync directions against an in-memory Drive store. It does **not**
+`flutter test` — 84 tests. Covers catalogue durability, atomic writes, retained entries, per-user
+catalogue and section fragments (merge rules, legacy fallback, two-user scenarios, quarantine),
+fingerprint repository quarantine, and both sync directions against an in-memory Drive store. It does **not**
 cover `DriveApiFileStore`, the adapter that talks to Google, which is why step 6 exists.
 
 **Before running any of this:** rotate the OAuth client in Google Cloud Console (see

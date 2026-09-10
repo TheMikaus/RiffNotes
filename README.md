@@ -6,10 +6,12 @@ This project was generated and iterated with AI assistance from Codex, based on 
 
 <img width="1265" height="711" alt="image" src="https://github.com/user-attachments/assets/0ec69e17-6da1-494a-b50f-103a6b073434" />
 
-## What's New in v0.6.11
+## What's New in v0.7.0
 
-Data-safety release. See [docs/releases/v0.6.11.md](docs/releases/v0.6.11.md) for detail.
+Data-safety release. See [docs/releases/v0.7.0.md](docs/releases/v0.7.0.md) for detail.
 
+- Titles, Best Take flags, and song sections are now stored per user (`.riffnotes.<user>.catalogue.json`, `.riffnotes.<id>.sections.<user>.json`) and merged on read, so two bandmates editing the same practice on separate computers no longer overwrite each other through Drive. The shared `library.riffnotes.json` only maps filenames to recording ids. Older builds keep reading what they wrote.
+- Best Take is per person: the star shows if anyone starred the take, and the tooltip names who.
 - A damaged `library.riffnotes.json` now stops the practice from opening instead of silently re-keying every recording and orphaning its notes and sections.
 - Practice metadata is written atomically, so an interrupted write cannot leave a truncated file.
 - Catalogue entries for takes that are not present locally are kept, so a partially synced machine can no longer destroy their titles on the next upload.
@@ -183,9 +185,11 @@ Kindle Fire installation/testing depends on your local Android device setup and 
 
 RiffNotes stores portable metadata beside the audio so a practice folder can be copied or synced as a unit.
 
+- `library.riffnotes.json` maps each audio filename to a stable recording id (plus size and modified time for rename detection).
+- `.riffnotes.<user>.catalogue.json` stores one user's titles and Best Take flags, keyed by recording id. Readers merge every user's file: the most recently set title wins; Best Take is true if anyone starred the take.
 - `.riffnotes.<user>.bandnotes` stores one user's annotations.
-- `.riffnotes.<recording-id>.sections.json` stores song sections for one track.
-- `library.riffnotes.json` stores the practice recording catalogue and take metadata.
+- `.riffnotes.<recording-id>.sections.<user>.json` stores one user's section layout for a track. Readers show the most recently saved layout, and every edit starts from it.
+- Legacy `title`/`isBestTake` fields in `library.riffnotes.json` and legacy `.riffnotes.<recording-id>.sections.json` files (written by builds before v0.7.0) are still read and never modified.
 - `.riffnotes-cache\` stores regenerable waveform, processed-audio, and fingerprint cache files.
 - `Masters\` can live inside the band/practice area and contain reference recordings for fingerprint matching.
 
@@ -196,7 +200,7 @@ Cache folders are safe to exclude from backups and cloud sync.
 - A band folder contains practice folders; each practice folder contains audio and portable metadata.
 - WAV, MP3, and FLAC are supported.
 - A recording has a stable ID, so renaming or WAV-to-MP3 replacement never detaches notes or sections.
-- Per-user annotations use `.riffnotes.<user>.bandnotes` JSON files in the practice folder.
+- Everything a user can edit -- annotations, titles, Best Take, sections -- lives in a per-user file in the practice folder and is merged on read. Two machines never write the same file, so syncing through Drive cannot clobber a bandmate's edits.
 - Google Drive-style local-folder sync is manual per practice folder. Regenerable cache is excluded.
 - Direct Google Drive account sync is available for selected practices and Initialize Sync. See [docs/google-drive-setup.md](docs/google-drive-setup.md).
 - Lengthy work is queued in background operations with progress, live status, and cancellation where safe.
