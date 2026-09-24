@@ -78,12 +78,23 @@ class AudioController extends ChangeNotifier {
   List<AudioDevice> get audioDevices => _audioDevices;
   AudioDevice get audioDevice => _audioDevice;
 
-  Future<void> load(Recording recording,
-      {bool autoPlay = false, File? playbackFile}) async {
+  /// Loads [recording] (or its processed [playbackFile]).
+  ///
+  /// [startAt] resumes from a position in the new file. It is applied only
+  /// once the player has reported the media's duration: a seek issued
+  /// straight after `open()` -- before the demuxer is ready -- is silently
+  /// dropped by media_kit, which is why changing the volume boost used to
+  /// restart the take from the top.
+  Future<void> load(
+    Recording recording, {
+    bool autoPlay = false,
+    File? playbackFile,
+    Duration? startAt,
+  }) async {
     final player = _player;
     if (player == null) {
       _recording = recording;
-      _position = Duration.zero;
+      _position = startAt ?? Duration.zero;
       _duration = null;
       _error = null;
       _isLoading = false;
@@ -99,15 +110,28 @@ class AudioController extends ChangeNotifier {
     notifyListeners();
     try {
       await player.stop();
+      final resume = startAt != null && startAt > Duration.zero;
       await player.open(
         Media((playbackFile ?? recording.file).uri.toString()),
-        play: autoPlay,
+        // When resuming, start paused so the seek lands before audio begins;
+        // play() is issued below once the position is in place.
+        play: autoPlay && !resume,
       );
       if (request != _loadRequest) {
         return;
       }
-      _duration =
-          player.state.duration == Duration.zero ? null : player.state.duration;
+      final duration = await _awaitDuration(player);
+      if (request != _loadRequest) {
+        return;
+      }
+      _duration = duration;
+      if (resume) {
+        final target =
+            duration != null && startAt > duration ? duration : startAt;
+        await player.seek(target);
+        _position = target;
+        if (autoPlay) await player.play();
+      }
     } catch (_) {
       if (request == _loadRequest) {
         _error =
@@ -118,6 +142,20 @@ class AudioController extends ChangeNotifier {
         _isLoading = false;
         notifyListeners();
       }
+    }
+  }
+
+  /// The media's duration once the player knows it, or null if it never
+  /// reports one within a short grace period (a broken file, for example).
+  Future<Duration?> _awaitDuration(Player player) async {
+    final known = player.state.duration;
+    if (known > Duration.zero) return known;
+    try {
+      return await player.stream.duration
+          .firstWhere((value) => value > Duration.zero)
+          .timeout(const Duration(seconds: 3));
+    } on TimeoutException {
+      return null;
     }
   }
 

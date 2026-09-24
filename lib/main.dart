@@ -761,9 +761,12 @@ class _LibraryScreenState extends State<LibraryScreen> {
       });
       await _preferences.setBoost(recording.id, decibels);
       await _preferences.setChannelMode(recording.id, channelMode);
-      await _audio.load(recording,
-          playbackFile: source, autoPlay: resumePlaying);
-      await _audio.seek(resumeAt);
+      await _audio.load(
+        recording,
+        playbackFile: source,
+        autoPlay: resumePlaying,
+        startAt: resumeAt,
+      );
     } on ProcessException {
       if (mounted)
         ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
@@ -4190,7 +4193,14 @@ class _LibraryScreenState extends State<LibraryScreen> {
                     ),
                     const SizedBox(height: 12),
                     DropdownButtonFormField<String>(
-                      value: masterDropdownValue,
+                      // A DropdownButton asserts that its value matches
+                      // exactly one item; guard every dynamic dropdown here
+                      // so a stale or absent selection renders as "none"
+                      // instead of taking the whole screen down.
+                      value: masters.recordings
+                              .any((item) => item.id == masterDropdownValue)
+                          ? masterDropdownValue
+                          : null,
                       decoration: const InputDecoration(
                           labelText: 'Correct master song'),
                       items: [
@@ -4210,9 +4220,15 @@ class _LibraryScreenState extends State<LibraryScreen> {
                     const SizedBox(height: 12),
                     if (correctType == 'new') ...[
                       DropdownButtonFormField<String>(
-                        value: songTitleController.text.trim().isEmpty
-                            ? null
-                            : songTitleController.text.trim(),
+                        // Only a remembered title is a valid value. While the
+                        // user types a brand-new title in the field below,
+                        // the partial text is not in the list, and using it
+                        // as the value crashed the dialog on the first
+                        // keystroke.
+                        value: recentSongTitles
+                                .contains(songTitleController.text.trim())
+                            ? songTitleController.text.trim()
+                            : null,
                         decoration: const InputDecoration(
                             labelText: 'Quick select remembered title'),
                         items: [
@@ -4242,16 +4258,24 @@ class _LibraryScreenState extends State<LibraryScreen> {
                       const SizedBox(height: 12),
                     ],
                     DropdownButtonFormField<String?>(
-                      value: selectedSectionLabel,
+                      // Labels are deduplicated: a master with two "Chorus"
+                      // sections would otherwise produce two items with the
+                      // same value, which the dropdown rejects.
+                      value: sections
+                              .any((item) => item.label == selectedSectionLabel)
+                          ? selectedSectionLabel
+                          : null,
                       decoration:
                           const InputDecoration(labelText: 'Correct section'),
                       items: [
                         const DropdownMenuItem<String?>(
                             value: null, child: Text('No specific section')),
-                        for (final section in sections)
+                        for (final label in <String>{
+                          for (final section in sections) section.label,
+                        })
                           DropdownMenuItem<String?>(
-                            value: section.label,
-                            child: Text(section.label),
+                            value: label,
+                            child: Text(label),
                           ),
                       ],
                       onChanged: correctType == 'section'
@@ -7960,13 +7984,26 @@ class _PlayerPanelState extends State<_PlayerPanel> {
                           itemBuilder: (context) => const [
                             PopupMenuItem(
                                 value: 0, child: Text('Original level (0 dB)')),
+                            PopupMenuItem(value: 2, child: Text('Boost +2 dB')),
                             PopupMenuItem(value: 3, child: Text('Boost +3 dB')),
+                            PopupMenuItem(value: 4, child: Text('Boost +4 dB')),
                             PopupMenuItem(value: 6, child: Text('Boost +6 dB')),
+                            PopupMenuItem(value: 8, child: Text('Boost +8 dB')),
                             PopupMenuItem(value: 9, child: Text('Boost +9 dB')),
+                            PopupMenuItem(
+                                value: 10, child: Text('Boost +10 dB')),
                             PopupMenuItem(
                                 value: 12, child: Text('Boost +12 dB')),
                             PopupMenuItem(
                                 value: 15, child: Text('Boost +15 dB')),
+                            // Above +15 the FFmpeg volume filter will clip
+                            // anything that was not genuinely quiet.
+                            PopupMenuItem(
+                                value: 18,
+                                child: Text('Boost +18 dB (may clip)')),
+                            PopupMenuItem(
+                                value: 20,
+                                child: Text('Boost +20 dB (may clip)')),
                           ],
                           child: Padding(
                             padding: const EdgeInsets.symmetric(
