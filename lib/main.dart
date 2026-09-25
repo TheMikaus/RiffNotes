@@ -569,7 +569,14 @@ class _LibraryScreenState extends State<LibraryScreen> {
 
   Future<void> _selectRecording(Recording recording,
       {bool autoPlay = false}) async {
-    final rememberedBoost = _preferences.boostFor(recording.id);
+    final practice = _selected;
+    // A take's own boost wins; otherwise the practice-wide default applies,
+    // for the case where a whole rehearsal was recorded quietly.
+    final rememberedBoost = _preferences.hasBoostFor(recording.id)
+        ? _preferences.boostFor(recording.id)
+        : practice == null
+            ? 0.0
+            : _preferences.practiceBoostFor(practice.directory.path);
     final rememberedChannelMode = _preferences.channelModeFor(recording.id);
     setState(() {
       _selectedRecording = recording;
@@ -577,30 +584,12 @@ class _LibraryScreenState extends State<LibraryScreen> {
       _volumeBoostDb = rememberedBoost;
       _channelMode = rememberedChannelMode;
     });
-    final practice = _selected;
     if (practice != null) {
       unawaited(_waveform.load(practice, recording));
     }
-    File? playbackFile;
-    if (practice != null) {
-      try {
-        playbackFile = await _audioProcessing.createPlaybackFile(
-          practice,
-          recording,
-          decibels: rememberedBoost,
-          channelMode: rememberedChannelMode,
-        );
-      } on StateError {
-        if (mounted) {
-          setState(() {
-            _volumeBoostDb = 0;
-            _channelMode = PlaybackChannelMode.stereo;
-          });
-        }
-      }
-    }
-    await _audio.load(recording,
-        autoPlay: autoPlay, playbackFile: playbackFile);
+    await _audio.setProcessing(
+        decibels: rememberedBoost, channelMode: rememberedChannelMode);
+    await _audio.load(recording, autoPlay: autoPlay);
     if (_selected != null) {
       await _preferences.rememberSelection(_selected!.name, recording.id);
     }
@@ -719,6 +708,10 @@ class _LibraryScreenState extends State<LibraryScreen> {
   }
 
   Future<void> _setVolumeBoost(double decibels) async {
+    if (decibels == kApplyBoostToPractice) {
+      await _applyBoostToPractice();
+      return;
+    }
     await _setPlaybackProcessing(decibels: decibels, channelMode: _channelMode);
   }
 
@@ -731,61 +724,41 @@ class _LibraryScreenState extends State<LibraryScreen> {
     required double decibels,
     required PlaybackChannelMode channelMode,
   }) async {
-    final practice = _selected;
     final recording = _selectedRecording;
-    if (practice == null || recording == null) return;
-    final resumeAt = _audio.position;
-    final resumePlaying = _audio.isPlaying;
-    try {
-      final source =
-          await _activity.run('Preparing playback audio', (update) async {
-        final processingLabel = _playbackProcessingLabel(decibels, channelMode);
-        update(
-            null,
-            decibels == 0 && channelMode == PlaybackChannelMode.stereo
-                ? 'Restoring original playback…'
-                : 'Creating $processingLabel playback copy…');
-        final result = await _audioProcessing.createPlaybackFile(
-          practice,
-          recording,
-          decibels: decibels,
-          channelMode: channelMode,
-        );
-        update(1, 'Playback audio ready');
-        return result;
-      });
-      if (!mounted || _selectedRecording?.id != recording.id) return;
-      setState(() {
-        _volumeBoostDb = decibels;
-        _channelMode = channelMode;
-      });
-      await _preferences.setBoost(recording.id, decibels);
-      await _preferences.setChannelMode(recording.id, channelMode);
-      await _audio.load(
-        recording,
-        playbackFile: source,
-        autoPlay: resumePlaying,
-        startAt: resumeAt,
-      );
-    } on ProcessException {
-      if (mounted)
-        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
-            content:
-                Text('FFmpeg is required to change playback processing.')));
-    } on StateError catch (error) {
-      if (mounted)
-        ScaffoldMessenger.of(context)
-            .showSnackBar(SnackBar(content: Text(error.message)));
-    }
+    if (recording == null) return;
+    // Applied live through mpv's filter chain: no FFmpeg render, no reload,
+    // and the playback position is untouched.
+    await _audio.setProcessing(decibels: decibels, channelMode: channelMode);
+    if (!mounted || _selectedRecording?.id != recording.id) return;
+    setState(() {
+      _volumeBoostDb = decibels;
+      _channelMode = channelMode;
+    });
+    await _preferences.setBoost(recording.id, decibels);
+    await _preferences.setChannelMode(recording.id, channelMode);
   }
 
-  String _playbackProcessingLabel(
-      double decibels, PlaybackChannelMode channelMode) {
-    final parts = <String>[
-      if (channelMode != PlaybackChannelMode.stereo) channelMode.label,
-      if (decibels > 0) '+${decibels.toStringAsFixed(0)} dB',
-    ];
-    return parts.isEmpty ? 'original' : parts.join(', ');
+  /// Makes the current boost the default for every take in the selected
+  /// practice. Takes that have their own boost keep it.
+  Future<void> _applyBoostToPractice() async {
+    final practice = _selected;
+    if (practice == null || _selectedIsMasters) return;
+    await _preferences.setPracticeBoost(
+        practice.directory.path, _volumeBoostDb);
+    final recording = _selectedRecording;
+    if (recording != null) {
+      // The current take now reads from the practice default rather than
+      // carrying its own copy of the same value.
+      await _preferences.setBoost(recording.id, 0);
+    }
+    if (mounted) {
+      final label = _volumeBoostDb == 0
+          ? 'original level'
+          : '+${_volumeBoostDb.toStringAsFixed(0)} dB';
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+          content: Text(
+              'Takes in ${practice.name} without their own boost now play at $label.')));
+    }
   }
 
   void _applyPreferredAudioOutputIfPossible() {
@@ -6101,14 +6074,33 @@ class _LibraryScreenState extends State<LibraryScreen> {
   }
 
   Future<void> _exportAudio(
-      Recording recording, SongSection? section, String extension) async {
+      Recording recording, SongSection? section, String extension,
+      {bool toPractice = false}) async {
     final baseName = _exportBaseName(recording, section);
-    final selectedPath = await FilePicker.platform.saveFile(
-      dialogTitle: section == null ? 'Export track' : 'Export section',
-      fileName: '$baseName.$extension',
-      type: FileType.custom,
-      allowedExtensions: [extension],
-    );
+    final String? selectedPath;
+    if (toPractice) {
+      final practice = _selected;
+      if (practice == null) return;
+      // The processing is baked into the filename so two different boosts of
+      // the same take do not overwrite each other.
+      final suffix = [
+        if (_channelMode != PlaybackChannelMode.stereo)
+          _channelMode.storageValue,
+        if (_volumeBoostDb > 0) 'plus${_volumeBoostDb.toStringAsFixed(0)}dB',
+      ].join('_');
+      selectedPath = path.join(
+        practice.directory.path,
+        'Boosted',
+        '$baseName${suffix.isEmpty ? '' : '_$suffix'}.$extension',
+      );
+    } else {
+      selectedPath = await FilePicker.platform.saveFile(
+        dialogTitle: section == null ? 'Export track' : 'Export section',
+        fileName: '$baseName.$extension',
+        type: FileType.custom,
+        allowedExtensions: [extension],
+      );
+    }
     if (selectedPath == null) return;
     final output = File(selectedPath);
     try {
@@ -6828,7 +6820,8 @@ class _RecordingList extends StatelessWidget {
   final bool canUndoSectionEdit;
   final Future<void> Function() onUndoSectionEdit;
   final Future<void> Function(
-          Recording recording, SongSection? section, String extension)
+          Recording recording, SongSection? section, String extension,
+          {bool toPractice})
       onExportAudio;
   final ValueChanged<Recording> onConvertToMp3;
   final ValueChanged<Recording> onSaveRecordingAsMaster;
@@ -7363,6 +7356,10 @@ class _RecordingList extends StatelessWidget {
   }
 }
 
+/// Sentinel passed through the boost menu's double callback meaning "make the
+/// current boost the default for the whole practice". Real boosts are >= 0.
+const kApplyBoostToPractice = -1000.0;
+
 class _PlayerPanel extends StatefulWidget {
   const _PlayerPanel({
     required this.controller,
@@ -7419,7 +7416,8 @@ class _PlayerPanel extends StatefulWidget {
   final bool canUndoSectionEdit;
   final Future<void> Function() onUndoSectionEdit;
   final Future<void> Function(
-          Recording recording, SongSection? section, String extension)
+          Recording recording, SongSection? section, String extension,
+          {bool toPractice})
       onExportAudio;
   final ValueChanged<Recording> onConvertToMp3;
   final ValueChanged<Recording> onSaveRecordingAsMaster;
@@ -7442,10 +7440,17 @@ class _PlayerPanel extends StatefulWidget {
 }
 
 class _ExportChoice {
-  const _ExportChoice(this.extension, this.sectionOnly);
+  const _ExportChoice(this.extension, this.sectionOnly,
+      {this.toPractice = false});
 
   final String extension;
   final bool sectionOnly;
+
+  /// Write into `<practice>/Boosted/` without a file picker. That folder
+  /// syncs (it is not a cache folder) but its files are not takes (only
+  /// files directly in the practice folder are), so a boosted copy can be
+  /// listened to on another device without cluttering the take list.
+  final bool toPractice;
 }
 
 class _PlayerPanelState extends State<_PlayerPanel> {
@@ -7981,29 +7986,21 @@ class _PlayerPanelState extends State<_PlayerPanel> {
                         PopupMenuButton<double>(
                           tooltip: 'Playback volume boost',
                           onSelected: onSetVolumeBoost,
-                          itemBuilder: (context) => const [
-                            PopupMenuItem(
+                          itemBuilder: (context) => [
+                            const PopupMenuItem(
                                 value: 0, child: Text('Original level (0 dB)')),
-                            PopupMenuItem(value: 2, child: Text('Boost +2 dB')),
-                            PopupMenuItem(value: 3, child: Text('Boost +3 dB')),
-                            PopupMenuItem(value: 4, child: Text('Boost +4 dB')),
-                            PopupMenuItem(value: 6, child: Text('Boost +6 dB')),
-                            PopupMenuItem(value: 8, child: Text('Boost +8 dB')),
-                            PopupMenuItem(value: 9, child: Text('Boost +9 dB')),
+                            for (final db in const [2, 3, 4, 6, 8, 9, 10, 12, 15, 18, 20])
+                              PopupMenuItem(
+                                  value: db.toDouble(),
+                                  child: Text('Boost +$db dB')),
+                            const PopupMenuDivider(),
+                            // Routed through the same double callback via a
+                            // sentinel so the practice-wide default needs no
+                            // extra plumbing through two widget layers.
                             PopupMenuItem(
-                                value: 10, child: Text('Boost +10 dB')),
-                            PopupMenuItem(
-                                value: 12, child: Text('Boost +12 dB')),
-                            PopupMenuItem(
-                                value: 15, child: Text('Boost +15 dB')),
-                            // Above +15 the FFmpeg volume filter will clip
-                            // anything that was not genuinely quiet.
-                            PopupMenuItem(
-                                value: 18,
-                                child: Text('Boost +18 dB (may clip)')),
-                            PopupMenuItem(
-                                value: 20,
-                                child: Text('Boost +20 dB (may clip)')),
+                                value: kApplyBoostToPractice,
+                                child: Text(
+                                    'Use ${_volumeLabel(volumeBoostDb)} for the whole practice')),
                           ],
                           child: Padding(
                             padding: const EdgeInsets.symmetric(
@@ -8051,7 +8048,8 @@ class _PlayerPanelState extends State<_PlayerPanel> {
                             final section =
                                 choice.sectionOnly ? _selectedSection : null;
                             unawaited(onExportAudio(
-                                recording, section, choice.extension));
+                                recording, section, choice.extension,
+                                toPractice: choice.toPractice));
                           },
                           itemBuilder: (context) => [
                             const PopupMenuItem(
@@ -8060,6 +8058,13 @@ class _PlayerPanelState extends State<_PlayerPanel> {
                             const PopupMenuItem(
                                 value: _ExportChoice('mp3', false),
                                 child: Text('Export track as MP3')),
+                            if (volumeBoostDb > 0 ||
+                                channelMode != PlaybackChannelMode.stereo)
+                              const PopupMenuItem(
+                                  value: _ExportChoice('mp3', false,
+                                      toPractice: true),
+                                  child: Text(
+                                      'Save boosted copy to practice (MP3)')),
                             if (_selectedSection != null) ...const [
                               PopupMenuDivider(),
                               PopupMenuItem(

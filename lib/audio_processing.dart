@@ -22,46 +22,42 @@ enum PlaybackChannelMode {
       );
 }
 
-class AudioProcessingRepository {
-  Future<File> createPlaybackFile(
-    PracticeFolder practice,
-    Recording recording, {
-    required double decibels,
-    required PlaybackChannelMode channelMode,
-  }) async {
-    if (decibels <= 0 && channelMode == PlaybackChannelMode.stereo) {
-      return recording.file;
-    }
-    final output = File(path.join(practice.directory.path, '.riffnotes-cache',
-        '${recording.id}-${channelMode.storageValue}-gain-${decibels.toStringAsFixed(0)}.wav'));
-    if (await output.exists()) return output;
-    await output.parent.create(recursive: true);
-    final filters = <String>[
-      if (channelMode != PlaybackChannelMode.stereo)
-        _channelFilter(channelMode),
-      if (decibels > 0) 'volume=${decibels.toStringAsFixed(1)}dB',
-    ];
-    final result = await Process.run(
-        'ffmpeg',
-        <String>[
-          '-y',
-          '-v',
-          'error',
-          '-i',
-          recording.file.path,
-          if (filters.isNotEmpty) ...['-af', filters.join(',')],
-          '-c:a',
-          'pcm_s16le',
-          output.path,
-        ],
-        stdoutEncoding: null,
-        stderrEncoding: null);
-    if (result.exitCode != 0 || !await output.exists()) {
-      throw StateError('FFmpeg could not create the processed playback file.');
-    }
-    return output;
-  }
+/// The libavfilter graph that implements a boost and channel mode, or null
+/// when neither is set.
+///
+/// One definition feeds both consumers so what you hear is what you export:
+/// FFmpeg receives it as `-af <graph>` for exports, and mpv receives the same
+/// graph as `af=lavfi=[<graph>]` for live playback. A limiter follows any
+/// boost so a loud passage in an otherwise quiet take cannot clip.
+String? playbackFilterGraph({
+  required double decibels,
+  required PlaybackChannelMode channelMode,
+}) {
+  final filters = <String>[
+    if (channelMode != PlaybackChannelMode.stereo)
+      _channelFilter(channelMode),
+    if (decibels > 0) ...[
+      'volume=${decibels.toStringAsFixed(1)}dB',
+      'alimiter=limit=0.95',
+    ],
+  ];
+  return filters.isEmpty ? null : filters.join(',');
+}
 
+String _channelFilter(PlaybackChannelMode channelMode) {
+  switch (channelMode) {
+    case PlaybackChannelMode.stereo:
+      return 'anull';
+    case PlaybackChannelMode.muteLeft:
+      return 'aformat=channel_layouts=stereo,pan=stereo|c0=0*c0|c1=c1';
+    case PlaybackChannelMode.muteRight:
+      return 'aformat=channel_layouts=stereo,pan=stereo|c0=c0|c1=0*c1';
+    case PlaybackChannelMode.mono:
+      return 'aformat=channel_layouts=stereo,pan=mono|c0=0.5*c0+0.5*c1';
+  }
+}
+
+class AudioProcessingRepository {
   Future<File> exportAudio({
     required Recording recording,
     required File output,
@@ -71,7 +67,8 @@ class AudioProcessingRepository {
     int? endMs,
   }) async {
     await output.parent.create(recursive: true);
-    final filters = _filters(decibels: decibels, channelMode: channelMode);
+    final graph =
+        playbackFilterGraph(decibels: decibels, channelMode: channelMode);
     final durationMs = startMs != null && endMs != null && endMs > startMs
         ? endMs - startMs
         : null;
@@ -96,7 +93,7 @@ class AudioProcessingRepository {
             '-t',
             _seconds(durationMs),
           ],
-          if (filters.isNotEmpty) ...['-af', filters.join(',')],
+          if (graph != null) ...['-af', graph],
           ...codecArgs,
           output.path,
         ],
@@ -173,29 +170,6 @@ class AudioProcessingRepository {
     }
     return output;
   }
-
-  String _channelFilter(PlaybackChannelMode channelMode) {
-    switch (channelMode) {
-      case PlaybackChannelMode.stereo:
-        return 'anull';
-      case PlaybackChannelMode.muteLeft:
-        return 'aformat=channel_layouts=stereo,pan=stereo|c0=0*c0|c1=c1';
-      case PlaybackChannelMode.muteRight:
-        return 'aformat=channel_layouts=stereo,pan=stereo|c0=c0|c1=0*c1';
-      case PlaybackChannelMode.mono:
-        return 'aformat=channel_layouts=stereo,pan=mono|c0=0.5*c0+0.5*c1';
-    }
-  }
-
-  List<String> _filters({
-    required double decibels,
-    required PlaybackChannelMode channelMode,
-  }) =>
-      <String>[
-        if (channelMode != PlaybackChannelMode.stereo)
-          _channelFilter(channelMode),
-        if (decibels > 0) 'volume=${decibels.toStringAsFixed(1)}dB',
-      ];
 
   String _seconds(int milliseconds) => (milliseconds / 1000).toStringAsFixed(3);
 }

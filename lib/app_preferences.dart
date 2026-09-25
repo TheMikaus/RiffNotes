@@ -18,6 +18,7 @@ class AppPreferences extends ChangeNotifier {
   static const _lastRecordingsByPracticeKey = 'last_recordings_by_practice';
   static const _boostsKey = 'playback_boosts';
   static const _channelModesKey = 'playback_channel_modes';
+  static const _practiceBoostsKey = 'practice_boosts';
   static const _audioOutputDeviceKey = 'audio_output_device';
   static const _googleClientIdKey = 'google_client_id';
   static const _googleClientSecretKey = 'google_client_secret';
@@ -43,6 +44,7 @@ class AppPreferences extends ChangeNotifier {
   String? _lastRecording;
   Map<String, String> _lastRecordingsByPractice = <String, String>{};
   Map<String, double> _boostsByRecording = <String, double>{};
+  Map<String, double> _boostsByPractice = <String, double>{};
   Map<String, PlaybackChannelMode> _channelModesByRecording =
       <String, PlaybackChannelMode>{};
   String? _audioOutputDevice;
@@ -72,6 +74,16 @@ class AppPreferences extends ChangeNotifier {
       _lastRecordingsByPractice[practice] ??
       (practice == _lastPractice ? _lastRecording : null);
   double boostFor(String recordingId) => _boostsByRecording[recordingId] ?? 0;
+
+  /// True when the take has its own boost. A take without one falls back to
+  /// [practiceBoostFor]; setting a take to 0 dB clears its entry, so "back to
+  /// original" inside a boosted practice means lowering the practice default.
+  bool hasBoostFor(String recordingId) =>
+      _boostsByRecording.containsKey(recordingId);
+
+  /// Practice-wide default boost, for a rehearsal that was recorded quietly.
+  double practiceBoostFor(String practicePath) =>
+      _boostsByPractice[practicePath] ?? 0;
   PlaybackChannelMode channelModeFor(String recordingId) =>
       _channelModesByRecording[recordingId] ?? PlaybackChannelMode.stereo;
   String? get audioOutputDevice => _audioOutputDevice;
@@ -207,6 +219,18 @@ class AppPreferences extends ChangeNotifier {
             .map((key, value) => MapEntry(key, (value as num).toDouble()));
       } on FormatException {
         _boostsByRecording = <String, double>{};
+      }
+    }
+    final practiceBoosts = store.getString(_practiceBoostsKey);
+    if (practiceBoosts != null) {
+      try {
+        final decoded = jsonDecode(practiceBoosts) as Map<String, dynamic>;
+        _boostsByPractice = decoded
+            .map((key, value) => MapEntry(key, (value as num).toDouble()));
+      } on FormatException {
+        _boostsByPractice = <String, double>{};
+      } on TypeError {
+        _boostsByPractice = <String, double>{};
       }
     }
     final channelModes = store.getString(_channelModesKey);
@@ -478,6 +502,16 @@ class AppPreferences extends ChangeNotifier {
     }
     final store = await SharedPreferences.getInstance();
     await store.setString(_boostsKey, jsonEncode(_boostsByRecording));
+  }
+
+  Future<void> setPracticeBoost(String practicePath, double decibels) async {
+    if (decibels == 0) {
+      _boostsByPractice.remove(practicePath);
+    } else {
+      _boostsByPractice[practicePath] = decibels;
+    }
+    final store = await SharedPreferences.getInstance();
+    await store.setString(_practiceBoostsKey, jsonEncode(_boostsByPractice));
   }
 
   Future<void> setChannelMode(

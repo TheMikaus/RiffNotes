@@ -76,13 +76,15 @@ Exclusions are centralized in `domain.dart` (`ignoredPracticeFolderNames`): `.ba
 
 **3.2 Keyboard** — `_handleWaveformKey`: `Space` play/pause, `←`/`→` seek ∓5 s, `Delete`/`Backspace` delete selected section, `Ctrl+Z` undo section edit.
 
-**3.3 Processed playback** — `_setPlaybackProcessing` → `AudioProcessingRepository.createPlaybackFile`. Boost (0 to +15 dB), mute-left, mute-right, and mono fold-down are **rendered by FFmpeg into a cache file**, not applied live:
+**3.3 Processed playback** — `_setPlaybackProcessing` → `AudioController.setProcessing`. Boost (0 to +20 dB) and channel mode (mute-left, mute-right, mono) are applied **live through mpv's `af` property** as `lavfi=[<graph>]`, where `<graph>` comes from `playbackFilterGraph` in `audio_processing.dart`. No FFmpeg render, no reload, so the playback position is untouched and nothing is written to disk. A limiter (`alimiter=limit=0.95`) follows any boost so a loud passage cannot clip.
 
-```
-.riffnotes-cache/<id>-<mode>-gain-<db>.wav
-```
+**Why one graph:** export (`exportAudio`, FFmpeg `-af`) uses the same `playbackFilterGraph` string, so what you hear is what "Save boosted copy" writes. **Why the debug read-back:** media_kit discards `mpv_set_property_string`'s error code, so `_applyFilters` reads `af` back in debug builds and logs a rejection to the run console.
 
-**Why a file:** media_kit has no reliable cross-platform filter graph, and rendering once makes repeat playback instant. **The filename is the cache key** — the function returns the original file untouched when no processing is needed, and returns the existing cache file when present. Settings are remembered per recording.
+**Resolution order:** a take's own boost (`AppPreferences.hasBoostFor`) wins; otherwise the practice-wide default (`practiceBoostFor`, set from the boost menu's "Use … for the whole practice"). Setting a take to 0 dB clears its entry, so "back to original" inside a boosted practice means lowering the practice default. Channel mode is per take only.
+
+**Save boosted copy** — the Export menu's "Save boosted copy to practice (MP3)" writes `<practice>/Boosted/<name>_<mode>_plusNdB.mp3` without a picker. `Boosted/` syncs (only cache folders are excluded) but its files are not takes (only files directly in the practice folder are), so the copy can be played on another device without cluttering the take list.
+
+Pre-0.7.0 builds rendered processed playback to `.riffnotes-cache/<id>-<mode>-gain-<db>.wav`; those files are now unused and are removed by the existing "Clear generated cache" action.
 
 **3.4 Output device** — `_setAudioOutputDevice` / `_applyPreferredAudioOutputIfPossible`. The remembered device is re-applied whenever it reappears. **Why:** review happens on monitors or an interface, not default laptop speakers.
 

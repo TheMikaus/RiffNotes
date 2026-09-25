@@ -16,8 +16,8 @@ Make band-practice review fast: identify takes, listen, annotate, share notes, p
 2. Opening a practice lists WAV/WAVE, MP3, and FLAC recordings (typical maximum: 40 takes) while excluding cache and backup folders.
 3. The app remembers the band folder, last practice, and last selected recording per practice, with safe fallbacks when files move or disappear.
 4. The user can play, pause, seek, zoom, and view a cached waveform.
-5. The playback controls support volume boost up to +15 dB, left/right mute, mono fold-down, and Windows output-device selection.
-6. Processed playback is cached and remembered per recording where appropriate.
+5. The playback controls support volume boost up to +20 dB (with a limiter), left/right mute, mono fold-down, and Windows output-device selection. Processing is applied live and keeps the playback position.
+6. Boost and channel mode are remembered per recording; a practice-wide default boost covers takes without their own. A boosted copy can be saved as MP3 into `<practice>/Boosted/`, which syncs but is not listed as a take.
 7. A recording can be given a song title and safely renamed to `##SongName_Take#`.
 8. The user can create point annotations and range annotations (a note with a start/end span), plus named sections.
 9. Notes and sections are clickable playback targets. Range notes play the selected range; sections can jump to start and loop.

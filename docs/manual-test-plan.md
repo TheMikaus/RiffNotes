@@ -278,9 +278,25 @@ Un-star a **legacy** star (one from step 14) as yourself: it should clear, becau
 
 ---
 
+## 17. Live boost, practice default, and boosted copy
+
+| | |
+|---|---|
+| **Do** | Play a take, let it run to ~1:00, then pick **Boost +9 dB**. |
+| **Expect** | Louder **immediately**, no pause, position stays at ~1:00. Check the run console (if launched via `flutter run`) for any line starting `[audio] mpv rejected` — there must be none. |
+| **Fails if** | Playback restarts, stalls, or the level does not change. |
+| **Do** | Pick **Mute left**, then **Mono**, then back to **Stereo**. |
+| **Expect** | Each takes effect instantly at the same position. |
+| **Do** | With +9 dB set, pick **Use +9 dB for the whole practice**. Select a different take in the same practice that you have never boosted. |
+| **Expect** | It plays at +9 dB. The boost label shows +9 dB. |
+| **Do** | Export menu → **Save boosted copy to practice (MP3)**. |
+| **Expect** | `<practice>\Boosted\<name>_plus9dB.mp3` exists, sounds like the boosted playback, and does **not** appear in the take list. Upload the practice: the file is listed as a candidate. |
+
+---
+
 ## Automated coverage for reference
 
-`flutter test` — 84 tests. Covers catalogue durability, atomic writes, retained entries, per-user
+`flutter test` — 94 tests. Covers catalogue durability, atomic writes, retained entries, per-user
 catalogue and section fragments (merge rules, legacy fallback, two-user scenarios, quarantine),
 fingerprint repository quarantine, and both sync directions against an in-memory Drive store. It does **not**
 cover `DriveApiFileStore`, the adapter that talks to Google, which is why step 6 exists.

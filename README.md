@@ -36,8 +36,9 @@ The repository contains an early but usable Windows-focused practice-review appl
 - Drag section starts/stops and add adjacent sections from the section lane.
 - View notes for the selected track or the whole practice.
 - Mark multiple recordings as Best Take.
-- Apply remembered playback boosts up to +15 dB using cached processed audio.
-- Mute the left channel, mute the right channel, or fold playback down to mono; processed playback is cached and remembered per recording.
+- Boost playback up to +20 dB live, with a limiter, and no reload — the position is kept. Remembered per take, with an optional practice-wide default for a rehearsal that was recorded quietly.
+- Mute the left channel, mute the right channel, or fold playback down to mono, live; remembered per recording.
+- Save a boosted copy of a take as MP3 into `<practice>\Boosted\`, which syncs to Drive without becoming a take.
 - Select the Windows playback output device.
 - Export processed tracks or selected clips as WAV or MP3.
 - Convert WAV/WAVE/FLAC recordings to MP3, replacing the source recording after a successful conversion.

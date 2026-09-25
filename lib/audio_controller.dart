@@ -4,6 +4,7 @@ import 'dart:io';
 import 'package:flutter/foundation.dart';
 import 'package:media_kit/media_kit.dart';
 
+import 'audio_processing.dart';
 import 'domain.dart';
 
 class AudioController extends ChangeNotifier {
@@ -67,6 +68,8 @@ class AudioController extends ChangeNotifier {
   bool _isLoopingRange = false;
   List<AudioDevice> _audioDevices = const [AudioDevice('auto', '')];
   AudioDevice _audioDevice = AudioDevice.auto();
+  double _decibels = 0;
+  PlaybackChannelMode _channelMode = PlaybackChannelMode.stereo;
 
   Recording? get recording => _recording;
   Duration get position => _position;
@@ -120,6 +123,9 @@ class AudioController extends ChangeNotifier {
       if (request != _loadRequest) {
         return;
       }
+      // mpv keeps the filter chain across files, but re-applying is cheap and
+      // guarantees a freshly opened take honours the current settings.
+      await _applyFilters();
       final duration = await _awaitDuration(player);
       if (request != _loadRequest) {
         return;
@@ -143,6 +149,46 @@ class AudioController extends ChangeNotifier {
         notifyListeners();
       }
     }
+  }
+
+  double get decibels => _decibels;
+  PlaybackChannelMode get channelMode => _channelMode;
+
+  /// Applies a boost and channel mode to live playback.
+  ///
+  /// Implemented as mpv's `af` property rather than an FFmpeg-rendered copy of
+  /// the file: it takes effect instantly, needs no reload (so the position is
+  /// untouched), and writes nothing to disk. The graph is the same one
+  /// exports use, so what you hear is what "Save boosted copy" produces.
+  Future<void> setProcessing({
+    required double decibels,
+    required PlaybackChannelMode channelMode,
+  }) async {
+    _decibels = decibels;
+    _channelMode = channelMode;
+    await _applyFilters();
+    notifyListeners();
+  }
+
+  Future<void> _applyFilters() async {
+    final platform = _player?.platform;
+    if (platform is! NativePlayer) return;
+    final graph =
+        playbackFilterGraph(decibels: _decibels, channelMode: _channelMode);
+    final value = graph == null ? '' : 'lavfi=[$graph]';
+    await platform.setProperty('af', value);
+    // media_kit discards mpv_set_property_string's error code, so a rejected
+    // filter string would fail silently and playback would simply stay at
+    // the old level. Read it back in debug builds so that shows up in the
+    // run console instead.
+    assert(() {
+      unawaited(platform.getProperty('af').then((applied) {
+        if (applied.trim() != value.trim()) {
+          debugPrint('[audio] mpv rejected af="$value" (still "$applied")');
+        }
+      }));
+      return true;
+    }());
   }
 
   /// The media's duration once the player knows it, or null if it never
